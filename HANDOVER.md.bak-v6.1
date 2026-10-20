@@ -1,0 +1,151 @@
+# BiliDo(B站下载面板) · AI 交接书 (HANDOVER) · v6.0
+
+> 本文档写给接手本项目的 AI 或人类维护者。读完第 0/5/6 节即可安全动手。
+
+## 0. 一分钟速览
+
+- **是什么**：跑在 Android(Termux) / Windows / Linux 上的**单文件夹便携 Web 应用**：
+  B站视频下载（分P批量/断点续跑）+ 本地媒体库（封面/搜索/排序/全盘扫描）+ 浏览器内播放器（手势/循环/记忆/画中画）。
+- **技术栈**：Python 3 **纯标准库**（http.server / threading / subprocess / tarfile / configparser / urllib）+
+  原生 HTML/CSS/JS 单页（零构建、零外部资源、中英双语）。下载引擎**可插拔**：you-get（默认）/ yutto（备用，Python 3.14 上有 ABI 故障）。
+- **规模设计目标**：3000+ 视频（ETag/304 增量同步 + 服务端视图缓存 + 前端分页渲染）。
+- **数据来源**：用户配置 `SESSDATA`（B站登录 Cookie，约半年过期）。没有它 B站反爬 412 全灭。
+- **v6.0 UI**（2026-10-20 重设计）：timeless 单色风——UI 灰阶退后、封面是唯一彩色、emoji 全换内联 SVG
+  图标（`<symbol>` 库）、亮暗双主题（系统跟随，播放器恒暗）、沉浸式播放器（顶栏/控制条自动隐藏、
+  双击涟漪、缓冲条显示、手势提示首次显示后消失）。JS 逻辑与 API 未变，改样式别动 hook id。
+- **v6.0 功能**（同日）：① 网页设置入口（下载页底部，SESSDATA 免 F12 手改，`/api/config` 热生效）
+  ② 启动后台自动扫描（幂等，不用手点） ③ you-get 引擎的「仅音频」修复（下载后 ffmpeg 流复制抽 .m4a）
+  ④ 库文件原子写+损坏自愈+RLock（断电/并发不丢库） ⑤ 倍速/连播模式记忆 ⑥ 下载完成 toast
+  ⑦ 桌面键盘快捷键（空格/←→/F/Esc） ⑧ 搜索防抖+支持搜UP主 ⑨ `ui-preview.mjs`：无 Python 环境的 UI 预览 mock。
+- **v6.1 功能**（2026-10-20 晚）：① 进度条缩略图预览（`/api/thumbs` 懒生成 12 帧雪碧图，
+  mtime 哈希缓存永不重抽；拖动/桌面 hover 显示）② 外挂字幕自动挂载（`/api/subs` 找同目录
+  同名 .srt/.vtt，`/api/sub` 动态转 VTT，CC 按钮循环轨道）③ 音频模式（.m4a 等后缀自动
+  封面+律动层）④ A-B 循环（A–B 按钮三态 + 金色标记线）⑤ Up Next 片尾卡（剩 20s 出现，
+  可取消本集自动连播）⑥ Android 切后台回前黑屏修复（回前台重挂 video 元素强制重建渲染表面）。
+- **规模边界（诚实）**：万级视频时 library.json 本身几 MB，首次加载全量传一次（移动端 1-2s），之后
+  ETag 304 零传输；前端永远只渲染 60 卡。再往上才需要 sqlite——纯标准库架构里不值得提前上。
+
+## 1. 文件清单（bili-panel/ 即全部）
+
+| 文件 | 职责 | 改动风险 |
+|---|---|---|
+| `server.py` | 全部后端：HTTP 路由/任务队列/引擎调度/媒体库/封面/扫描/导出 | 核心，改后必须 py_compile |
+| `index.html` | 全部前端：三页签 SPA/播放器/手势/i18n | 核心，改后必须 node --check |
+| `config.ini` | 用户配置（首次启动自动生成） | 升级**绝不覆盖** |
+| `library.json` | 媒体库（紧凑 JSON）：每片的 seq/folder/parts/cover_url | 用户数据 |
+| `tasks.json` | 中断恢复（只存排队中/下载中） | 自动维护 |
+| `covers/` | 封面 jpg（官方抓取 + ffmpeg 抽帧双保险） | 自动维护 |
+| `cookies.txt` | you-get 用的 Netscape cookie（由 SESSDATA 自动生成） | 自动维护 |
+| `start.sh` / `start.bat` | 启动脚本（开 wake-lock → 起服务 → 开浏览器） | 低 |
+| `sync_install.mjs` | **重新生成 install.sh**（node 一键内嵌全部文件） | 改任何文件后跑 `node sync_install.mjs`，别再手工粘贴 |
+| `install.sh` | 一键安装/升级器（自包含 heredoc，内嵌全部文件） | 改任何文件后必须重新同步它 |
+
+## 2. config.ini 全键
+
+```ini
+[panel]
+port = 8765            # 面板端口（只绑 127.0.0.1）
+engine = you-get       # 下载引擎；yutto 在 Python 3.14 有 ABI 故障勿默认
+sessdata =             # ★必填★ B站F12→Cookie→SESSDATA；缺=412 全灭；半年过期
+delay = 4              # 分P之间间隔秒数（防 B站 限速，可打断）
+download_dir = ~/storage/downloads/B站    # 下载落点（机器相关）
+scan_dirs = ~/storage/downloads,~/storage/Movies   # 全盘扫描目录（逗号分隔）
+hang_timeout = 180     # 引擎断流多少秒判卡死强杀（长视频/慢网调大）
+```
+
+新增配置键：`DEFAULTS` 加默认值 → `_CONF.get(...)` 读取，旧 config.ini 自动兼容（configparser 缺键不炸）。
+
+## 3. HTTP API 参考（127.0.0.1:PORT）
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/` | GET | 前端页面（Cache-Control: no-store） |
+| `/api/version` | GET | `{"v": "5.3"}` —— 前端顶栏显示，**排查新旧的第一证据** |
+| `/api/info?url=` | GET | 解析 BV（长短链/分享文案通吃，`resolve_bvid` 会跟 302）→ 标题/UP主/封面/分P 列表（走 B站 view API） |
+| `/api/download` | POST | `{bvid,title,cover,parts[],part_names{},audio_only}` → 入队 |
+| `/api/tasks` | GET | 最近 30 条；排队中显示"第N位"；已剔除 proc/_before |
+| `/api/cancel` | POST | `{id}` —— 排队/下载中可取消（4s 防限速等待每 0.25s 检查，秒停） |
+| `/api/library` | GET | 支持 `If-None-Match`/ETag → 无变化回 **304 空响应**（3000 视频的关键） |
+| `/api/cover/<bvid>` | GET | 封面 jpg；缺失时懒加载：官方 URL →（失败）→ `snapshot_thumb()` ffmpeg 抽帧 → SVG 占位（带 X-Cover-Error 头） |
+| `/api/stream?rel=` | GET | 视频流，**支持 HTTP Range**（206，拖拽进度的根基），512KB 分块 |
+| `/api/scan` | GET | 全盘扫描视频文件按文件夹成"部"入库（幂等），EXT_ 前缀 |
+| `/api/export` | GET | tar.gz 打包 config/library/covers/程序 → ~/storage/downloads/ |
+| `/api/delete` | POST | `{bvid}` 删片+联动取消其活动任务；`{rel}` 删单文件 |
+| `/api/open` | GET | 外部打开（现前端不用，内置播放器取代） |
+
+## 4. 数据格式要点
+
+**library.json**：`{bvid: {title, owner, folder, cover, cover_url, seq, parts: {"1": {name, file, size}}}}`
+- `folder` 相对 download_dir；外部扫描目录存绝对路径（Path 拼接语义天然兼容）
+- `seq` 递增下载序号（"下载顺序"排序的根基，入库时 `next_seq()` 分配）
+- 分P→文件归因：下载前后 `mp4s_of()` 集合差 + mtime 最新者
+
+**tasks.json**：只存未完成任务的 `{id,bvid,title,parts,part_names,cover,audio_only,failed,created}`。完成/取消**不持久化**（重启即清历史，杜绝"完成任务复活"）。
+
+## 5. 关键设计决策（勿轻动，动前读注释）
+
+1. **单文件夹便携**（Homey/Plex 范式）：一切状态在 bili-panel/ 内，换机=拷文件夹。
+2. **纯标准库**：跨平台三件套（sh/start.bat/python3）跑同一份文件；无依赖地狱。
+3. **引擎适配器**：`_cmd(url, audio_only, folder)` 是引擎唯一接触点——换引擎只改它。
+4. **单线程下载队列**：故意为之（防 B站 限速），不是缺陷；排队名次已可视化。
+5. **心跳强杀**：`select` + `os.read` 字节级监听——**有字节流动就不计时**，只有彻底断流才累计 hang_timeout。用行缓冲 readline 会死于 you-get 的 \r 进度。
+6. **封面双保险**：网络官方图 → ffmpeg 抽帧（seek 3s→0.5s→0 回退，避开头黑帧）。离线必有图。
+7. **视图缓存**：library.json 的 `mtime_ns-size` 作 ETag，15s TTL 兜底；`save_library`/删除时 `_bump_view()`。
+8. **乐观更新**：取消/删除先动 UI 再调 API（见 index.html 注释"乐观"）。
+9. **进度记忆**：`localStorage["bili_pos_"+rel]`，>5s 且 <时长-8s 才恢复。
+10. **播放列表=全库扁平化** `buildFlat()`：循环/随机/上下P 跨视频，排序跟随媒体库当前规则。
+11. **安全**：只绑 127.0.0.1；`safe_media_path()` 白名单（download_dir + scan_dirs）防目录穿越。
+
+## 6. 血泪史（已修复，防再犯）
+
+1. **JS 顶层重复声明**（fmtT/closePlayer 两次 const）→ 整页 JS 暴毙、按钮全死。`node --check` + 顶层声明扫描是**每次改前端的必做闸**。
+2. **`$` 在使用点之后才 `const` 定义**（TDZ）→ 运行时 ReferenceError，语法检查**看不见**。工具函数定义必须在脚本最顶部。
+3. `urllib.parse.parse_qs` 返回**列表**：`q.get("rel","")` 必须写 `q.get("rel",[""])[0]`，否则 Path/列表 TypeError。
+4. **Kiwi 浏览器缓存阴魂不散**：HTML 已加 no-store；封面 URL 带 `?t=mtime`；用户端必须**杀进程重开**（关标签页不够）。
+5. **412**：B站强制登录 Cookie → SESSDATA 必填；症状=全部下载失败。
+6. **yutto 2.3.1 × Python 3.14**：`_Exc_BaseException` 符号缺失 → 默认引擎 you-get。
+7. **Termux ffmpeg 装不上**（libc++ 符号错位）→ 先 `pkg upgrade` 再装。
+8. **多行粘贴冲掉 pacman/paru 的 Y/n 提示** → 交互命令单独发，或 --noconfirm。
+9. **pip 在 Android 无预编译 wheel**（maturin/Rust）→ 纯 Python 备胎 you-get 的价值。
+10. **服务器≠浏览器**：关浏览器任务照跑（设计特性）；停服务=pkill 或任务页 ✕。
+11. **safe_media_path 的 startswith 漏洞**（v6 修）：字符串前缀匹配会放行 `/downloads-evil` 这类同前缀兄弟目录 → 必须用 `Path.is_relative_to` 组件级比较。
+12. **install.sh 手工同步屎山**（v6 治）：Kimi 时代 start.bat heredoc 被重复追加 6 遍，后段覆盖前段、中间全是尸体 → 已改由 `sync_install.mjs` 生成，禁止手工编辑 install.sh。
+13. **前端 XSS**（v6 修）：innerHTML 拼接标题/文件名从未转义，B站标题可注入脚本 → 全部插值点走 `esc()`；任务重试按钮原 `data-retry='${JSON}'` 属性内嵌 JSON 也会被引号击穿，已改存 id 回查数组。
+
+## 7. 测试 SOP
+
+```bash
+# 服务端
+python3 -m py_compile server.py
+# 前端：抽 script 机检（本仓库实践）
+sed -n '/<script>/,/<\/script>/p' index.html | sed '1d;$d' > /tmp/check.js
+node --check /tmp/check.js
+# 安装器
+bash -n install.sh
+```
+
+**假引擎回归法**：写个假 `yutto`/`you-get` shell 脚本（秒建文件 / 指定 P 失败 / sleep 模拟卡死），
+设假 HOME 环境变量启动 server.py，urllib 打各端点断言。本工具链全部功能（队列/恢复/强杀/扫描/流/导出）均可无网自测。
+
+## 8. 常见维护任务
+
+- **SESSDATA 过期**（症状：解析正常、下载全败）→ 让用户重取填 config.ini。
+- **B站接口变更** → 先修 `resolve_bvid`/`fetch_video_info`，再查引擎参数。
+- **换/加引擎** → `DEFAULTS["engine"]` + `_cmd()` 加分支；保持 `?p=N` 语义与退出码约定。
+- **用户反馈"点了没反应"** → 先看顶栏版本号对不对，再按第 6 节排查。
+
+## 9. 已知限制（诚实清单）
+
+- 网页后台播放只能走 PiP；系统音量/亮度不可控（Web 权限边界，已用软件亮度补偿）。
+- you-get 分P 需逐 P 调用（`?p=N`），无整包接口。
+- 第三方下载生态随时可能死于 B站接口/合规压力——**引擎可替换架构就是为此生的**。
+- 浏览器需 Chromium 80+（可选链 `?.`）；Kiwi 太旧建议用户换 Via。
+- 播放 4K/高码率取决于片源与浏览器解码，面板不做转码。
+
+## 10. 部署机器档案
+
+realme GT8（Android，realme UI）；Termux + Termux:API + Termux:Widget（F-Droid 三件套，勿混装签名）；
+浏览器 Kiwi（停更，建议换 Via）；下载目录 `~/storage/downloads/B站`；同用户在 Windows(Arch 双系统) 可用 start.bat / python3 直接跑。
+
+---
+*本文件随版本更新。改代码不改本文档 = 失职。*

@@ -1,0 +1,43 @@
+# 本地数据与凭据 —— 绝不进版本库
+config.ini
+cookies.txt
+library.json
+library.corrupt-*.json
+playlist.json
+tasks.json
+covers/
+thumbs/
+library.json.tmp
+playlist.json.tmp
+*.tmp
+
+# 媒体文件
+*.mp4
+*.mkv
+*.webm
+*.m4a
+*.mp3
+*.flac
+*.m4v
+*.mov
+*.avi
+*.ts
+*.rmvb
+
+# 备份包
+*.tar.gz
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/

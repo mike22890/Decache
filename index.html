@@ -1,0 +1,1874 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#09090B">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Decache">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" type="image/png" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<title>Decache</title>
+<style>
+/* ═══════════════ Decache UI v6 · timeless mono ═══════════════
+   设计原则: UI 单色退后, 封面是唯一的彩色; 排版层级拉大;
+   零渐变零光晕零emoji图标; 亮暗双主题(系统跟随), 播放器恒暗。 */
+/* ═══ 主题: 暗色为默认, 亮色跟随系统, 可手动三态覆盖 ═══
+   (2026-10-21 补: 原来只有"跟随系统", 没有手动开关;
+    暗色是 :root 默认值, 亮色是 media 覆盖 —— 但媒体查询在 data-theme="dark"
+    时必须被排除, 否则手动选暗会被系统亮色覆盖) */
+:root{
+  --bg:#09090B; --srf:#111113; --srf2:#18181B; --srf3:#202024;
+  --line:#26262B; --line2:#303036;
+  --tx:#FAFAFA; --tx2:#A1A1AA; --tx3:#5C5C64;
+  --ok:#4ADE80; --bad:#F87171; --pink:#FB7299;
+  --r:12px; --rs:8px;
+  --dur:.16s;
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    --bg:#F7F7F8; --srf:#FFFFFF; --srf2:#F0F0F2; --srf3:#E9E9EC;
+    --line:#E4E4E7; --line2:#D4D4D8;
+    --tx:#18181B; --tx2:#66666E; --tx3:#A1A1AA;
+    --ok:#16A34A; --bad:#DC2626;
+  }
+}
+:root[data-theme="light"]{
+  --bg:#F7F7F8; --srf:#FFFFFF; --srf2:#F0F0F2; --srf3:#E9E9EC;
+  --line:#E4E4E7; --line2:#D4D4D8;
+  --tx:#18181B; --tx2:#66666E; --tx3:#A1A1AA;
+  --ok:#16A34A; --bad:#DC2626;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html{-webkit-text-size-adjust:100%;background:var(--bg)}
+body{color:var(--tx);font:15px/1.55 -apple-system,"MiSans","Noto Sans CJK SC",system-ui,sans-serif;
+  max-width:600px;margin:0 auto;min-height:100vh;transition:background .25s,color .25s}
+svg.ic{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+button{font:inherit;color:inherit}
+
+/* ═══ 老浏览器降级层(2026-10-21 兼容调研落地) ═══
+   目标浏览器含: Android 4.x WebView(Kiwi 已归档冻结在老 Chromium)、Via(用系统 WebView)、
+   桌面老 Chrome/Firefox、iOS Safari 15。
+   color-mix / aspect-ratio / backdrop-filter 全部不可靠 → 逐个给老式兜底。 */
+/* 1) 卡片封面: aspect-ratio 不支持时用 padding-top 撑出 16:10 */
+.vcard .cov img{width:100%;aspect-ratio:16/10;object-fit:cover;display:block;background:var(--srf2)}
+@supports not (aspect-ratio: 16/10){
+  .vcard .cov{height:0;padding-top:62.5%}
+  .vcard .cov img{position:absolute;inset:0;height:100%}
+  .vcard .cov{position:relative}
+  .pv img{height:auto;min-height:86px}
+}
+/* 2) 底栏/播放器: color-mix 不支持时用纯色 */
+@supports not (color: color-mix(in srgb, red, blue)){
+  .appbar{background:rgba(9,9,11,.92)}
+  .tabbar{background:rgba(17,17,19,.95)}
+}
+/* 3) backdrop-filter: Safari 的 -webkit- 版不能用 CSS 变量 → 变量版本单独关掉 */
+.backdrop{backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+@supports not ((backdrop-filter: blur(4px)) or (-webkit-backdrop-filter: blur(4px))){
+  .appbar{background:rgba(9,9,11,.96)}
+  .tabbar{background:rgba(17,17,19,.97)}
+  #pnext{background:rgba(16,16,20,.99)}
+  #qpanel{background:rgba(16,16,20,.99)}
+}
+/* 4) 安全区: env() 在非刘海屏恒为 0 → 永远保底 12px */
+.safeb{padding-bottom:max(12px, env(safe-area-inset-bottom))}
+.safet{padding-top:max(12px, env(safe-area-inset-top))}
+
+/* ── 顶栏 ── */
+.appbar{position:sticky;top:0;z-index:20;display:flex;align-items:baseline;gap:10px;
+  padding:20px 20px 14px;background:color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+.logo{font-size:21px;font-weight:800;letter-spacing:-.4px}
+.logo b{color:var(--pink);font-weight:800}
+.ver{font-size:11px;color:var(--tx3);font-variant-numeric:tabular-nums}
+.langbtn{margin-left:auto;background:none;border:1px solid var(--line2);color:var(--tx2);
+  border-radius:999px;padding:6px 12px;font-size:12px;cursor:pointer;transition:all var(--dur);
+  display:flex;align-items:center;justify-content:center;min-width:34px;height:30px}
+.langbtn:active{transform:scale(.95)}
+#themeBtn{margin-left:auto}
+#langBtn{margin-left:0}
+
+/* ── 页骨 ── */
+.page{display:none;padding:4px 20px 120px;animation:fadein var(--dur) ease}
+.page.active{display:block}
+@keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1}}
+h2{font-size:11px;color:var(--tx3);font-weight:600;margin:22px 0 10px;letter-spacing:1.6px;text-transform:uppercase}
+
+/* ── 浮动底栏 ── */
+.tabbar{position:fixed;bottom:calc(14px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);z-index:30;display:flex;
+  background:color-mix(in srgb, var(--srf) 86%, transparent);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  border:1px solid var(--line);border-radius:999px;padding:5px;box-shadow:0 8px 30px rgba(0,0,0,.22)}
+.tabbar button{background:none;border:0;color:var(--tx3);font-size:12px;border-radius:999px;
+  padding:9px 18px;display:flex;align-items:center;gap:6px;cursor:pointer;transition:all .18s;white-space:nowrap}
+.tabbar button.on{background:var(--srf3);color:var(--tx);font-weight:600}
+
+/* ── 组件 ── */
+.card{background:var(--srf);border:1px solid var(--line);border-radius:var(--r);padding:16px;margin-bottom:12px}
+input[type=text]{width:100%;background:var(--srf2);border:1px solid var(--line);border-radius:10px;
+  color:var(--tx);padding:13px 14px;font-size:15px;outline:none;transition:border-color var(--dur)}
+input[type=text]:focus{border-color:var(--tx2)}
+input[type=text]::placeholder{color:var(--tx3)}
+.btn{background:var(--tx);color:var(--bg);border:0;border-radius:10px;
+  padding:12px 18px;font-size:14px;font-weight:600;cursor:pointer;transition:transform .1s,opacity var(--dur)}
+.btn:active{transform:scale(.97)} .btn:disabled{opacity:.35}
+.btn.ghost{background:transparent;border:1px solid var(--line2);color:var(--tx);font-weight:500}
+.btn.sm{padding:7px 12px;font-size:12.5px;border-radius:var(--rs)}
+.btn.danger{background:transparent;border:1px solid transparent;color:var(--bad)}
+.btn.danger:active{border-color:var(--bad)}
+.row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center}
+.meta{color:var(--tx2);font-size:12px}
+.err{color:var(--bad);font-size:13px;margin-top:8px}
+.chip{border:1px solid var(--line);border-radius:999px;padding:7px 14px;font-size:13px;color:var(--tx2);
+  cursor:pointer;white-space:nowrap;transition:all var(--dur);background:none}
+.chip.on{background:var(--tx);border-color:var(--tx);color:var(--bg);font-weight:600}
+.empty{text-align:center;color:var(--tx3);font-size:13px;padding:44px 0}
+.empty .big{display:block;margin-bottom:10px;opacity:.5}
+.empty svg.ic{width:30px;height:30px;stroke-width:1.3}
+
+/* ── 解析页 ── */
+.pv{display:flex;gap:14px}
+.pv img{width:138px;aspect-ratio:16/10;object-fit:cover;border-radius:var(--rs);background:var(--srf2);flex:none}
+.pv .t{font-weight:600;font-size:15.5px;line-height:1.42;display:-webkit-box;-webkit-line-clamp:3;
+  -webkit-box-orient:vertical;overflow:hidden}
+.plist{max-height:300px;overflow:auto;margin-top:14px;border-top:1px solid var(--line)}
+.plist label{display:flex;gap:11px;align-items:center;padding:11px 2px;border-bottom:1px solid var(--line);font-size:14px}
+.plist input{width:19px;height:19px;accent-color:var(--tx)}
+
+/* ── 任务 ── */
+.tcard .tt{font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pill{font-size:11px;padding:2px 9px;border-radius:5px;font-weight:500;background:var(--srf3);color:var(--tx2)}
+.pill.downloading{background:rgba(56,189,248,.12);color:#7DD3FC}
+.pill.done{background:rgba(74,222,128,.1);color:var(--ok)}
+.pill.failed,.pill.partial{background:rgba(248,113,113,.1);color:var(--bad)}
+.tcard .ln{color:var(--tx2);font-size:12px;margin-top:6px;word-break:break-all}
+.pct{margin-left:auto;font-size:19px;font-weight:700;font-variant-numeric:tabular-nums}
+.bar{height:3px;border-radius:2px;background:var(--srf3);overflow:hidden;margin-top:10px}
+.bar.ind i{width:36%;animation:slide 1.2s ease-in-out infinite}
+@keyframes slide{0%{margin-left:-36%}100%{margin-left:100%}}
+.bar i{display:block;height:100%;background:var(--tx);transition:width .4s}
+
+/* ── 媒体库 ── */
+.libtop{display:flex;gap:8px;margin-bottom:12px;align-items:center}
+.libtop input{flex:1}
+.chips{display:flex;gap:7px;overflow:auto;padding-bottom:12px;scrollbar-width:none}
+.chips::-webkit-scrollbar{display:none}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:18px 13px}
+.vcard{position:relative;cursor:default}
+.vcard .cov{position:relative;display:block;width:100%;cursor:pointer;border-radius:var(--r);overflow:hidden;
+  background:var(--srf2);transition:transform var(--dur)}
+.vcard .cov:active{transform:scale(.97)}
+.vcard .cov img{width:100%;aspect-ratio:16/10;object-fit:cover;display:block}
+.vcard .cov .n{position:absolute;right:7px;bottom:7px;font-size:10.5px;font-weight:600;
+  background:rgba(0,0,0,.66);padding:2px 8px;border-radius:5px;color:#fff;font-variant-numeric:tabular-nums}
+.vcard .bd{padding:9px 2px 0}
+.vcard .vt{font-size:13px;font-weight:600;line-height:1.42;display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;min-width:0}
+.vcard .vm{color:var(--tx3);font-size:11px;margin-top:4px;font-variant-numeric:tabular-nums}
+.vcard .ops{display:flex;gap:6px;margin-top:8px}
+.vcard .ops .btn{flex:1 1 40%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  border-color:var(--line);color:var(--tx2)}
+.parts{max-height:0;overflow:hidden;transition:max-height .28s ease}
+.parts.open{max-height:900px}
+.part{padding:9px 0;border-top:1px solid var(--line)}
+.part .pn{font-size:13px;line-height:1.45;word-break:break-word;overflow-wrap:anywhere;display:block;min-width:0}
+.part .pr{display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap}
+.part .pr .s{color:var(--tx3);font-size:11px;flex:1;min-width:0;font-variant-numeric:tabular-nums}
+.pico{width:32px;height:32px;flex:none;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;background:var(--srf2);border:1px solid var(--line);color:var(--tx2);transition:all var(--dur)}
+.pico:active{transform:scale(.9);color:var(--tx)}
+.pico svg.ic{width:14px;height:14px}
+.resume{display:flex;align-items:center;gap:12px;width:100%;text-align:left;margin-bottom:14px;padding:14px 16px;
+  border-radius:var(--r);cursor:pointer;color:var(--tx);font-size:13px;background:var(--srf);
+  border:1px solid var(--line);transition:border-color var(--dur)}
+.resume:active{border-color:var(--tx2)}
+.resume .sub{color:var(--tx2);font-size:11.5px;margin-top:2px}
+.resume .ric{width:38px;height:38px;flex:none;border-radius:50%;background:var(--tx);color:var(--bg);
+  display:flex;align-items:center;justify-content:center}
+.loose .file{display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--line);font-size:13px}
+.loose .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ── 标签 / 收藏 ── */
+.tagdot{width:11px;height:11px;border-radius:50%;flex:none;border:1px solid rgba(0,0,0,.18);
+  display:inline-block;vertical-align:-1px}
+.chip .tagdot{width:9px;height:9px;margin-right:5px}
+.chip.on .tagdot{border-color:rgba(255,255,255,.4)}
+.vcard .vt{position:relative}
+.vcard .vt .tg{position:absolute;left:-4px;top:2px;width:3px;height:14px;border-radius:2px}
+.favbtn{position:absolute;right:6px;top:6px;z-index:2;width:28px;height:28px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45);
+  border:0;color:rgba(255,255,255,.6);cursor:pointer;backdrop-filter:blur(4px)}
+.favbtn svg.ic{width:15px;height:15px}
+.favbtn.on{color:#FB7299}
+.favbtn.on svg.ic{fill:currentColor}
+.tagbar{display:flex;gap:5px;align-items:center;margin-top:8px;padding-top:9px;
+  border-top:1px solid var(--line);flex-wrap:nowrap;overflow:hidden}
+.tgbtn{width:20px;height:20px;border-radius:50%;border:1px solid var(--line);cursor:pointer;
+  background:none;padding:0;flex:none}
+.tagbar .tgbtn.on{outline:2px solid var(--txt);outline-offset:1px}
+.tagbar .tgbtn i{display:block;width:100%;height:100%;border-radius:50%}
+.queuebtn{width:20px;height:20px;border-radius:var(--rs);border:1px solid var(--line);background:none;
+  color:var(--tx2);cursor:pointer;display:flex;align-items:center;justify-content:center;flex:none;margin-left:auto}
+.queuebtn svg.ic{width:12px;height:12px}
+.queuebtn.on{color:#FB7299;border-color:rgba(251,114,153,.5)}
+
+/* ── 文件夹浏览 ── */
+.crumbs{display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:12px;color:var(--tx2);
+  margin-bottom:12px;min-height:24px}
+.crumbs .cb{cursor:pointer;padding:3px 8px;border-radius:var(--rs);max-width:44vw;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.crumbs .cb:hover{background:var(--srf2)}
+.crumbs .sep{color:var(--tx3)}
+.browsecard{display:flex;align-items:center;gap:11px;padding:12px 14px;border-bottom:1px solid var(--line);
+  cursor:pointer}
+.browsecard:last-child{border-bottom:0}
+.browsecard .bi{width:34px;height:34px;flex:none;border-radius:9px;background:var(--srf2);
+  display:flex;align-items:center;justify-content:center;color:var(--tx2)}
+.browsecard .bi svg.ic{width:17px;height:17px}
+.browsecard .bn{flex:1;min-width:0;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.browsecard .bm{font-size:11px;color:var(--tx3);flex:none;font-variant-numeric:tabular-nums}
+.browsecard .bops{display:flex;gap:6px;flex:none}
+
+/* ── 队列面板 ── */
+#qpanel{position:absolute;right:12px;top:60px;bottom:calc(96px + env(safe-area-inset-bottom));
+  z-index:9;width:min(300px,calc(100% - 24px));display:none;flex-direction:column;
+  background:rgba(16,16,20,.96);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+  border:1px solid rgba(255,255,255,.13);border-radius:14px;overflow:hidden}
+#qpanel.show{display:flex}
+#qpanel .qh{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.1);
+  font-size:12px;font-weight:700;letter-spacing:.5px;color:#fff}
+#qpanel .qh .spacer{flex:1}
+#qpanel .qlist{flex:1;overflow:auto;padding:4px 0}
+#qpanel .qitem{display:flex;align-items:center;gap:8px;padding:9px 12px;font-size:12.5px;color:#EDEDF2}
+#qpanel .qitem.cur{background:rgba(251,114,153,.13)}
+#qpanel .qn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#qpanel .qops{display:flex;gap:3px;flex:none}
+#qpanel .qops button{width:24px;height:24px;border-radius:6px;border:0;background:rgba(255,255,255,.08);
+  color:#ccc;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+#qpanel .qops button:active{background:rgba(255,255,255,.18)}
+#qpanel .qops svg.ic{width:12px;height:12px}
+#qpanel .qempty{padding:26px 14px;text-align:center;color:var(--tx3);font-size:12px}
+
+/* ── 章节面板 ── */
+#chapPanel{position:absolute;right:12px;top:60px;bottom:calc(96px + env(safe-area-inset-bottom));
+  z-index:9;width:min(310px,calc(100% - 24px));display:none;flex-direction:column;
+  background:rgba(16,16,20,.96);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+  border:1px solid rgba(255,255,255,.13);border-radius:14px;overflow:hidden}
+#chapPanel.show{display:flex}
+#chapPanel .qh{display:flex;align-items:center;gap:8px;padding:12px 14px;
+  border-bottom:1px solid rgba(255,255,255,.1);font-size:12px;font-weight:700;letter-spacing:.5px;color:#fff}
+#chapPanel .qh .spacer{flex:1}
+.chlist{flex:1;overflow:auto;padding:4px 0}
+.chitem{display:flex;align-items:center;gap:9px;padding:8px 12px;cursor:pointer;font-size:12.5px;color:#EDEDF2}
+.chitem:active{background:rgba(255,255,255,.07)}
+.chitem.cur{background:rgba(251,114,153,.13)}
+.chitem .cthumb{width:52px;height:32px;flex:none;border-radius:5px;background:#26262B center no-repeat;
+  background-size:cover}
+.chitem .cn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chitem .ct{font-size:11px;color:var(--tx3);font-variant-numeric:tabular-nums;flex:none}
+.chitem .cdel{width:22px;height:22px;flex:none;border:0;background:rgba(255,255,255,.08);color:#bbb;
+  border-radius:5px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+.chitem .cdel svg.ic{width:11px;height:11px}
+#chapMarks{position:absolute;left:0;right:0;top:0;height:100%;pointer-events:none;z-index:1}
+#chapMarks i{position:absolute;top:50%;transform:translate(-50%,-50%);width:2px;height:14px;
+  background:rgba(255,255,255,.62);border-radius:1px}
+#chapMarks i.mk{background:#FFD166;height:18px;width:3px}
+
+/* ── 工具面板 ── */
+#sheet{position:fixed;left:50%;bottom:78px;transform:translateX(-50%) translateY(12px);z-index:120;
+  width:min(560px,calc(100% - 24px));max-height:72vh;display:none;flex-direction:column;
+  background:var(--srf);border:1px solid var(--line);border-radius:16px;overflow:hidden;
+  box-shadow:0 16px 50px rgba(0,0,0,.4)}
+#sheet.show{display:flex}
+.shhead{display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--line);
+  font-size:13px;font-weight:700}
+.shhead span{flex:1;min-width:0}
+.shbody{overflow:auto;padding:12px 16px 18px}
+.dgroup{border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-bottom:9px}
+.dgh{font-size:12px;font-weight:600;margin-bottom:6px}
+.dgh span{color:var(--tx3);font-weight:400;margin-left:6px}
+.dfile{display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0;color:var(--tx2)}
+.dfile .dn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--tx)}
+.dfile .dmeta{flex:none;font-size:10.5px;color:var(--tx3)}
+.srow{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px}
+.srow .sn{width:38%;flex:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.srow .sbar{flex:1;height:6px;background:var(--srf3);border-radius:3px;overflow:hidden}
+.srow .sbar i{display:block;height:100%;background:var(--tx);border-radius:3px}
+.srow .sm{flex:none;width:64px;text-align:right;color:var(--tx2);font-variant-numeric:tabular-nums}
+
+/* ── 全局 toast ── */
+#gtoast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%) translateY(8px);z-index:200;
+  background:var(--srf3);color:var(--tx);border:1px solid var(--line2);border-radius:10px;
+  padding:10px 18px;font-size:13px;max-width:80vw;opacity:0;pointer-events:none;
+  transition:opacity .2s,transform .2s;box-shadow:0 8px 28px rgba(0,0,0,.35)}
+#gtoast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* ═══ 播放器(恒暗 · 沉浸式) ═══ */
+#pmodal{display:none;position:fixed;inset:0;z-index:100;background:#000;flex-direction:column;
+  color:#FAFAFA;--tx:#FAFAFA;--tx2:#A1A1AA;--tx3:#5C5C64;--srf2:#1A1A1E;--srf3:#26262B;
+  --line:#2E2E34;--line2:#3A3A42}
+#pmodal.open{display:flex}
+#pstage{position:relative;flex:1;min-height:0;width:100%;background:#000;
+  display:flex;align-items:center;justify-content:center;touch-action:none;overflow:hidden}
+#pvideo{width:100%;height:100%;object-fit:contain;background:#000;display:block}
+#phead{position:absolute;top:0;left:0;right:0;z-index:7;display:flex;align-items:center;gap:12px;
+  padding:14px 16px calc(14px + env(safe-area-inset-top));
+  background:linear-gradient(rgba(0,0,0,.72),transparent);
+  transition:opacity .22s}
+#phead.hide{opacity:0;pointer-events:none}
+#phead .mid{flex:1;min-width:0;text-align:center}
+#phead .ttl{font-weight:700;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#phead .sub2{color:var(--tx2);font-size:11px;margin-top:3px}
+.icbtn{display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.1);
+  border:0;color:#fff;border-radius:10px;width:38px;height:38px;cursor:pointer;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);transition:transform .1s,opacity .15s}
+.icbtn:active{transform:scale(.9)} .icbtn:disabled{opacity:.25}
+.icbtn svg.ic{width:17px;height:17px}
+#pctrl{position:absolute;left:0;right:0;bottom:0;z-index:6;
+  padding:10px 14px calc(12px + env(safe-area-inset-bottom));
+  background:linear-gradient(transparent,rgba(0,0,0,.78));
+  transition:opacity .22s,transform .22s}
+#pctrl.hide{opacity:0;transform:translateY(10px);pointer-events:none}
+#pbar{height:26px;display:flex;align-items:center;position:relative;cursor:pointer;touch-action:none;margin:0 2px}
+#pbar .track{position:absolute;left:0;right:0;height:4px;border-radius:2px;background:rgba(255,255,255,.22);
+  transition:height .12s}
+#pbar.drag .track{height:8px}
+#pbuf{position:absolute;left:0;height:4px;border-radius:2px;width:0;background:rgba(255,255,255,.32);transition:height .12s}
+#pbar.drag #pbuf{height:8px}
+#pfill{position:absolute;left:0;height:4px;border-radius:2px;width:0;background:#fff;transition:height .12s}
+#pbar.drag #pfill{height:8px}
+#pknob{position:absolute;width:14px;height:14px;border-radius:50%;background:#fff;
+  box-shadow:0 1px 6px rgba(0,0,0,.5);transform:translateX(-50%) scale(0);left:0;transition:transform .12s}
+#pbar.drag #pknob{transform:translateX(-50%) scale(1)}
+#pbar:not(.drag) #pknob{width:0;height:0}
+.prow{display:flex;align-items:center;gap:6px;margin-top:8px}
+.icbtn.txt{width:auto;min-width:38px;padding:0 9px;font-size:12px;font-weight:700;letter-spacing:.3px}
+.icbtn.on{color:#FB7299;border-color:rgba(251,114,153,.5)}
+.ptime{color:#fff;font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums;opacity:.92;
+  position:absolute;right:2px;top:-14px;text-shadow:0 1px 4px rgba(0,0,0,.8)}
+.ptime b{font-weight:600}
+.ptime span{color:var(--tx2)}
+#pctrl .spacer{flex:1}
+.pbwrap{position:relative;padding-top:14px}
+.abmark{position:absolute;top:9px;width:3px;height:14px;background:#FFD166;border-radius:1px;
+  display:none;transform:translateX(-50%);z-index:2;pointer-events:none}
+/* 缩略图预览 */
+#pthumb{position:absolute;z-index:8;display:none;flex-direction:column;align-items:center;pointer-events:none;
+  bottom:110px;transform:translateX(-50%)}
+#pthumbImg{width:160px;height:90px;border-radius:8px;background:#000 center no-repeat;
+  border:1px solid rgba(255,255,255,.28);box-shadow:0 6px 24px rgba(0,0,0,.55)}
+#pthumbT{margin-top:5px;font-size:11px;font-weight:600;background:rgba(0,0,0,.66);color:#fff;
+  padding:1px 9px;border-radius:5px;font-variant-numeric:tabular-nums}
+/* Up Next 片尾卡 */
+#pnext{position:absolute;right:12px;bottom:calc(86px + env(safe-area-inset-bottom));z-index:8;display:none;align-items:center;gap:10px;
+  background:rgba(18,18,22,.94);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border:1px solid rgba(255,255,255,.14);border-radius:14px;padding:10px 12px;max-width:calc(100% - 24px)}
+#pnext.show{display:flex}
+#pnext img{width:74px;height:46px;object-fit:cover;border-radius:8px;background:#26262B;flex:none}
+#pnext .pnInfo{min-width:0}
+#pnext .pnTag{font-size:9px;letter-spacing:1.8px;color:#FB7299;font-weight:800}
+#pnext .pnTitle{font-size:12px;color:#fff;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}
+#pnext .pnCnt{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;color:#fff;min-width:34px;text-align:center}
+#pnext .icbtn{width:32px;height:32px}
+/* 音频模式 */
+#partCover{position:absolute;inset:0;z-index:1;display:none;flex-direction:column;align-items:center;justify-content:center;gap:26px;
+  background:radial-gradient(120% 90% at 50% 0%, #1b1b26, #000)}
+#pstage.audio #partCover{display:flex}
+#pstage.audio #pvideo{visibility:hidden}
+#partCover img{width:min(58vw,280px);aspect-ratio:1;object-fit:cover;border-radius:20px;
+  box-shadow:0 18px 60px rgba(0,0,0,.7)}
+#partCover img[src=""],#partCover img:not([src]){display:none}
+.eq{display:flex;gap:5px;height:24px;align-items:flex-end}
+.eq i{width:5px;background:#FB7299;border-radius:2px;animation:eqb 1.1s ease-in-out infinite}
+.eq i:nth-child(2){animation-delay:.12s}.eq i:nth-child(3){animation-delay:.24s}
+.eq i:nth-child(4){animation-delay:.36s}.eq i:nth-child(5){animation-delay:.48s}
+@keyframes eqb{0%,100%{height:26%}50%{height:100%}}
+#seekOv{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.72);
+  color:#fff;font-size:22px;font-weight:700;padding:10px 22px;border-radius:14px;pointer-events:none;
+  z-index:5;display:none;font-variant-numeric:tabular-nums}
+/* 双击涟漪 */
+.ripple{position:absolute;top:50%;transform:translateY(-50%);z-index:4;width:88px;height:88px;border-radius:50%;
+  background:rgba(255,255,255,.16);display:flex;align-items:center;justify-content:center;
+  color:#fff;font-size:13px;font-weight:600;pointer-events:none;animation:rip .5s ease-out forwards}
+.ripple.l{left:12%} .ripple.r{right:12%}
+@keyframes rip{from{opacity:1;transform:translateY(-50%) scale(.55)}to{opacity:0;transform:translateY(-50%) scale(1.25)}}
+/* 手势提示(首次) */
+#phint{position:absolute;inset:auto 0 110px 0;z-index:5;display:flex;justify-content:center;gap:18px;
+  pointer-events:none;opacity:0;transition:opacity .4s}
+#phint.show{opacity:1}
+#phint span{display:flex;align-items:center;gap:6px;font-size:11px;color:rgba(255,255,255,.85);
+  background:rgba(0,0,0,.55);padding:6px 12px;border-radius:999px;backdrop-filter:blur(6px)}
+</style>
+</head>
+<body>
+
+<!-- SVG 图标库(内联 · 零外部资源) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 4v12m0 0l-5-5m5 5l5-5M5 20h14"/></symbol>
+    <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M4 13h4l2 3h4l2-3h4M5 5h14l2 8v6H3v-6l2-8z"/></symbol>
+    <symbol id="i-lib" viewBox="0 0 24 24"><rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="16" rx="1"/><path d="M17.5 5l3.5 14"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5-13-7.5z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7 4v16M17 4v16"/></symbol>
+    <symbol id="i-prev" viewBox="0 0 24 24"><path d="M18 5v14L8 12l10-7zM6 5v14"/></symbol>
+    <symbol id="i-next" viewBox="0 0 24 24"><path d="M6 5v14l10-7L6 5zM18 5v14"/></symbol>
+    <symbol id="i-fs" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+    <symbol id="i-pip" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="12" y="11" width="7" height="6" rx="1" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></symbol>
+    <symbol id="i-scan" viewBox="0 0 24 24"><path d="M3 8V5a2 2 0 012-2h3M16 3h3a2 2 0 012 2v3M21 16v3a2 2 0 01-2 2h-3M8 21H5a2 2 0 01-2-2v-3"/><path d="M8 12h8"/></symbol>
+    <symbol id="i-export" viewBox="0 0 24 24"><path d="M12 15V3m0 0L8 7m4-4l4 4M4 15v4a2 2 0 002 2h12a2 2 0 002-2v-4"/></symbol>
+    <symbol id="i-clist" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5l1.2 3a7 7 0 012.6 1.1l3.1-.9 1.7 3-2.2 2.3a7 7 0 010 2.8l2.2 2.3-1.7 3-3.1-.9a7 7 0 01-2.6 1.1l-1.2 3h-3.4l-1.2-3a7 7 0 01-2.6-1.1l-3.1.9-1.7-3 2.2-2.3a7 7 0 010-2.8L1.5 8.7l1.7-3 3.1.9a7 7 0 012.6-1.1l1.2-3z" stroke-width="1.2"/></symbol>
+    <symbol id="i-theme" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17" fill="currentColor" stroke="none" opacity=".45"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 019.5 4a8.5 8.5 0 1010.5 10.5z"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2.5h8a2 2 0 012 2V18a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></symbol>
+    <symbol id="i-queue" viewBox="0 0 24 24"><path d="M4 6h11M4 12h11M4 18h7M18 10l3 3-3 3M21 13h-8"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9 6.8 19.6l1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
+  </defs>
+</svg>
+
+<header class="appbar">
+  <div class="logo">D<b>ecache</b></div>
+  <span class="ver" id="ver">…</span>
+  <button class="langbtn" id="themeBtn" title="主题">
+    <svg class="ic" style="width:14px;height:14px"><use href="#i-theme" id="themeIcon"/></svg>
+  </button>
+  <button class="langbtn" id="langBtn">EN</button>
+</header>
+
+<!-- 下载 -->
+<section class="page active" id="page-dl">
+  <div class="card">
+    <input type="text" id="url" data-i18n-ph="urlPh" placeholder="粘贴视频链接" autocomplete="off">
+    <div class="row">
+      <button class="btn" style="flex:1" onclick="parse()" data-i18n="parse">解析</button>
+      <button class="btn ghost" onclick="pasteFromClipboard()" title="粘贴">
+        <svg class="ic"><use href="#i-copy"/></svg>
+      </button>
+    </div>
+    <div id="perr" class="err"></div>
+  </div>
+  <div id="infoCard" style="display:none" class="card">
+    <div class="pv">
+      <img id="cover" alt="">
+      <div style="min-width:0">
+        <div class="t" id="vtitle"></div>
+        <div class="meta" id="vowner" style="margin-top:5px"></div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button class="btn ghost sm" onclick="selAll(true)" data-i18n="all">全选</button>
+      <button class="btn ghost sm" onclick="selAll(false)" data-i18n="none">全不选</button>
+      <label class="meta" style="margin-left:auto;display:flex;align-items:center;gap:5px">
+        <input type="checkbox" id="audioOnly" style="width:16px;height:16px;accent-color:currentColor"><span data-i18n="audio">仅音频</span>
+      </label>
+    </div>
+    <div class="plist" id="plist"></div>
+    <div class="row"><button class="btn" style="width:100%" onclick="download()" id="dlBtn" data-i18n="dl">下载所选</button></div>
+  </div>
+  <h2 style="margin-top:26px"><svg class="ic" style="width:12px;height:12px;vertical-align:-1px"><use href="#i-gear"/></svg> <span data-i18n="settings">设置</span></h2>
+  <div class="card">
+    <div class="meta" style="margin-bottom:8px" data-i18n="sessHint">站点登录 cookie（可选）</div>
+    <input type="text" id="cfgCookie" data-i18n-ph="sessPh" placeholder="粘贴 cookie" autocomplete="off" style="-webkit-text-security:disc">
+    <div class="row">
+      <button class="btn sm" onclick="saveSess()" data-i18n="save">保存</button>
+      <span class="meta" id="sessState"></span>
+    </div>
+    <div class="meta" style="margin-top:12px" id="cfgMeta"></div>
+    <div class="row">
+      <button class="btn ghost sm" onclick="importM3u()" data-i18n="m3uImport">导入 m3u 队列</button>
+      <input type="file" id="m3uFile" accept=".m3u,.m3u8" style="display:none" onchange="importM3uFile(this)">
+    </div>
+    <div class="meta" style="margin-top:12px" id="diagMeta"></div>
+  </div>
+  <h2 style="margin-top:26px"><span data-i18n="access">手机访问与安装</span></h2>
+  <div class="card">
+    <div class="meta" id="lanMeta"></div>
+    <div class="row">
+      <button class="btn ghost sm" onclick="showInstall()"><span data-i18n="install">装到桌面</span></button>
+      <span class="meta" id="installHint"></span>
+    </div>
+  </div>
+  <h2 style="margin-top:26px"><span data-i18n="subStyle">字幕样式</span></h2>
+  <div class="card">
+    <div class="row" style="margin-top:0">
+      <span class="meta" style="width:62px" data-i18n="subSize">字号</span>
+      <input type="range" id="subSize" min="12" max="36" step="1" style="flex:1;accent-color:currentColor" oninput="setSubStyle()">
+      <span class="meta" id="subSizeVal" style="width:34px;text-align:right"></span>
+    </div>
+    <div class="row">
+      <span class="meta" style="width:62px" data-i18n="subBg">背景</span>
+      <span class="chips" style="flex:1;padding:0">
+        <span class="chip" data-subbg="shadow" data-i18n="subBgShadow">描边</span>
+        <span class="chip" data-subbg="solid" data-i18n="subBgSolid">黑底</span>
+        <span class="chip" data-subbg="white" data-i18n="subBgWhite">白底</span>
+      </span>
+    </div>
+    <div class="row">
+      <span class="meta" style="width:62px" data-i18n="subPos">位置</span>
+      <span class="chips" style="flex:1;padding:0">
+        <span class="chip" data-subpos="top" data-i18n="subPosTop">顶部</span>
+        <span class="chip" data-subpos="middle" data-i18n="subPosMid">居中</span>
+        <span class="chip" data-subpos="bottom" data-i18n="subPosBottom">底部</span>
+      </span>
+    </div>
+  </div>
+</section>
+
+<!-- 任务 -->
+<section class="page" id="page-task">
+  <h2 data-i18n="tasks">下载任务</h2>
+  <div id="tasks"></div>
+</section>
+
+<!-- 媒体库 -->
+<section class="page" id="page-lib">
+  <div id="resumeSlot"></div>
+  <div class="row" style="margin:0 0 12px">
+    <button class="btn ghost sm" onclick="scanNow(this)">
+      <svg class="ic" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-scan"/></svg>
+      <span data-i18n="scan">扫描全盘</span>
+    </button>
+    <button class="btn ghost sm" onclick="exportNow()">
+      <svg class="ic" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-export"/></svg>
+      <span data-i18n="export">导出备份</span>
+    </button>
+    <button class="btn ghost sm" onclick="showDupes()" title="${''}">
+      <svg class="ic" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-clist"/></svg>
+      <span data-i18n="dupes">查重</span>
+    </button>
+    <button class="btn ghost sm" onclick="showStorage()">
+      <svg class="ic" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-lib"/></svg>
+      <span data-i18n="storage">磁盘</span>
+    </button>
+  </div>
+  <div class="libtop">
+    <input type="text" id="q" oninput="libSearchDebounced()">
+  </div>
+  <div class="chips" id="filterChips">
+    <span class="chip on" data-tag="" data-i18n="fAll">全部</span>
+    <span class="chip" data-tag="__fav__" data-i18n="fFav">★ 收藏</span>
+  </div>
+  <div class="chips" id="sortChips">
+    <span class="chip on" data-s="time_desc" data-i18n="sNew">最新</span>
+    <span class="chip" data-s="seq" data-i18n="sSeq">下载顺序</span>
+    <span class="chip" data-s="time_asc" data-i18n="sOld">最早</span>
+    <span class="chip" data-s="name" data-i18n="sName">名称</span>
+  </div>
+  <h2 style="margin-top:4px"><span data-i18n="library">媒体库</span> · <span id="libCount">0</span></h2>
+  <div class="grid" id="lib"></div>
+  <div id="looseWrap" style="margin-top:20px;display:none">
+    <h2 data-i18n="loose">散文件</h2>
+    <div class="loose card" style="padding:2px 14px" id="loose"></div>
+  </div>
+</section>
+
+<!-- 文件夹浏览 -->
+<section class="page" id="page-folder">
+  <div class="crumbs" id="crumbs"></div>
+  <div id="browseList"></div>
+</section>
+
+<nav class="tabbar">
+  <button class="on" data-tab="dl"><svg class="ic"><use href="#i-down"/></svg><span data-i18n="tabDl">下载</span></button>
+  <button data-tab="task"><svg class="ic"><use href="#i-inbox"/></svg><span data-i18n="tabTask">任务</span></button>
+  <button data-tab="lib"><svg class="ic"><use href="#i-lib"/></svg><span data-i18n="tabLib">媒体库</span></button>
+  <button data-tab="folder"><svg class="ic"><use href="#i-folder"/></svg><span data-i18n="tabFolder">文件夹</span></button>
+</nav>
+
+<div id="gtoast"></div>
+
+<!-- 工具面板(查重/磁盘) -->
+<div id="sheet">
+  <div class="shhead"><span id="sheetTitle"></span>
+    <button class="icbtn" id="sheetClose" style="background:var(--srf2);color:var(--tx);width:30px;height:30px">
+      <svg class="ic"><use href="#i-x"/></svg></button>
+  </div>
+  <div class="shbody" id="sheetBody"></div>
+</div>
+
+<!-- 播放器(沉浸式恒暗) -->
+<div id="pmodal">
+  <div id="pstage">
+    <video id="pvideo" playsinline autoplay></video>
+    <div id="partCover"><img id="partCoverImg" alt=""><div class="eq"><i></i><i></i><i></i><i></i><i></i></div></div>
+    <div id="seekOv"></div>
+    <div id="phead">
+      <button class="icbtn" onclick="closePlayer()"><svg class="ic"><use href="#i-x"/></svg></button>
+      <div class="mid">
+        <div class="ttl" id="ptitle"></div>
+        <div class="sub2" id="psub"></div>
+      </div>
+      <button class="icbtn" id="pCC" style="display:none" title="字幕">CC</button>
+      <button class="icbtn" id="pQueue" title="队列"><svg class="ic"><use href="#i-queue"/></svg></button>
+      <button class="icbtn" id="pPip" title="画中画"><svg class="ic"><use href="#i-pip"/></svg></button>
+    </div>
+    <div id="qpanel">
+      <div class="qh"><span data-i18n="queue">播放队列</span><span class="spacer"></span>
+        <span id="qCount" style="font-weight:400;opacity:.6"></span>
+        <button class="icbtn" id="qClose" style="width:28px;height:28px;background:rgba(255,255,255,.1)">
+          <svg class="ic"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="qlist" id="qList"></div>
+      <div style="padding:9px 12px;border-top:1px solid rgba(255,255,255,.1)">
+        <button class="btn ghost sm" id="qClear" style="width:100%;border-color:rgba(255,255,255,.16);color:#bbb"
+                data-i18n="qClear">清空队列</button>
+      </div>
+    </div>
+    <div id="chapPanel">
+      <div class="qh"><span data-i18n="chapters">章节</span><span class="spacer"></span>
+        <span id="chapMeta" style="font-weight:400;opacity:.6"></span>
+        <button class="icbtn" id="chapClose" style="width:28px;height:28px;background:rgba(255,255,255,.1)">
+          <svg class="ic"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="chlist" id="chapList"></div>
+      <div style="padding:9px 12px;border-top:1px solid rgba(255,255,255,.1);display:flex;gap:7px">
+        <button class="btn ghost sm" id="chapAdd" style="flex:1;border-color:rgba(255,255,255,.16);color:#bbb"
+                data-i18n="chAdd">在当前位置标记</button>
+        <button class="btn ghost sm" id="chapM3u" style="border-color:rgba(255,255,255,.16);color:#bbb"
+                data-i18n="chExport">导出 m3u</button>
+      </div>
+    </div>
+    <div id="phint">
+      <span id="hintSeek"></span><span id="hintVol"></span><span id="hintTap"></span>
+    </div>
+    <div id="pnext">
+      <img id="pNextCov" alt="">
+      <div class="pnInfo"><div class="pnTag">UP NEXT</div><div class="pnTitle" id="pNextTitle"></div></div>
+      <span class="pnCnt" id="pNextCnt"></span>
+      <button class="icbtn" id="pNextGo"><svg class="ic" style="fill:currentColor;stroke:none"><use href="#i-play"/></svg></button>
+      <button class="icbtn" id="pNextNo"><svg class="ic"><use href="#i-x"/></svg></button>
+    </div>
+    <div id="pthumb"><div id="pthumbImg"></div><span id="pthumbT"></span></div>
+    <div id="pctrl">
+      <div class="pbwrap">
+        <span id="pTime" class="ptime"><b>0:00</b> <span>/ 0:00</span></span>
+        <div id="pbar"><div class="track"></div><div id="pbuf"></div><div id="pfill"></div><div id="pknob"></div>
+          <span class="abmark" id="abA"></span><span class="abmark" id="abB"></span>
+          <span id="chapMarks"></span></div>
+      </div>
+      <div class="prow">
+        <button class="icbtn" id="pPlay"><svg class="ic"><use href="#i-pause" id="pPlayIc"/></svg></button>
+        <button class="icbtn" id="pPrev"><svg class="ic"><use href="#i-prev"/></svg></button>
+        <button class="icbtn" id="pNextB"><svg class="ic"><use href="#i-next"/></svg></button>
+        <button class="icbtn txt" id="pAB">A–B</button>
+        <button class="icbtn txt" id="pChap" title="章节">≡</button>
+        <button class="icbtn txt" id="pRate">1x</button>
+        <button class="icbtn txt" id="pAuto">∞</button>
+        <div class="spacer"></div>
+        <button class="icbtn txt" id="pQMode" title="${t('queue')}">☰</button>
+        <button class="icbtn" id="pFS"><svg class="ic"><use href="#i-fs"/></svg></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+/* PWA: 注册 service worker(点图标即用)。file:// 或不支持时静默跳过。 */
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+/* ═══ i18n ═══ */
+const I18N = {
+  zh: { parse:'解析', all:'全选', none:'全不选', audio:'仅音频', dl:'下载所选',
+    tasks:'下载任务', noTask:'暂无任务', library:'媒体库', scan:'扫描全盘', export:'导出备份',
+    loose:'散文件', sNew:'最新', sSeq:'下载顺序', sOld:'最早', sName:'名称',
+    tabDl:'下载', tabTask:'任务', tabLib:'媒体库', prev:'上P', next:'下P',
+    searchPh:'搜索标题', emptyLib:'库里还空着', emptySearch:'没搜到', resume:'继续观看',
+    hints:['⟷ 横滑进度','右滑音量 · 左滑亮度','双击±10s · 单击暂停'],
+    del:'删除', expand:'分P', up:'UP主', partsN:'个分P',
+    st:{'排队中':'排队中','下载中':'下载中','完成':'完成','部分失败':'部分失败','失败':'失败','已取消':'已取消'},
+    confirmDelVideo:'删除这部视频及其所有分P文件?', confirmDelFile:'删除 ', confirmRedl:'重新下载 P',
+    scanAdded:'新导入', scanFail:'扫描失败', exportFail:'导出失败',
+    exportOk1:'备份已生成', exportOk2:'换机: 解压覆盖到 decache 文件夹即可',
+    pipNo:'此浏览器不支持画中画', offline:'离线', submitFail:'提交失败', pasteFail:'剪贴板不可用',
+    seqMode:'顺序', loopAll:'全部循环', loopOne:'单集循环', shuffle:'随机',
+    settings:'设置', sessHint:'站点登录 cookie（可选）：从浏览器开发者工具复制 "KEY=VALUE; ..."；域名按链接自动推断',
+    save:'保存', saved:'已保存 ✓', sessOn:'已配置', sessOff:'未配置',
+    dlDone:'下载完成', dlFail:'有下载失败', nextOff:'本集不自动连播',
+    fAll:'全部', fFav:'收藏', queue:'播放队列', qClear:'清空队列', qEmpty:'队列是空的',
+    qAdd:'加入队列', qAdded:'已加入队列', qItems:'项', tabFolder:'文件夹',
+    bRoot:'根目录', bEmpty:'这个文件夹里没有视频',
+    chapters:'章节', chEmpty:'没有章节', chReal:'真实章节', chAuto:'自动分段',
+    chAdd:'在当前位置标记', chMarked:'已标记', chExport:'导出 m3u',
+    m3uImport:'导入 m3u 队列', m3uOk:'已导入', ffMissing:'未找到(需安装)',
+    health:'体检(查坏文件)', healthRun:'体检中…', healthOk:'文件都正常', healthBad:'发现损坏',
+    subStyle:'字幕样式', subSize:'字号', subBg:'背景', subPos:'位置',
+    subBgShadow:'描边', subBgSolid:'黑底', subBgWhite:'白底',
+    subPosTop:'顶部', subPosMid:'居中', subPosBottom:'底部',
+    dupes:'查重', storage:'磁盘', scanning:'扫描中…', noDupes:'没有重复文件',
+    waste:'可省', wasteTotal:'共可省', total:'占用', free:'剩余', items:'项',
+    mainPart:'正片', segment:'片段',
+    qUp:'上移', qDown:'下移', qRemove:'移除',
+    urlPh:'粘贴视频链接', sessPh:'粘贴 cookie (KEY=VALUE; ...)',
+    themeAuto:'主题: 跟随系统', themeLight:'主题: 亮色', themeDark:'主题: 暗色',
+    access:'手机访问与安装', lanOpen:'在同一 Wi-Fi 下, 手机/平板打开:', lanHint:'手机访问需把 config.ini 的 bind 改成 0.0.0.0',
+    install:'装到桌面', installHint:'用浏览器菜单「添加到主屏幕」', installed:'已安装',
+    installTip:'浏览器菜单 →「添加到主屏幕 / 安装应用」, 之后点桌面图标即可用',
+    uniRun:'生成通用版中…', uniOk:'已生成全平台通用版', uniAlready:'已经是 mp4',
+    uniFail:'生成失败', uniCompat:'生成通用版(全平台都能播)'},
+  en: { parse:'Parse', all:'All', none:'None', audio:'Audio only', dl:'Download',
+    tasks:'Tasks', noTask:'No tasks', library:'Library', scan:'Scan videos', export:'Export backup',
+    loose:'Loose files', sNew:'Newest', sSeq:'Order', sOld:'Oldest', sName:'Name',
+    tabDl:'Download', tabTask:'Tasks', tabLib:'Library', prev:'Prev', next:'Next',
+    searchPh:'Search titles', emptyLib:'Library is empty', emptySearch:'No results', resume:'Resume',
+    hints:['⟷ swipe to seek','R: volume · L: brightness','dbl-tap ±10s · tap pause'],
+    del:'Delete', expand:'Parts', up:'Uploader', partsN:'parts',
+    st:{'排队中':'Queued','下载中':'Downloading','完成':'Done','部分失败':'Partial','失败':'Failed','已取消':'Cancelled'},
+    confirmDelVideo:'Delete this video and all its parts?', confirmDelFile:'Delete ', confirmRedl:'Re-download P',
+    scanAdded:'Imported', scanFail:'Scan failed', exportFail:'Export failed',
+    exportOk1:'Backup saved', exportOk2:'New device: extract over the decache folder',
+    pipNo:'PiP not supported', offline:'Offline', submitFail:'Submit failed', pasteFail:'Clipboard unavailable',
+    seqMode:'Seq', loopAll:'Loop all', loopOne:'Loop one', shuffle:'Shuffle',
+    settings:'Settings', sessHint:'Site login cookie (optional): copy "KEY=VALUE; ..." from DevTools; domain inferred from the link',
+    save:'Save', saved:'Saved ✓', sessOn:'Configured', sessOff:'Not set',
+    dlDone:'Download finished', dlFail:'Some downloads failed', nextOff:'Autoplay off for this one',
+    fAll:'All', fFav:'Favorites', queue:'Queue', qClear:'Clear queue', qEmpty:'Queue is empty',
+    qAdd:'Add to queue', qAdded:'Added to queue', qItems:'items', tabFolder:'Folders',
+    bRoot:'Roots', bEmpty:'No videos in this folder',
+    chapters:'Chapters', chEmpty:'No chapters', chReal:'Real chapters', chAuto:'Auto segments',
+    chAdd:'Mark here', chMarked:'Marked', chExport:'Export m3u',
+    m3uImport:'Import m3u', m3uOk:'Imported', ffMissing:'not found (install it)',
+    health:'Health check', healthRun:'Checking…', healthOk:'All files OK', healthBad:'Damaged:',
+    subStyle:'Subtitle style', subSize:'Size', subBg:'Background', subPos:'Position',
+    subBgShadow:'Shadow', subBgSolid:'Solid', subBgWhite:'White',
+    subPosTop:'Top', subPosMid:'Middle', subPosBottom:'Bottom',
+    dupes:'Duplicates', storage:'Storage', scanning:'Scanning…', noDupes:'No duplicate files',
+    waste:'reclaim', wasteTotal:'Total reclaimable', total:'Used', free:'Free', items:'items',
+    mainPart:'Main', segment:'Segment',
+    qUp:'Move up', qDown:'Move down', qRemove:'Remove',
+    urlPh:'Paste a video link', sessPh:'Paste cookie (KEY=VALUE; ...)',
+    themeAuto:'Theme: follow system', themeLight:'Theme: light', themeDark:'Theme: dark',
+    access:'Phone access & install', lanOpen:'On the same Wi-Fi, open on phone/tablet:',
+    lanHint:'For phone access set bind = 0.0.0.0 in config.ini',
+    install:'Add to home screen', installHint:'Browser menu → "Add to Home Screen"', installed:'Installed',
+    installTip:'Browser menu → "Add to Home Screen / Install app", then tap the icon',
+    uniRun:'Making universal copy…', uniOk:'Universal copy ready', uniAlready:'Already mp4',
+    uniFail:'Failed', uniCompat:'Make universal copy'},
+};
+let LANG = localStorage.getItem('take_lang') || 'zh';
+const t = k => (I18N[LANG] && I18N[LANG][k]) || I18N.zh[k] || k;
+function applyLang() {
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.placeholder = t(el.dataset.i18nPh); });
+  $('q').placeholder = t('searchPh');
+  $('langBtn').textContent = LANG === 'zh' ? 'EN' : '中';
+  if (typeof applyTheme === 'function') applyTheme();
+  $('hintSeek').textContent = t('hints')[0];
+  $('hintVol').textContent = t('hints')[1];
+  $('hintTap').textContent = t('hints')[2];
+  renderLib(); renderTasks(); renderMode();
+  if (typeof renderFilterChips === 'function') { renderFilterChips(); renderQueue(); }
+  if (typeof renderChapters === 'function') renderChapters();
+  if (typeof loadCfg === 'function') loadCfg();          // 配置状态(未配置/已配置)是动态文案
+  if ($('sheet').classList.contains('show')) {           // 打开中的工具面板要重渲染
+    const t0 = $('sheetTitle').textContent;
+    if (t0 === t('dupes')) showDupes();
+    else if (t0 === t('storage')) showStorage();
+  }
+}
+$('langBtn').onclick = () => { LANG = LANG === 'zh' ? 'en' : 'zh';
+  localStorage.setItem('take_lang', LANG); applyLang(); };
+
+/* ═══ 基础 ═══ */
+let current = null, LIB = {videos:[], loose:[]}, SORT = 'time_desc', LIB_SHOW = 60;
+const api = async (path, opts) => {
+  const r = await fetch(path, opts ? {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(opts)} : undefined);
+  return r.json();
+};
+function toast(msg) {
+  const g = $('gtoast'); g.textContent = msg; g.classList.add('show');
+  clearTimeout(toast._t); toast._t = setTimeout(() => g.classList.remove('show'), 2400);
+}
+/* 页签高亮: 纯 class 切换(样式全在 CSS, 不碰内联 style) */
+document.querySelector('.tabbar').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  document.querySelectorAll('.tabbar button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  $('page-' + b.dataset.tab).classList.add('active');
+  window.scrollTo({top: 0});
+  if (b.dataset.tab === 'folder' && !BROWSE_PATH) browse('');
+});
+const switchTab = x => document.querySelector(`.tabbar button[data-tab="${x}"]`).click();
+const pasteFromClipboard = async () => {
+  try { $('url').value = await navigator.clipboard.readText(); }
+  catch { toast(t('pasteFail')); }
+};
+const fmtT = t0 => { const d = new Date(t0*1000);
+  return `${d.getMonth()+1}-${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
+
+/* ═══ 解析/下载 ═══ */
+async function parse() {
+  $('perr').textContent = '';
+  const raw = $('url').value.trim();
+  const d = await api('/api/info?url=' + encodeURIComponent(raw));
+  if (d.error) { $('perr').textContent = d.error; return; }
+  current = d;
+  current.url = raw;
+  $('infoCard').style.display = 'block';
+  $('cover').src = d.cover;
+  $('vtitle').textContent = d.title;
+  $('vowner').textContent = `${t('up')}: ${d.owner} · ${d.pages.length} ${t('partsN')}`;
+  $('plist').innerHTML = d.pages.map(p =>
+    `<label><input type="checkbox" class="pc" value="${p.page}" checked>
+     <span>P${p.page} · ${esc(p.part || t('mainPart'))}</span></label>`).join('');
+}
+function selAll(v) { document.querySelectorAll('.pc').forEach(c => c.checked = v); }
+async function download(partsOverride) {
+  const parts = partsOverride || [...document.querySelectorAll('.pc:checked')].map(c => +c.value);
+  if (!parts.length) return;
+  const part_names = {};
+  const part_urls = {};
+  (current?.pages || []).forEach(p => {
+    part_names[p.page] = p.part || ('P' + p.page);
+    if (p.url) part_urls[p.page] = p.url;
+  });
+  $('dlBtn').disabled = true;
+  try {
+    await api('/api/download', {bvid: current.bvid, title: current.title, cover: current.cover,
+                                parts, part_names, part_urls, url: current.url || '',
+                                audio_only: $('audioOnly').checked});
+    switchTab('task');
+  } catch (e) { toast(t('submitFail') + ': ' + e); }
+  $('dlBtn').disabled = false;
+}
+
+/* ═══ 任务 ═══ */
+let LAST_TASKS = [];
+let _lastPending = new Map();     // 完成检测: 上轮 pending 中消失的 id → toast
+async function refreshTasks() {
+  const ts = await api('/api/tasks');
+  LAST_TASKS = ts;
+  const pending = new Map(ts.filter(x => x.status_code === 'queued' || x.status_code === 'downloading')
+    .map(x => [x.id, x]));
+  for (const id of _lastPending.keys()) if (!pending.has(id)) {
+    const cur = ts.find(x => x.id === id);
+    if (cur?.status_code === 'done') toast(`${t('dlDone')} · ${(cur.title || '').slice(0, 26)}`);
+    else if (cur?.status_code === 'partial') toast(`${t('dlFail')} · ${(cur.title || '').slice(0, 26)}`);
+  }
+  _lastPending = pending;
+  $('tasks').innerHTML = ts.length ? ts.slice().reverse().map(x => {
+    const m = /([\d.]+)%/.exec(x.line || '');
+    const retry = (x.status_code === 'partial' && x.failed?.length)
+      ? `<button class="btn sm" data-retry="${x.id}">↻</button>` : '';
+    const cancel = (x.status_code === 'downloading' || x.status_code === 'queued')
+      ? `<button class="btn danger sm" data-cancel="${x.id}">✕</button>` : '';
+    return `<div class="card tcard"><div class="tt">${esc(x.title || x.bvid)}
+      <span class="pill ${x.status_code}">${t('st')[x.status] || x.status}</span>
+      <span class="pct">${m ? m[1] + '%' : ''}</span></div>
+      <div class="ln">${esc(x.line || '')}</div>
+      ${(retry || cancel) ? `<div class="row" style="margin-top:8px">${retry}${cancel}</div>` : ''}
+      ${m ? `<div class="bar"><i style="width:${m[1]}%"></i></div>`
+          : (x.status_code === 'downloading' ? '<div class="bar ind"><i></i></div>' : '')}</div>`;
+  }).join('') : `<div class="empty"><span class="big"><svg class="ic"><use href="#i-inbox"/></svg></span>${t('noTask')}</div>`;
+}
+const renderTasks = refreshTasks;
+$('tasks').addEventListener('click', e => {
+  const r = e.target.closest('[data-retry]');
+  if (r) { const x = LAST_TASKS.find(z => z.id === +r.dataset.retry); if (!x) return;
+    current = {bvid: x.bvid, title: x.title, pages: x.failed.map(p => ({page:p, part:(x.part_names||{})[p] || ('P'+p)}))};
+    download(x.failed); return; }
+  const c = e.target.closest('[data-cancel]');
+  if (c) { const card = c.closest('.tcard');
+    if (card) { card.style.opacity = '.35'; c.disabled = true; }
+    api('/api/cancel', {id: +c.dataset.cancel}); return; }
+});
+
+/* ═══ 章节 (v6.4) ═══ */
+let CHAPTERS = [], CHAP_REAL = false, CHAP_MARKS = [];
+async function loadChapters(rel, dur) {
+  CHAPTERS = []; CHAP_MARKS = []; CHAP_REAL = false;
+  renderChapters();
+  if (!rel) return;
+  try {
+    const d = await api('/api/chapters?rel=' + encodeURIComponent(rel) + '&dur=' + (dur || 0));
+    CHAPTERS = d.chapters || [];
+    CHAP_REAL = !!d.real;
+    renderChapters();
+  } catch {}
+  /* 手动标记(存在 library 里的 marks) */
+  const vd = (FLAT[FI] || {}).vd;
+  if (vd && vd.bvid && vd.marks) { CHAP_MARKS = vd.marks; renderChapters(); }
+}
+function renderChapters() {
+  const marks = $('chapMarks');
+  const D = v.duration || 1;
+  let html = CHAPTERS.slice(1).map(c => `<i style="left:${(c.start / D * 100).toFixed(3)}%"></i>`).join('');
+  html += CHAP_MARKS.map(m => `<i class="mk" style="left:${(m.t / D * 100).toFixed(3)}%"></i>`).join('');
+  marks.innerHTML = html;
+  renderChapList();
+}
+function renderChapList() {
+  const list = $('chapList');
+  const all = [...CHAPTERS.map(c => ({t: c.start, title: c.title || t('segment')})),
+               ...CHAP_MARKS.map(m => ({t: m.t, title: m.title, mark: true}))].sort((a, b) => a.t - b.t);
+  $('chapMeta').textContent = all.length ? (CHAP_REAL ? t('chReal') : t('chAuto')) : '';
+  if (!all.length) { list.innerHTML = `<div class="qempty">${t('chEmpty')}</div>`; return; }
+  const cur = v.currentTime || 0;
+  const sheet = thumbURL && thumbReady ? thumbURL : '';
+  list.innerHTML = all.map((c, i) => {
+    const near = Math.abs(c.t - cur) < 2.5;
+    /* 缩略图切片: 伪章节用雪碧图对应格, 真章节用最近的一格 */
+    const gi = CHAPTERS.length ? Math.min(CHAPTERS.length - 1, Math.max(0, Math.round(c.t / (v.duration || 1) * CHAPTERS.length) - 0)) : 0;
+    const bg = sheet ? `background-image:url(${sheet});background-size:${thumbW}px ${thumbH}px;background-position:-${(gi % thumbCols) * (thumbW / thumbCols)}px -${Math.floor(gi / thumbCols) * (thumbH / Math.ceil(CHAPTERS.length / thumbCols))}px` : '';
+    return `<div class="chitem${near ? ' cur' : ''}" data-cht="${c.t}">
+      <span class="cthumb" style="${bg}"></span>
+      <span class="cn">${esc(c.title)}</span>
+      <span class="ct">${fmtDur(c.t)}</span>
+      ${c.mark ? `<button class="cdel" data-chdel="${c.t}"><svg class="ic"><use href="#i-x"/></svg></button>` : ''}
+    </div>`;
+  }).join('');
+}
+$('chapList').addEventListener('click', e => {
+  const del = e.target.closest('[data-chdel]');
+  if (del) {
+    const vd = (FLAT[FI] || {}).vd;
+    if (!vd || !vd.bvid) return;
+    api('/api/marks', {bvid: vd.bvid, rel: FLAT[FI].rel, op: 'del', t: +del.dataset.chdel})
+      .then(() => { CHAP_MARKS = CHAP_MARKS.filter(m => Math.abs(m.t - +del.dataset.chdel) > 0.01); renderChapters(); });
+    return;
+  }
+  const it = e.target.closest('[data-cht]');
+  if (it) { v.currentTime = +it.dataset.cht; poke(); }
+});
+$('pChap').onclick = () => {
+  const on = $('chapPanel').classList.toggle('show');
+  $('qpanel').classList.remove('show');
+  if (on) { loadChapters(FLAT[FI]?.rel, v.duration); }
+  poke();
+};
+$('chapClose').onclick = () => $('chapPanel').classList.remove('show');
+$('chapAdd').onclick = async () => {
+  const vd = (FLAT[FI] || {}).vd;
+  if (!vd || !vd.bvid) return;
+  const t = v.currentTime || 0;
+  const r = await api('/api/marks', {bvid: vd.bvid, rel: FLAT[FI].rel, t});
+  CHAP_MARKS = r.marks || [];
+  renderChapters();
+  toast(t('chMarked'));
+};
+$('chapM3u').onclick = () => {
+  const a = document.createElement('a');
+  a.href = '/api/playlist.m3u';
+  a.download = 'decache.m3u';
+  a.click();
+};
+
+/* ═══ 字幕样式 (v6.5) ═══ */
+const SUB_DEF = {size: 18, bg: 'shadow', pos: 'bottom'};
+let SUB_STYLE = Object.assign({}, SUB_DEF,
+  JSON.parse(localStorage.getItem('take_substyle') || '{}'));
+function applySubStyle() {
+  let el = document.getElementById('substyle');
+  if (!el) { el = document.createElement('style'); el.id = 'substyle'; document.head.appendChild(el); }
+  const s = SUB_STYLE;
+  const bg = s.bg === 'solid' ? 'rgba(0,0,0,.88)' : s.bg === 'white' ? 'rgba(255,255,255,.94)' : 'transparent';
+  const fg = s.bg === 'white' ? '#111' : '#fff';
+  /* Chrome/Firefox 用 ::cue; Safari 用 -webkit-media-text-track-container 控位置 */
+  const vTop = s.pos === 'top' ? '14%' : 'auto';
+  const vBot = s.pos === 'bottom' ? '14%' : (s.pos === 'middle' ? '42%' : 'auto');
+  el.textContent = `
+    #pvideo::cue { font-size:${s.size}px !important; background-color:${bg} !important; color:${fg} !important; }
+    #pvideo::-webkit-media-text-track-display { font-size:${s.size}px !important; }
+    #pvideo::-webkit-media-text-track-container { position:absolute !important;
+      top:${vTop} !important; bottom:${vBot} !important; }`;
+  $('subSizeVal').textContent = s.size + 'px';
+}
+function setSubStyle() {
+  SUB_STYLE.size = +$('subSize').value;
+  localStorage.setItem('take_substyle', JSON.stringify(SUB_STYLE));
+  applySubStyle();
+}
+function initSubStyleUI() {
+  $('subSize').value = SUB_STYLE.size;
+  document.querySelectorAll('[data-subbg]').forEach(c =>
+    c.classList.toggle('on', c.dataset.subbg === SUB_STYLE.bg));
+  document.querySelectorAll('[data-subpos]').forEach(c =>
+    c.classList.toggle('on', c.dataset.subpos === SUB_STYLE.pos));
+  applySubStyle();
+}
+document.querySelectorAll('[data-subbg]').forEach(c => c.onclick = () => {
+  SUB_STYLE.bg = c.dataset.subbg;
+  localStorage.setItem('take_substyle', JSON.stringify(SUB_STYLE));
+  initSubStyleUI();
+});
+document.querySelectorAll('[data-subpos]').forEach(c => c.onclick = () => {
+  SUB_STYLE.pos = c.dataset.subpos;
+  localStorage.setItem('take_substyle', JSON.stringify(SUB_STYLE));
+  initSubStyleUI();
+});
+
+/* ═══ 工具面板: 查重 / 磁盘占用 (v6.5) ═══ */
+function openSheet(title, html) {
+  $('sheetTitle').textContent = title;
+  $('sheetBody').innerHTML = html;
+  $('sheet').classList.add('show');
+}
+$('sheetClose').onclick = () => $('sheet').classList.remove('show');
+async function showDupes() {
+  openSheet(t('dupes'), `<div class="empty">${t('scanning')}</div>`);
+  const d = await api('/api/dupes');
+  if (!d.groups?.length) {
+    $('sheetBody').innerHTML = `<div class="empty">${t('noDupes')}</div>`;
+    return;
+  }
+  $('sheetBody').innerHTML = d.groups.map((g, gi) => `
+    <div class="dgroup">
+      <div class="dgh">${g.size_mb}MB × ${g.files.length} <span>${t('waste')} ${g.waste_mb}MB</span></div>
+      ${g.files.map(f => `<div class="dfile"><span class="dn">${esc(f.name)}</span>
+        <span class="dmeta">${esc(f.title.slice(0, 18))} P${f.p}</span></div>`).join('')}
+    </div>`).join('') + `<div class="meta" style="margin-top:12px">${t('wasteTotal')} ${d.waste_mb}MB</div>`;
+}
+async function showStorage() {
+  openSheet(t('storage'), `<div class="empty">${t('scanning')}</div>`);
+  const d = await api('/api/storage');
+  const mx = d.items[0]?.size_mb || 1;
+  $('sheetBody').innerHTML = `
+    <div class="meta" style="margin-bottom:10px">
+      ${t('total')} ${d.total_mb}MB · ${d.count} ${t('items')} · ${t('free')} ${d.free_mb}MB</div>
+    ${d.items.map(x => `<div class="srow">
+      <span class="sn">${esc(x.title)}</span>
+      <span class="sbar"><i style="width:${(x.size_mb / mx * 100).toFixed(1)}%"></i></span>
+      <span class="sm">${x.size_mb}MB</span></div>`).join('')}`;
+}
+
+/* ═══ 主题三态: auto(跟随系统) / light / dark ═══ */
+let THEME = localStorage.getItem('take_theme') || 'auto';
+function applyTheme() {
+  const r = document.documentElement;
+  if (THEME === 'auto') r.removeAttribute('data-theme');
+  else r.setAttribute('data-theme', THEME);
+  const ic = $('themeIcon');
+  if (ic) ic.setAttribute('href', THEME === 'light' ? '#i-sun' : THEME === 'dark' ? '#i-moon' : '#i-theme');
+  const b = $('themeBtn');
+  if (b) b.title = THEME === 'light' ? t('themeLight') : THEME === 'dark' ? t('themeDark') : t('themeAuto');
+  localStorage.setItem('take_theme', THEME);
+}
+$('themeBtn').onclick = () => {
+  THEME = THEME === 'auto' ? 'light' : THEME === 'light' ? 'dark' : 'auto';
+  applyTheme();
+};
+
+/* ═══ 局域网 / 安装到桌面 / iOS 兼容 ═══ */
+async function loadLan() {
+  try {
+    const d = await api('/api/lan');
+    if (d.lan?.length) {
+      $('lanMeta').innerHTML = (d.bind !== '127.0.0.1')
+        ? t('lanOpen') + '<br>' + d.lan.map(u => `<a href="${esc(u)}" style="color:var(--pink)">${esc(u)}</a>`).join('<br>')
+        : t('lanHint');
+    } else {
+      $('lanMeta').textContent = t('lanHint');
+    }
+  } catch { $('lanMeta').textContent = t('lanHint'); }
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  $('installHint').textContent = isStandalone ? t('installed') : t('installHint');
+}
+function showInstall() {
+  toast(t('installTip'));
+}
+async function makeUni(bvid, p, btn) {
+  btn.style.opacity = '.4';
+  toast(t('uniRun'));
+  try {
+    const d = await api('/api/uni?bvid=' + encodeURIComponent(bvid) + '&p=' + encodeURIComponent(p));
+    if (d.error) { toast(d.error); return; }
+    toast(d.already ? t('uniAlready') : t('uniOk') + (d.remuxed ? ' (remux)' : ' (re-encoded)'));
+    loadLib();
+  } catch (e) { toast(t('uniFail')); }
+  finally { btn.style.opacity = ''; }
+}
+
+/* ═══ 标签 / 收藏 / 队列 (v6.2) ═══ */
+const TAGS = [
+  {k:'red', c:'#F87171'}, {k:'orange', c:'#FB923C'}, {k:'yellow', c:'#FACC15'},
+  {k:'green', c:'#4ADE80'}, {k:'blue', c:'#60A5FA'}, {k:'purple', c:'#A78BFA'}];
+const TAGMAP = Object.fromEntries(TAGS.map(t => [t.k, t.c]));
+let FILTER_TAG = '', FILTER_FAV = false;
+let LIB_TAGS = {tags:{}, fav:0};
+
+async function loadTagStats() {
+  try { LIB_TAGS = await api('/api/tags'); } catch {}
+  renderFilterChips();
+}
+function renderFilterChips() {
+  const box = $('filterChips');
+  const counts = LIB_TAGS.tags || {};
+  const extra = Object.keys(counts).filter(k => !TAGMAP[k])
+    .map(k => ({k, c:'#8B94A8'}));
+  const all = [...TAGS.filter(t => counts[t.k]), ...extra];
+  box.innerHTML = `
+    <span class="chip${FILTER_TAG === '' && !FILTER_FAV ? ' on' : ''}" data-tag="" data-fav="0">${t('fAll')}</span>
+    <span class="chip${FILTER_FAV ? ' on' : ''}" data-tag="" data-fav="1">
+      <svg class="ic" style="width:11px;height:11px;vertical-align:-1px;fill:currentColor;stroke:none"><use href="#i-star"/></svg>${t('fFav')}${LIB_TAGS.fav ? ' ' + LIB_TAGS.fav : ''}</span>
+    ${all.map(x => `<span class="chip${FILTER_TAG === x.k ? ' on' : ''}" data-tag="${x.k}" data-fav="0">
+      <span class="tagdot" style="background:${x.c}"></span>${x.k}${counts[x.k] ? ' ' + counts[x.k] : ''}</span>`).join('')}`;
+}
+$('filterChips').addEventListener('click', e => {
+  const c = e.target.closest('.chip'); if (!c) return;
+  FILTER_FAV = c.dataset.fav === '1';
+  FILTER_TAG = FILTER_FAV ? '' : (c.dataset.tag || '');
+  renderFilterChips();
+  loadLib();
+});
+async function toggleTag(bvid, tag) {
+  await api('/api/tag', {bvid, tag});
+  loadTagStats(); loadLib();
+}
+async function toggleFav(bvid) {
+  await api('/api/fav', {bvid});
+  loadTagStats(); loadLib();
+}
+async function queueAdd(item) {
+  await api('/api/queue', {op:'add', item});
+  toast(t('qAdded'));
+  renderQueue();
+}
+
+/* 队列 */
+let QUEUE = {items:[]};
+async function loadQueue() {
+  try { QUEUE = await api('/api/queue'); } catch {}
+  renderQueue();
+}
+function renderQueue() {
+  const items = QUEUE.items || [];
+  $('qCount').textContent = items.length ? items.length + ' ' + t('qItems') : '';
+  const list = $('qList');
+  if (!items.length) { list.innerHTML = `<div class="qempty">${t('qEmpty')}</div>`; return; }
+  const cur = (FLAT[FI] || {}).rel;
+  list.innerHTML = items.map((it, i) => `
+    <div class="qitem${it.rel === cur ? ' cur' : ''}" data-qi="${i}">
+      <span class="qn" data-qplay="${i}">${esc(it.title || it.name || it.rel)}</span>
+      <span class="qops">
+        <button data-qup="${i}" title="${t('qUp')}"><svg class="ic"><use href="#i-up"/></svg></button>
+        <button data-qdown="${i}" title="${t('qDown')}"><svg class="ic"><use href="#i-down"/></svg></button>
+        <button data-qdel="${i}" title="${t('qRemove')}"><svg class="ic"><use href="#i-x"/></svg></button>
+      </span>
+    </div>`).join('');
+}
+$('qList').addEventListener('click', async e => {
+  const up = e.target.closest('[data-qup]');
+  const dn = e.target.closest('[data-qdown]');
+  const del = e.target.closest('[data-qdel]');
+  const pl = e.target.closest('[data-qplay]');
+  if (up) { await api('/api/queue', {op:'up', i:+up.dataset.qup}); loadQueue(); return; }
+  if (dn) { await api('/api/queue', {op:'down', i:+dn.dataset.qdown}); loadQueue(); return; }
+  if (del) { await api('/api/queue', {op:'remove', i:+del.dataset.qdel}); loadQueue(); return; }
+  if (pl) {
+    const it = QUEUE.items[+pl.dataset.qplay];
+    if (it) { FLAT = QUEUE.items.map(x => ({rel:x.rel, vd:{title:x.title, bvid:x.bvid}, p:{p:x.p, name:x.name}}));
+      startPart(+pl.dataset.qplay); }
+  }
+});
+$('qClear').onclick = async () => { await api('/api/queue', {op:'clear'}); loadQueue(); };
+$('qClose').onclick = () => $('qpanel').classList.remove('show');
+$('pQueue').onclick = () => { $('qpanel').classList.toggle('show'); loadQueue(); poke(); };
+/* 队列模式开关: 播放列表从「全库」切到「我的队列」 */
+$('pQMode').onclick = () => {
+  if (!QUEUE_MODE && !(QUEUE.items || []).length) { toast(t('qEmpty')); return; }
+  QUEUE_MODE = !QUEUE_MODE;
+  $('pQMode').classList.toggle('on', QUEUE_MODE);
+  const cur = (FLAT[FI] || {}).rel;
+  FLAT = buildFlat();
+  const i = FLAT.findIndex(x => x.rel === cur);
+  if (i >= 0) FI = i;
+  else if (FLAT.length) startPart(0);
+  toast(QUEUE_MODE ? t('queue') : t('fAll'));
+  poke();
+};
+
+/* ═══ 文件夹浏览 ═══ */
+let BROWSE_PATH = '';
+async function browse(path) {
+  BROWSE_PATH = path || '';
+  const d = await api('/api/browse' + (BROWSE_PATH ? '?path=' + encodeURIComponent(BROWSE_PATH) : ''));
+  const box = $('browseList');
+  const cr = $('crumbs');
+  if (d.error) { box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; cr.innerHTML = ''; return; }
+  cr.innerHTML = d.path
+    ? (d.can_up ? `<span class="cb" data-bp="${esc(d.parent)}">..</span><span class="sep">/</span>` : '')
+      + `<span class="cb" data-bp="">${t('bRoot')}</span><span class="sep">/</span><span class="cb" style="color:var(--tx)">${esc(d.path.split(/[\\/]/).filter(Boolean).pop() || d.path)}</span>`
+    : `<span class="cb" style="color:var(--tx)">${t('bRoot')}</span>`;
+  const dirs = (d.dirs || []).map(x => `
+    <div class="browsecard" data-bdir="${esc(x.path)}">
+      <span class="bi"><svg class="ic"><use href="#i-folder"/></svg></span>
+      <span class="bn">${esc(x.name)}</span>
+      ${x.n ? `<span class="bm">${x.n}</span>` : ''}
+    </div>`).join('');
+  const files = (d.files || []).map(x => `
+    <div class="browsecard" data-bfile="${esc(x.rel)}">
+      <span class="bi"><svg class="ic"><use href="#i-play"/></svg></span>
+      <span class="bn">${esc(x.name)}</span>
+      <span class="bm">${x.size}MB</span>
+      <span class="bops">
+        <button class="queuebtn" data-bq="${esc(x.rel)}" data-bname="${esc(x.name)}" title="${t('qAdd')}">
+          <svg class="ic"><use href="#i-plus"/></svg></button>
+      </span>
+    </div>`).join('');
+  box.innerHTML = `<div class="card" style="padding:2px 14px">${dirs || files
+    ? dirs + files : `<div class="empty" style="padding:30px 0">${t('bEmpty')}</div>`}</div>`;
+}
+$('browseList').addEventListener('click', e => {
+  const dir = e.target.closest('[data-bdir]');
+  if (dir) { browse(dir.dataset.bdir); return; }
+  const q = e.target.closest('[data-bq]');
+  if (q) { queueAdd({rel:q.dataset.bq, title:q.dataset.bname, name:q.dataset.bname, p:1}); return; }
+  const f = e.target.closest('[data-bfile]');
+  if (f) {
+    const rel = f.dataset.bfile;
+    FLAT = [{rel, vd:{title: rel.split(/[\\/]/).pop()}, p:{p:1, name:''}}];
+    startPart(0);
+    $('pmodal').classList.add('open');
+  }
+});
+$('crumbs').addEventListener('click', e => {
+  const c = e.target.closest('[data-bp]'); if (c) browse(c.dataset.bp);
+});
+
+/* ═══ 媒体库 ═══ */
+let __libETag = '';
+async function loadLib() {
+  const qs = new URLSearchParams();
+  if (FILTER_TAG) qs.set('tag', FILTER_TAG);
+  if (FILTER_FAV) qs.set('fav', '1');
+  const url = '/api/library' + (qs.toString() ? '?' + qs : '');
+  const r = await fetch(url, {headers: {'If-None-Match': __libETag}});
+  if (r.status === 304) return;
+  __libETag = r.headers.get('ETag') || '';
+  LIB = await r.json();
+  renderLib(); renderResume();
+}
+async function scanNow(btn) {
+  btn.disabled = true;
+  try { const r = await api('/api/scan');
+    toast(r.error ? t('scanFail') + ': ' + r.error : `${t('scanAdded')} ${r.added}`);
+    loadLib();
+  } finally { btn.disabled = false; }
+}
+async function exportNow() {
+  const r = await api('/api/export');
+  toast(r.error ? t('exportFail') + ': ' + r.error : `${t('exportOk1')} (${r.size}MB) — ${t('exportOk2')}`);
+}
+document.querySelectorAll('#sortChips .chip').forEach(c => c.onclick = () => {
+  document.querySelectorAll('#sortChips .chip').forEach(x => x.classList.toggle('on', x === c));
+  SORT = c.dataset.s; LIB_SHOW = 60; renderLib();
+});
+
+function renderResume() {
+  let best = null;
+  for (const vd of LIB.videos) for (const p of vd.parts) {
+    const rel = vd.folder + '/' + p.file;
+    const pos = parseFloat(localStorage.getItem('take_pos_' + rel) || 0);
+    if (pos > 30 && (!best || pos > best.pos)) best = {vd, p, rel, pos};
+  }
+  $('resumeSlot').innerHTML = best ? `
+    <div class="resume" data-open="${esc(best.rel)}">
+      <span class="ric"><svg class="ic" style="width:16px;height:16px;fill:currentColor;stroke:none"><use href="#i-play"/></svg></span>
+      <div style="flex:1;min-width:0"><b>${t('resume')}</b>
+        <div class="sub">${esc(best.vd.title)} · P${best.p.p} · ${fmtDur(best.pos)}</div></div>
+    </div>` : '';
+}
+$('resumeSlot').addEventListener('click', e => {
+  const o = e.target.closest('[data-open]'); if (o) openRel(o.dataset.open);
+});
+
+let _qT = 0;
+function libSearchDebounced() {         // 搜索防抖: 万级库每个键入都全量渲染会卡
+  LIB_SHOW = 60;
+  clearTimeout(_qT); _qT = setTimeout(renderLib, 150);
+}
+
+function renderLib() {
+  const q = $('q').value.trim().toLowerCase();
+  let vids = LIB.videos.filter(v => !q || v.title.toLowerCase().includes(q)
+    || (v.owner || '').toLowerCase().includes(q));
+  const hidden = Math.max(0, vids.length - LIB_SHOW);
+  vids.sort((a,b) => SORT==='name' ? a.title.localeCompare(b.title,'zh')
+              : SORT==='seq' ? (a.seq||0)-(b.seq||0)
+              : SORT==='time_asc' ? a.updated-b.updated : b.updated-a.updated);
+  $('libCount').textContent = LIB.videos.length;
+  $('lib').innerHTML = vids.length ? vids.slice(0, LIB_SHOW).map(v => `
+    <div class="vcard">
+      <div class="cov" data-play="${v.bvid}"><img src="/api/cover/${v.bvid}?t=${Math.floor(v.updated)}" loading="lazy"><span class="n">${v.parts.length}P</span></div>
+      <button class="favbtn${v.fav ? ' on' : ''}" data-fav="${v.bvid}" title="${t('fFav')}">
+        <svg class="ic"><use href="#i-star"/></svg></button>
+      <div class="bd">
+        <div class="vt">${esc(v.title)}</div>
+        <div class="vm">${v.total || 0}MB · ${fmtT(v.updated)}</div>
+        <div class="ops">
+          <button class="btn ghost sm" data-toggle="${v.bvid}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-clist"/></svg> ${v.parts.length}</button>
+          <button class="btn ghost sm" data-health="${v.bvid}" title="${t('health')}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-scan"/></svg></button>
+          <button class="btn danger sm" data-delvideo="${v.bvid}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-trash"/></svg></button>
+        </div>
+        <div class="tagbar">
+          ${TAGS.map(tg => `<button class="tgbtn${(v.tags||[]).includes(tg.k) ? ' on' : ''}" data-tagbtn="${v.bvid}|${tg.k}" title="${tg.k}"><i style="background:${tg.c}"></i></button>`).join('')}
+          <button class="queuebtn" data-qadd="${v.bvid}" title="${t('qAdd')}"><svg class="ic"><use href="#i-plus"/></svg></button>
+        </div>
+        <div class="parts" id="parts-${v.bvid}">
+          ${v.parts.map(p => `<div class="part">
+            <span class="pn">P${p.p} ${esc(p.name)}</span>
+            <div class="pr"><span class="s">${p.size}MB</span>
+              <span class="pico" data-redl="${v.bvid}|${p.p}|${esc(v.folder)}/${esc(p.file)}"><svg class="ic"><use href="#i-export"/></svg></span>
+              <span class="pico" data-uni="${v.bvid}|${p.p}" title="${t('uniCompat')}"><svg class="ic"><use href="#i-clist"/></svg></span>
+              <span class="pico" data-open="${esc(v.folder)}/${esc(p.file)}"><svg class="ic" style="fill:currentColor;stroke:none"><use href="#i-play"/></svg></span></div></div>`).join('')}
+        </div>
+      </div>
+    </div>`).join('') + (hidden > 0
+      ? `<button class="btn ghost" style="grid-column:1/-1" onclick="LIB_SHOW+=80;renderLib()">${hidden}+</button>` : '')
+      : `<div class="empty" style="grid-column:1/-1"><span class="big"><svg class="ic"><use href="#i-lib"/></svg></span>${q ? t('emptySearch') : t('emptyLib')}</div>`;
+  const loose = LIB.loose.filter(f => !q || f.name.toLowerCase().includes(q));
+  $('looseWrap').style.display = loose.length ? 'block' : 'none';
+  $('loose').innerHTML = loose.map(f => `<div class="file"><span class="n">${esc(f.name)}</span>
+    <span class="meta">${f.size}MB</span>
+    <span class="pico" data-open="${esc(f.rel)}"><svg class="ic" style="fill:currentColor;stroke:none"><use href="#i-play"/></svg></span>
+    <button class="btn danger sm" data-delloose="${esc(f.rel)}"><svg class="ic" style="width:13px;height:13px"><use href="#i-trash"/></svg></button></div>`).join('');
+}
+$('lib').addEventListener('click', async e => {
+  const favb = e.target.closest('[data-fav]');
+  if (favb) { e.stopPropagation(); toggleFav(favb.dataset.fav); return; }
+  const tagBtn = e.target.closest('[data-tagbtn]');
+  if (tagBtn) { e.stopPropagation(); const [b, k] = tagBtn.dataset.tagbtn.split('|'); toggleTag(b, k); return; }
+  const qa = e.target.closest('[data-qadd]');
+  if (qa) {
+    e.stopPropagation();
+    const vd = LIB.videos.find(x => x.bvid === qa.dataset.qadd);
+    if (vd && vd.parts.length) {
+      const p = vd.parts[0];
+      queueAdd({rel: vd.folder + '/' + p.file, title: vd.title, bvid: vd.bvid, p: p.p, name: p.name});
+    }
+    return;
+  }
+  const io = e.target.closest('[data-uni]');
+  if (io) {
+    e.stopPropagation();
+    const [bb, pp] = io.dataset.uni.split('|');
+    makeUni(bb, pp, io);
+    return;
+  }
+  const hb = e.target.closest('[data-health]');
+  if (hb) {    e.stopPropagation();
+    hb.style.opacity = '.4';
+    toast(t('healthRun'));
+    api('/api/health?bvid=' + encodeURIComponent(hb.dataset.health)).then(d => {
+      hb.style.opacity = '';
+      if (d.error) { toast(d.error); return; }
+      toast(d.ok ? t('healthOk') : `${t('healthBad')}: ${d.bad.map(b => 'P' + b.p).join(',')}`);
+    }).catch(() => { hb.style.opacity = ''; });
+    return;
+  }
+  const pf = e.target.closest('[data-play]');
+  if (pf) { const vd = LIB.videos.find(x => x.bvid === pf.dataset.play);
+    if (vd && vd.parts.length) openRel(vd.folder + '/' + vd.parts[0].file); return; }
+  const rd = e.target.closest('[data-redl]');
+  if (rd) { const [bvid, p, rel] = rd.dataset.redl.split('|');
+    if (!confirm(t('confirmRedl') + p + '?')) return;
+    await api('/api/delete', {rel});
+    const vd = LIB.videos.find(x => x.bvid === bvid);
+    const part_names = {}; vd.parts.forEach(x => part_names[x.p] = x.name);
+    current = {bvid, title: vd.title, pages: vd.parts.map(x => ({page: x.p, part: x.name}))};
+    rd.style.opacity = '.35'; rd.style.pointerEvents = 'none';
+    await api('/api/download', {bvid, title: vd.title, cover: '', parts: [parseInt(p)],
+      part_names, url: current?.url || '', part_urls: {}});
+    switchTab('task'); return; }
+  const tg = e.target.closest('[data-toggle]');
+  if (tg) { const p = $('parts-' + tg.dataset.toggle);
+    p.classList.toggle('open'); return; }
+  const dv = e.target.closest('[data-delvideo]');
+  if (dv) { if (!confirm(t('confirmDelVideo'))) return;
+    LIB.videos = LIB.videos.filter(x => x.bvid !== dv.dataset.delvideo);
+    renderLib();
+    api('/api/delete', {bvid: dv.dataset.delvideo}).then(loadLib); return; }
+  const o = e.target.closest('[data-open]');
+  if (o) openRel(o.dataset.open);
+});
+$('loose').addEventListener('click', async e => {
+  const d = e.target.closest('[data-delloose]');
+  if (d) { if (!confirm(t('confirmDelFile') + d.dataset.delloose + '?')) return;
+    LIB.loose = LIB.loose.filter(f => f.rel !== d.dataset.delloose);
+    renderLib();
+    api('/api/delete', {rel: d.dataset.delloose}).then(loadLib); return; }
+  const o = e.target.closest('[data-open]');
+  if (o) openRel(o.dataset.open);
+});
+
+/* ═══ 播放器 v6 ═══ */
+let FLAT = [], FI = 0;
+const RATES = [1, 1.25, 1.5, 2, 0.75, 0.5];
+let RATE_I = Math.max(0, RATES.indexOf(parseFloat(localStorage.getItem('take_rate') || '1')));
+/* 兼容性降级(2026-10-21): Android WebView 根本没有 PiP API(直接抛错),
+   老 WebView 也没有 wakeLock —— feature-detect 后再决定要不要显示按钮。*/
+const HAS_PIP = !!(document.pictureInPictureEnabled || (v.requestPictureInPicture && !/wv/i.test(navigator.userAgent)));
+const HAS_WAKELOCK = !!(navigator.wakeLock && navigator.wakeLock.request);
+const posKey = r => 'take_pos_' + r;
+const v = $('pvideo'), bar = $('pctrl'), phead = $('phead');
+let dragging = false, barT = 0, wl = null;
+
+/* 队列模式: FLAT 来自队列而非全库(开关在播放器控制行 ☰) */
+let QUEUE_MODE = false;
+function buildFlat() {
+  if (QUEUE_MODE && (QUEUE.items || []).length) {
+    return QUEUE.items.map(x => ({rel:x.rel, vd:{title:x.title, bvid:x.bvid}, p:{p:x.p, name:x.name}}));
+  }
+  const vids = [...LIB.videos];
+  vids.sort((a,b) => SORT==='name' ? a.title.localeCompare(b.title,'zh')
+              : SORT==='seq' ? (a.seq||0)-(b.seq||0)
+              : SORT==='time_asc' ? a.updated-b.updated : b.updated-a.updated);
+  const items = [];
+  for (const vd of vids) for (const p of vd.parts)
+    items.push({rel: vd.folder + '/' + p.file, vd, p});
+  return items;
+}
+function openRel(rel) {
+  FLAT = buildFlat();
+  let i = FLAT.findIndex(x => x.rel === rel);
+  if (i < 0) { FLAT = [{rel, vd: {title: rel.split('/').pop()}, p: {p: 1, name: ''}}]; i = 0; }
+  startPart(i);
+  $('pmodal').classList.add('open');
+  if (!localStorage.getItem('take_hint_done')) {
+    $('phint').classList.add('show');
+    setTimeout(() => { $('phint').classList.remove('show');
+      localStorage.setItem('take_hint_done', '1'); }, 4200);
+  }
+}
+function partRel(i) { return FLAT[i].rel; }
+const fmtDur = s => { s = Math.max(0, Math.floor(s || 0));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+
+function updateMeta() {
+  if (!('mediaSession' in navigator)) return;
+  const p = FLAT[FI].p, vd0 = FLAT[FI].vd;
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: `${vd0.title || ''}  P${p?.p ?? FI + 1}`,
+      artist: 'Decache', album: p?.name || '' });
+    navigator.mediaSession.setActionHandler('play', () => v.play());
+    navigator.mediaSession.setActionHandler('pause', () => v.pause());
+    navigator.mediaSession.setActionHandler('previoustrack', () => startPart(Math.max(0, FI - 1)));
+    navigator.mediaSession.setActionHandler('nexttrack', () => startPart((FI + 1) % FLAT.length));
+  } catch {}
+}
+const AUDIO_RE = /\.(m4a|mp3|flac|aac|ogg|opus|wav|mka)$/i;
+
+function startPart(i) {
+  if (i < 0 || i >= FLAT.length) return;
+  FI = i;
+  const {rel, vd, p} = FLAT[i];
+  $('ptitle').textContent = vd.title || p.name;
+  $('psub').textContent = `P${p.p ?? i + 1} ${p.name ?? ''} · ${i + 1}/${FLAT.length}`;
+  v.src = '/api/stream?rel=' + encodeURIComponent(rel);
+  v.playbackRate = RATES[RATE_I];
+  $('pRate').textContent = RATES[RATE_I] + 'x';
+  const saved = parseFloat(localStorage.getItem(posKey(rel)) || 0);
+  v.onloadedmetadata = () => {
+    if (saved > 5 && saved < v.duration - 8) v.currentTime = saved;
+    setTime();
+    setProg(v.currentTime / (v.duration || 1));
+  };
+  v.play().catch(() => {});
+  $('pPrev').disabled = i <= 0;
+  $('pNextB').disabled = (MODE_I === 0 && i >= FLAT.length - 1);
+  /* 音频模式: 音频文件隐藏 video 层, 显示封面+律动 */
+  const isAudio = AUDIO_RE.test(rel);
+  $('pstage').classList.toggle('audio', isAudio);
+  $('partCoverImg').src = (vd.bvid && vd.bvid.startsWith('BV'))
+    ? `/api/cover/${vd.bvid}?t=${Math.floor(vd.updated || 0)}` : '';
+  /* A-B / UpNext / 缩略图缓存 重置 */
+  abSt = 0; renderAB();
+  nextCardShown = false; nextCancelled = false;
+  $('pnext').classList.remove('show');
+  if (thumbURL) { URL.revokeObjectURL(thumbURL); thumbURL = ''; thumbReady = false; }
+  $('pthumb').style.display = 'none';
+  loadSubs(rel);
+  loadChapters(rel, v.duration);
+  updateMeta();
+  poke();
+}
+function poke() {
+  bar.classList.remove('hide'); phead.classList.remove('hide');
+  clearTimeout(barT);
+  barT = setTimeout(() => { if (!v.paused && !dragging && !pdrag) {
+    bar.classList.add('hide'); phead.classList.add('hide'); } }, 3200);
+}
+async function keepAwake(on) {
+  if (!HAS_WAKELOCK) return;
+  try { if (on) { wl = await navigator.wakeLock.request('screen'); }
+        else { wl?.release(); wl = null; } } catch {}
+}
+function setPlayIcon() {
+  $('pPlayIc').setAttribute('href', v.paused ? '#i-play' : '#i-pause');
+}
+v.addEventListener('play', () => { setPlayIcon(); poke(); keepAwake(true); });
+v.addEventListener('pause', () => { setPlayIcon(); bar.classList.remove('hide');
+  phead.classList.remove('hide'); clearTimeout(barT); keepAwake(false); });
+
+/* 控制条 */
+const pbar = $('pbar'), pfill = $('pfill'), pknob = $('pknob'), pbufEl = $('pbuf');
+function setProg(r) { const pct = Math.max(0, Math.min(1, r || 0)) * 100;
+  pfill.style.width = pct + '%'; pknob.style.left = pct + '%'; }
+function setTime() {
+  $('pTime').innerHTML = `<b>${fmtDur(v.currentTime)}</b> <span>/ ${fmtDur(v.duration)}</span>`;
+}
+v.addEventListener('timeupdate', () => {
+  if (!dragging) setProg(v.duration ? v.currentTime / v.duration : 0);
+  setTime();
+});
+v.addEventListener('progress', () => {
+  try { if (v.buffered.length && v.duration)
+    pbufEl.style.width = (v.buffered.end(v.buffered.length-1) / v.duration * 100) + '%';
+  } catch {}
+});
+const togglePlay = () => v.paused ? v.play().catch(() => {}) : v.pause();
+$('pPlay').onclick = togglePlay;
+let pdrag = false, pRatio = 0;
+function pSeekTo(cx) {
+  const r = pbar.getBoundingClientRect();
+  pRatio = Math.max(0, Math.min(1, (cx - r.left) / r.width));
+  setProg(pRatio);
+  $('pTime').innerHTML = `<b>${fmtDur(pRatio * (v.duration || 0))}</b> <span>/ ${fmtDur(v.duration)}</span>`;
+  /* 缩略图预览: 首次拖动触发服务端抽帧(懒生成), 之后秒回 */
+  if (v.duration) {
+    const pt = $('pthumb'), sr = stage.getBoundingClientRect();
+    pt.style.display = 'flex';
+    pt.style.left = Math.max(92, Math.min(sr.width - 92, cx - sr.left)) + 'px';
+    $('pthumbT').textContent = fmtDur(pRatio * v.duration);
+    if (thumbReady) {
+      const k = Math.min(thumbN - 1, Math.floor(pRatio * thumbN));
+      const cw = thumbW / thumbCols, ch = thumbH / Math.ceil(thumbN / thumbCols);
+      $('pthumbImg').style.backgroundSize = `${thumbW}px ${thumbH}px`;
+      $('pthumbImg').style.backgroundPosition = `-${(k % thumbCols) * cw}px -${Math.floor(k / thumbCols) * ch}px`;
+    } else if (!thumbURL && FLAT[FI]) {
+      ensureThumbs(FLAT[FI].rel, v.duration);
+    }
+  }
+}
+pbar.addEventListener('touchstart', e => { pdrag = true; dragging = true;
+  pbar.classList.add('drag'); pSeekTo(e.touches[0].clientX); }, {passive:true});
+pbar.addEventListener('touchmove', e => { if (pdrag) pSeekTo(e.touches[0].clientX); }, {passive:true});
+pbar.addEventListener('touchend', () => { if (pdrag && v.duration) v.currentTime = pRatio * v.duration;
+  pdrag = false; dragging = false; pbar.classList.remove('drag'); $('pthumb').style.display = 'none'; poke(); });
+pbar.addEventListener('click', e => { if (v.duration) { pSeekTo(e.clientX); v.currentTime = pRatio * v.duration; }
+  $('pthumb').style.display = 'none'; });
+/* 桌面: hover 进度条即预览, 移出隐藏 */
+pbar.addEventListener('mousemove', e => {
+  if (pdrag || !v.duration || matchMedia('(pointer: coarse)').matches) return;
+  pSeekTo(e.clientX);
+});
+pbar.addEventListener('mouseleave', () => { if (!pdrag) $('pthumb').style.display = 'none'; });
+$('pFS').onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else $('pstage').requestFullscreen?.();
+};
+$('pPip').onclick = async () => {
+  if (!HAS_PIP) { toast(t('pipNo')); return; }
+  try { if (document.pictureInPictureElement) await document.exitPictureInPicture();
+        else await v.requestPictureInPicture(); }
+  catch { toast(t('pipNo')); }
+};
+
+/* 手势 */
+const stage = $('pstage'), ov = $('seekOv');
+let sx = 0, sy = 0, baseT = 0, baseV = 0, gmode = 0, gdelta = 0, dur = 0, ovT = 0;
+function ovShow(txt) { ov.textContent = txt; ov.style.display = 'block';
+  clearTimeout(ovT); ovT = setTimeout(() => ov.style.display = 'none', 1000); }
+let baseB = parseFloat(sessionStorage.getItem('take_bright') || '1');
+function applyB(b) {
+  baseB = Math.max(0.4, Math.min(1.6, b));
+  v.style.filter = Math.abs(baseB - 1) < 0.02 ? '' : `brightness(${baseB.toFixed(2)})`;
+  sessionStorage.setItem('take_bright', baseB);
+}
+stage.addEventListener('touchstart', e => {
+  if (e.target.closest('#pctrl')) return;
+  const tt = e.touches[0];
+  sx = tt.clientX; sy = tt.clientY;
+  baseT = v.currentTime; baseV = v.volume; dur = v.duration || 0; gmode = 0;
+  applyB(baseB);
+  poke();
+}, {passive: true});
+stage.addEventListener('touchmove', e => {
+  if (!gmode && e.target.closest('#pctrl')) return;
+  const tt = e.touches[0];
+  const dx = tt.clientX - sx, dy = tt.clientY - sy;
+  if (!gmode) {
+    if (Math.abs(dx) > 14 && Math.abs(dx) > Math.abs(dy) * 1.5) gmode = 1;
+    else if (Math.abs(dy) > 14 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+      const r = stage.getBoundingClientRect();
+      gmode = (tt.clientX - r.left) / r.width > 0.5 ? 2 : 3;
+    }
+    if (!gmode) return;
+  }
+  e.preventDefault();
+  if (gmode === 1 && dur) {
+    gdelta = Math.max(-150, Math.min(150, Math.round(dx / 5)));
+    v.currentTime = Math.max(0, Math.min(dur, baseT + gdelta));
+    ovShow((gdelta >= 0 ? '+' : '') + gdelta + 's');
+  } else if (gmode === 2) {
+    const nv = Math.max(0, Math.min(1, baseV - dy / 250));
+    v.volume = nv; v.muted = nv === 0;
+    ovShow(nv === 0 ? '🔇' : Math.round(nv * 100) + '%');
+  } else if (gmode === 3) {
+    applyB(baseB - dy / 400);
+    ovShow('☀ ' + Math.round(baseB * 100) + '%');
+  }
+}, {passive: false});
+stage.addEventListener('touchend', () => {
+  if (gmode === 1) { toast((gdelta >= 0 ? '+' : '') + gdelta + 's');
+    localStorage.setItem(posKey(FLAT[FI].rel), v.currentTime); }
+  gmode = 0;
+});
+function ripple(side, label) {
+  const d = document.createElement('div');
+  d.className = 'ripple ' + side; d.textContent = label;
+  stage.appendChild(d);
+  setTimeout(() => d.remove(), 520);
+}
+let lastTap = 0, tapTimer = null;
+stage.addEventListener('click', e => {
+  if (e.target.closest('#pctrl') || e.target.closest('#phead') || gmode) return;
+  const now = Date.now();
+  if (now - lastTap < 280) {
+    clearTimeout(tapTimer); tapTimer = null; lastTap = 0;
+    const r = stage.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width;
+    if (x < 0.4 && dur) { v.currentTime = Math.max(0, v.currentTime - 10); ripple('l', '−10s'); }
+    else if (x > 0.6 && dur) { v.currentTime = Math.min(dur, v.currentTime + 10); ripple('r', '+10s'); }
+    else togglePlay();
+    return;
+  }
+  lastTap = now;
+  tapTimer = setTimeout(() => {
+    tapTimer = null;
+    if (bar.classList.contains('hide')) poke();
+    else { bar.classList.add('hide'); phead.classList.add('hide'); clearTimeout(barT); }
+  }, 280);
+});
+
+/* ═══ v6.1: 缩略图预览 / 字幕 / A-B / Up Next ═══ */
+let thumbURL = '', thumbReady = false, thumbN = 12, thumbCols = 4, thumbW = 640, thumbH = 480;
+function ensureThumbs(rel, dur) {
+  thumbURL = 'pending';
+  fetch('/api/thumbs?rel=' + encodeURIComponent(rel) + '&dur=' + dur)
+    .then(r => r.ok ? r.blob() : null)
+    .then(b => { if (!b) { thumbURL = ''; return; }
+      thumbURL = URL.createObjectURL(b);
+      const im = new Image();
+      im.onload = () => { thumbW = im.naturalWidth; thumbH = im.naturalHeight; thumbReady = true; };
+      im.src = thumbURL;
+    })
+    .catch(() => { thumbURL = ''; });
+}
+
+let SUBS = [];
+function loadSubs(rel) {
+  SUBS = [];
+  $('pCC').style.display = 'none';
+  [...v.querySelectorAll('track')].forEach(t => t.remove());
+  api('/api/subs?rel=' + encodeURIComponent(rel)).then(d => {
+    if (!d.subs?.length) return;
+    SUBS = d.subs;
+    d.subs.forEach((s, i) => {
+      const tr = document.createElement('track');
+      tr.kind = 'subtitles'; tr.label = s.label;
+      tr.default = i === 0;
+      tr.src = '/api/sub?rel=' + encodeURIComponent(s.rel);
+      v.appendChild(tr);
+      /* Safari/WebKit: 动态插入的 track 必须 mode 非 disabled 才会真去加载,
+         且插入后要 video.load() 才会重新拉取资源(Chrome 也要) */
+      tr.track.mode = 'hidden';
+    });
+    try { v.load(); } catch {}
+    $('pCC').style.display = '';
+    $('pCC').classList.remove('on');
+  }).catch(() => {});
+}
+$('pCC').onclick = () => {
+  const tt = v.textTracks;
+  if (!tt.length) return;
+  let cur = -1;
+  for (let i = 0; i < tt.length; i++) if (tt[i].mode === 'showing') cur = i;
+  for (let i = 0; i < tt.length; i++) tt[i].mode = 'disabled';
+  const nx = cur + 1;                       // -1 关 → 0..n-1 → n=全关
+  if (nx >= tt.length) { $('pCC').classList.remove('on'); toast('CC ×'); return; }
+  tt[nx].mode = 'showing';
+  $('pCC').classList.add('on');
+  toast('CC: ' + (SUBS[nx]?.label || (nx + 1)));
+};
+let abSt = 0, abA = 0, abB = 0;
+function renderAB() {
+  const b = $('pAB');
+  b.textContent = abSt === 0 ? 'A–B' : abSt === 1 ? 'A–' : 'A→B';
+  b.classList.toggle('on', abSt > 0);
+  const D = v.duration || 1;
+  $('abA').style.display = abSt ? 'block' : 'none';
+  $('abA').style.left = (abA / D * 100) + '%';
+  $('abB').style.display = abSt === 2 ? 'block' : 'none';
+  $('abB').style.left = (abB / D * 100) + '%';
+}
+$('pAB').onclick = () => {
+  if (abSt === 0) { abA = v.currentTime; abSt = 1; toast('A ' + fmtDur(abA)); }
+  else if (abSt === 1) {
+    abB = v.currentTime;
+    if (abB - abA < 1) { toast('≥ 1s'); return; }
+    abSt = 2; toast('A-B loop ' + fmtDur(abA) + ' → ' + fmtDur(abB));
+  } else { abSt = 0; toast('A-B ×'); }
+  renderAB(); poke();
+};
+v.addEventListener('timeupdate', () => {
+  if (abSt === 2 && v.currentTime >= abB) v.currentTime = abA;
+});
+
+let nextCardShown = false, nextCancelled = false;
+$('pNextGo').onclick = () => { $('pnext').classList.remove('show'); startPart((FI + 1) % FLAT.length); };
+$('pNextNo').onclick = () => { nextCancelled = true; $('pnext').classList.remove('show'); toast(t('nextOff')); };
+v.addEventListener('timeupdate', () => {
+  const L = FLAT.length;
+  const hasNext = L > 1 && MODE_I !== 2 && MODE_I !== 3 && !(MODE_I === 0 && FI >= L - 1);
+  const remain = v.duration ? v.duration - v.currentTime : 999;
+  if (!nextCardShown && !nextCancelled && hasNext && remain <= 20 && remain > 0) {
+    const item = FLAT[MODE_I === 0 ? FI + 1 : (FI + 1) % L];
+    $('pNextTitle').textContent = `${item.vd.title || ''} P${item.p.p ?? ''}`;
+    $('pNextCov').src = (item.vd.bvid && item.vd.bvid.startsWith('BV'))
+      ? '/api/cover/' + item.vd.bvid : '';
+    $('pnext').classList.add('show');
+    nextCardShown = true;
+  }
+  if (nextCardShown) {
+    $('pNextCnt').textContent = Math.max(0, Math.ceil(remain)) + 's';
+    if (remain > 20 || remain <= 0) { $('pnext').classList.remove('show'); if (remain <= 0) nextCardShown = false; }
+  }
+});
+
+/* 连播四模式(图标 only · 记忆) */
+const MODES = [{ic:'→', k:'seqMode'}, {ic:'∞', k:'loopAll'}, {ic:'↻', k:'loopOne'}, {ic:'⤨', k:'shuffle'}];
+let MODE_I = Math.min(3, parseInt(localStorage.getItem('take_mode') || '1') || 1);
+function renderMode() { const m = MODES[MODE_I];
+  const b = $('pAuto'); b.textContent = m.ic; b.title = t(m.k); b.setAttribute('aria-label', t(m.k)); }
+renderMode();
+$('pAuto').onclick = () => { MODE_I = (MODE_I + 1) % MODES.length;
+  localStorage.setItem('take_mode', MODE_I); renderMode(); poke(); };
+v.addEventListener('ended', () => {
+  const L = FLAT.length;
+  if (MODE_I === 0 && FI < L - 1) startPart(FI + 1);
+  else if (MODE_I === 1 && L > 0) startPart((FI + 1) % L);
+  else if (MODE_I === 2) startPart(FI);
+  else if (L > 1) { let i; do { i = Math.floor(Math.random() * L); } while (i === FI); startPart(i); }
+});
+
+/* 记忆 / 导航 */
+let _saveT = 0;
+v.addEventListener('timeupdate', () => {
+  const now = Date.now();
+  if (now - _saveT > 2000 && v.duration) {
+    _saveT = now;
+    localStorage.setItem(posKey(FLAT[FI].rel), v.currentTime);
+  }
+});
+$('pPrev').onclick = () => startPart(FI - 1);
+$('pNextB').onclick = () => startPart((FI + 1) % FLAT.length);
+$('pRate').onclick = () => { RATE_I = (RATE_I + 1) % RATES.length;
+  v.playbackRate = RATES[RATE_I]; $('pRate').textContent = RATES[RATE_I] + 'x';
+  localStorage.setItem('take_rate', RATES[RATE_I]); };
+function closePlayer() {
+  v.pause(); v.removeAttribute('src'); v.load();
+  $('pmodal').classList.remove('open');
+  keepAwake(false);
+  if (document.fullscreenElement) document.exitFullscreen();
+}
+$('pmodal').addEventListener('click', e => { if (e.target === $('pmodal')) closePlayer(); });
+
+/* 桌面键盘快捷键(播放器打开时): 空格暂停 ←→快进 F全屏 Esc关闭 */
+document.addEventListener('keydown', e => {
+  if (!$('pmodal').classList.contains('open')) return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+  else if (e.key === 'ArrowLeft' && v.duration) { v.currentTime = Math.max(0, v.currentTime - 10); ripple('l', '−10s'); poke(); }
+  else if (e.key === 'ArrowRight' && v.duration) { v.currentTime = Math.min(v.duration, v.currentTime + 10); ripple('r', '+10s'); poke(); }
+  else if (e.key === 'f' || e.key === 'F') $('pFS').click();
+  else if (e.key === 'Escape' && !document.fullscreenElement) closePlayer();
+});
+
+/* 切后台/回前台: PiP 尝试 + Android Chromium 黑屏修复 */
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (HAS_PIP && !v.paused && !v.ended && $('pmodal').classList.contains('open')) {
+      v.requestPictureInPicture?.().catch(() => {});
+    }
+    return;
+  }
+  /* Android Chromium 已知 bug: 切后台回来 video 渲染表面(surface)被系统回收 →
+     黑屏有声, 换 src 也无效。回前台把 <video> 在 DOM 里挪一下位, 强制重建
+     渲染表面(currentTime 保留, 只有一次可感知的停顿)。 */
+  if (!$('pmodal').classList.contains('open') || !v.src) return;
+  requestAnimationFrame(() => {
+    const p = v.parentNode, n = v.nextSibling;
+    if (!p) return;
+    p.insertBefore(v, n);
+    if (v.paused && !v.ended) v.play().catch(() => {});
+  });
+});
+
+/* ═══ 启动 ═══ */
+async function checkVer() {
+  try { const d = await api('/api/version');
+    $('ver').textContent = 'v' + d.v;
+  } catch { $('ver').textContent = t('offline'); }
+}
+
+/* ═══ 设置(cookie 网页填写, 免手改 config.ini) ═══ */
+async function loadCfg() {
+  try { const c = await api('/api/config');
+    $('sessState').textContent = c.cookie_set ? t('sessOn') : t('sessOff');
+    $('cfgMeta').textContent = `engine: ${c.engine} · port: ${c.port} · ${c.download_dir}`;
+  } catch {}
+  try { const d = await api('/api/diagnostics');
+    $('diagMeta').innerHTML = `Python ${esc(d.python)} · ffmpeg: ${d.ffmpeg_ok ? esc(d.ffmpeg) : t('ffMissing')}`
+      + (d.hints && d.hints.length ? '<br>' + d.hints.map(h => '· ' + esc(h)).join('<br>') : '');
+  } catch {}
+}
+function importM3u() { $('m3uFile').click(); }
+function importM3uFile(inp) {
+  const f = inp.files && inp.files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = async () => {
+    const r = await api('/api/queue/import', {content: String(rd.result || '')});
+    if (r.error) { toast(r.error); return; }
+    toast(t('m3uOk') + ' ' + (r.items || []).length);
+    loadQueue();
+  };
+  rd.readAsText(f);
+  inp.value = '';
+}
+async function saveSess() {
+  const v = $('cfgCookie').value.trim();
+  if (!v) return;
+  await api('/api/config', {cookie: v});
+  $('cfgCookie').value = '';
+  toast(t('saved'));
+  loadCfg();
+}
+setInterval(() => { refreshTasks(); loadLib(); }, 3000);
+applyLang();
+refreshTasks(); loadLib(); checkVer(); loadCfg(); loadTagStats(); loadQueue();
+initSubStyleUI();
+applyTheme();
+loadLan();
+</script>
+</body>
+</html>

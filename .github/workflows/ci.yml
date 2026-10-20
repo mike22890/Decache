@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile the backend
+        run: python -m py_compile server.py selftest.py
+
+      - name: Extract and syntax-check the frontend
+        run: |
+          sed -n '/<script>/,/<\/script>/p' index.html | sed '1d;$d' > /tmp/check.js
+          node --check /tmp/check.js
+
+      - name: Self test (no network, isolated temp HOME)
+        run: python selftest.py
+
+      - name: Verify the self-contained installer is in sync
+        run: |
+          node sync_install.mjs
+          git diff --exit-code -- install.sh || {
+            echo "::error::install.sh is out of sync — run 'node sync_install.mjs' and commit the result"
+            exit 1
+          }
+
+      - name: No site-specific leftovers in the source
+        run: |
+          # decache ships no site-specific parser: the source must not hard-code
+          # any platform name, API host, or platform-specific ID format.
+          if grep -rniE 'bilibili|b23\.tv|api\.bilibili|you-get.*bilibili' \
+               --include='*.py' --include='*.html' . ; then
+            echo "::error::site-specific identifier found in source"
+            exit 1
+          fi

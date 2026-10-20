@@ -1,0 +1,20 @@
+{
+  "name": "Decache — 本地媒体库与播放器",
+  "short_name": "Decache",
+  "description": "自托管的本地媒体库与视频播放器",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#09090B",
+  "theme_color": "#09090B",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "媒体库", "url": "/?tab=lib", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "文件夹", "url": "/?tab=folder", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}
