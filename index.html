@@ -959,7 +959,7 @@ const I18N = {
     confirmDelFile:'删掉这个文件? 永久删除, 找不回来。', confirmRedl:'重新下载 P',
     scanAdded:'新导入', scanFail:'扫描失败', exportFail:'导出失败',
     exportOk1:'备份已生成', exportOk2:'换机: 解压覆盖到 decache 文件夹即可',
-    pipNo:'此浏览器不支持画中画', offline:'离线', submitFail:'提交失败', pasteFail:'剪贴板不可用',
+    pipNo:'此浏览器不支持画中画', fsNo:'这个浏览器不支持全屏', offline:'离线', submitFail:'提交失败', pasteFail:'剪贴板不可用',
     seqMode:'顺序', loopAll:'全部循环', loopOne:'单集循环', shuffle:'随机',
     settings:'设置', sessHint:'站点登录 cookie（可选）：从浏览器开发者工具复制 "KEY=VALUE; ..."；域名按链接自动推断',
     save:'保存', saved:'已保存 ✓', sessOn:'已配置', sessOff:'未配置',
@@ -1022,7 +1022,7 @@ const I18N = {
     confirmDelFile:'Permanently delete this file?', confirmRedl:'Re-download P',
     scanAdded:'Imported', scanFail:'Scan failed', exportFail:'Export failed',
     exportOk1:'Backup saved', exportOk2:'New device: extract over the decache folder',
-    pipNo:'PiP not supported', offline:'Offline', submitFail:'Submit failed', pasteFail:'Clipboard unavailable',
+    pipNo:'PiP not supported', fsNo:'Fullscreen not supported here', offline:'Offline', submitFail:'Submit failed', pasteFail:'Clipboard unavailable',
     seqMode:'Seq', loopAll:'Loop all', loopOne:'Loop one', shuffle:'Shuffle',
     settings:'Settings', sessHint:'Site login cookie (optional): copy "KEY=VALUE; ..." from DevTools; domain inferred from the link',
     save:'Save', saved:'Saved ✓', sessOn:'Configured', sessOff:'Not set',
@@ -2155,7 +2155,11 @@ let RATE_I = Math.max(0, RATES.indexOf(parseFloat(localStorage.getItem('take_rat
 /* 兼容性降级(2026-10-21): Android WebView 根本没有 PiP API(直接抛错),
    老 WebView 也没有 wakeLock —— feature-detect 后再决定要不要显示按钮。*/
 const v = $('pvideo'), bar = $('pctrl'), phead = $('phead');   // 必须先于 HAS_PIP 声明: 否则下面读 v 会 TDZ
-const HAS_PIP = !!(document.pictureInPictureEnabled || (v.requestPictureInPicture && !/wv/i.test(navigator.userAgent)));
+// iOS Safari 走的是 webkit 版(webkitSetPresentationMode / webkitEnterFullscreen),
+// 没有标准 API —— 不做判定的话, iPhone 上画中画按钮直接弹"不支持"
+const HAS_PIP = !!(document.pictureInPictureEnabled || v.requestPictureInPicture
+  || (v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode('picture-in-picture'))
+  || (/wv/i.test(navigator.userAgent) && v.webkitEnterFullscreen));
 const HAS_WAKELOCK = !!(navigator.wakeLock && navigator.wakeLock.request);
 const posKey = r => 'take_pos_' + r;
 let dragging = false, barT = 0, wl = null;
@@ -2345,14 +2349,25 @@ pbar.addEventListener('mousemove', e => {
 });
 pbar.addEventListener('mouseleave', () => { if (!pdrag) $('pthumb').style.display = 'none'; });
 $('pFS').onclick = () => {
-  if (document.fullscreenElement) document.exitFullscreen();
-  else $('pstage').requestFullscreen?.();
+  // 标准全屏 / Safari 的 webkit 全屏(元素全屏在 iPhone 上不可用, 退到视频全屏)
+  if (document.fullscreenElement) { document.exitFullscreen?.(); return; }
+  if (document.webkitFullscreenElement) { document.webkitExitFullscreen?.(); return; }
+  if ($('pstage').requestFullscreen) { $('pstage').requestFullscreen().catch(() => {}); return; }
+  if (v.webkitEnterFullscreen) { try { v.webkitEnterFullscreen(); } catch (e) {} return; }
+  toast(t('fsNo'));
 };
 $('pPip').onclick = async () => {
   if (!HAS_PIP) { toast(t('pipNo')); return; }
-  try { if (document.pictureInPictureElement) await document.exitPictureInPicture();
-        else await v.requestPictureInPicture(); }
-  catch { toast(t('pipNo')); }
+  try {
+    if (document.pictureInPictureElement) { await document.exitPictureInPicture(); return; }
+    // iOS Safari: 只有 webkit 版画中画
+    if (v.webkitSetPresentationMode && v.webkitSupportsPresentationMode
+        && v.webkitSupportsPresentationMode('picture-in-picture')) {
+      v.webkitSetPresentationMode('picture-in-picture');
+      return;
+    }
+    await v.requestPictureInPicture();
+  } catch { toast(t('pipNo')); }
 };
 
 /* 播放失败: 文件被删 / 404 / 格式不支持 → 给提示和出口, 不能满屏黑 */
@@ -2629,7 +2644,12 @@ document.addEventListener('keydown', e => {
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     if (HAS_PIP && !v.paused && !v.ended && $('pmodal').classList.contains('open')) {
-      v.requestPictureInPicture?.().catch(() => {});
+      if (v.webkitSetPresentationMode && v.webkitSupportsPresentationMode
+          && v.webkitSupportsPresentationMode('picture-in-picture')) {
+        try { v.webkitSetPresentationMode('picture-in-picture'); } catch (e) {}
+      } else {
+        v.requestPictureInPicture?.().catch(() => {});
+      }
     }
     return;
   }
