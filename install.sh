@@ -7,6 +7,8 @@ OLD=~/decache
 echo "════ 1/4 依赖 ════"
 pkg update -y >/dev/null 2>&1 || pkg update -y
 pkg install -y python ffmpeg termux-api
+# nodejs: yt-dlp 解析部分站点(尤其 YouTube)需要 JS runtime, 缺了会报解析失败
+command -v node >/dev/null 2>&1 || pkg install -y nodejs || echo "  ⚠ nodejs 没装上(某些站点解析可能失败)"
 echo "════ 2/4 引擎 ════"
 pkg install -y yt-dlp 2>/dev/null || pip install -q --upgrade yt-dlp || true
 pip install -q --upgrade you-get || true
@@ -48,7 +50,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "6.5"          # 版本号: 显示在界面顶栏, 排查新旧用
+VERSION = "6.6"          # 版本号: 显示在界面顶栏, 排查新旧用
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.ini"
 DEFAULTS = {
@@ -63,14 +65,91 @@ DEFAULTS = {
     "bind": "127.0.0.1",     # 监听地址。改 0.0.0.0 可让手机/平板访问(仅限可信局域网!)
 }
 
+def _config_text(cfg):
+    import io
+    buf = io.StringIO()
+    cfg.write(buf)
+    return buf.getvalue()
+
+
+def atomic_write(path: Path, data: str, encoding="utf-8"):
+    """原子写: 唯一临时名 + fsync + 指数退避重试。
+    唯一临时名 → 并发写不会互相截断(固定 .tmp 名会)
+    fsync        → 断电不会留下 0 字节文件(用户的媒体库会整库丢失)
+    重试        → Windows 上目标被占用(浏览器/杀软)会 PermissionError"""
+    import tempfile
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline="") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        last = None
+        for i in range(6):
+            try:
+                os.replace(tmp, path)
+                return True
+            except PermissionError as e:
+                last = e
+                time.sleep(0.05 * (2 ** i))
+        raise OSError(f"写入 {path.name} 失败: {last}")
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def atomic_write_bytes(path: Path, data: bytes):
+    # 字节版原子写(封面/雪碧图这类二进制)。文本版 atomic_write 只吃 str,
+    # 直接 write_bytes 会在断电/并发时留下半截文件 -> 浏览器拿到坏图。
+    import tempfile
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        last = None
+        for i in range(6):
+            try:
+                os.replace(tmp, path)
+                return True
+            except PermissionError as e:
+                last = e
+                time.sleep(0.05 * (2 ** i))
+        raise OSError(f"write {path.name} failed: {last}")
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def load_config():
-    cfg = configparser.ConfigParser()
+    # interpolation=None: cookie 值里满是 %2C / %3D 这种 URL 编码,
+    # 默认的 BasicInterpolation 会把它们当插值语法 → 直接 ValueError 崩掉。
+    cfg = configparser.ConfigParser(interpolation=None)
     if CONFIG_FILE.exists():
-        cfg.read(CONFIG_FILE, "utf-8")
-    else:
+        try:
+            cfg.read(CONFIG_FILE, "utf-8")
+        except configparser.Error:
+            # 配置坏了不能让服务器起不来: 备份 + 用默认值
+            try:
+                CONFIG_FILE.replace(CONFIG_FILE.with_name(f"config.corrupt-{int(time.time())}.ini"))
+            except OSError:
+                pass
+            cfg = configparser.ConfigParser(interpolation=None)
+    if "panel" not in cfg:
         cfg["panel"] = DEFAULTS
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            cfg.write(f)
+        try:
+            atomic_write(CONFIG_FILE, _config_text(cfg))
+        except OSError:
+            pass
     return cfg["panel"] if "panel" in cfg else dict(DEFAULTS)
 
 _CONF = load_config()
@@ -87,21 +166,24 @@ EXCLUDE_DIRS = [x.strip() for x in _CONF.get("exclude_dirs", "").split(",") if x
 BIND = _CONF.get("bind", "127.0.0.1").strip() or "127.0.0.1"
 
 def save_config_value(key, value):
-    """单键写回 config.ini, 其余键原样保留 —— 网页设置入口用(cookie 免手改配置文件)。"""
-    cfg = configparser.ConfigParser()
+    """单键写回 config.ini, 其余键原样保留 —— 网页设置入口用(cookie 免手改配置文件)。
+    interpolation=None: cookie 里带 % 是常事, 默认插值语法会直接抛 ValueError。"""
+    cfg = configparser.ConfigParser(interpolation=None)
     if CONFIG_FILE.exists():
-        cfg.read(CONFIG_FILE, "utf-8")
+        try:
+            cfg.read(CONFIG_FILE, "utf-8")
+        except configparser.Error:
+            cfg = configparser.ConfigParser(interpolation=None)
     if "panel" not in cfg:
         cfg["panel"] = {}
     cfg["panel"][key] = value
     atomic_write(CONFIG_FILE, _config_text(cfg))
+    try:
+        _CONF[key] = value          # 同步内存快照: 否则同进程里读到的还是旧值
+    except Exception:
+        pass
     return True
 
-def _config_text(cfg):
-    import io
-    buf = io.StringIO()
-    cfg.write(buf)
-    return buf.getvalue()
 # ================================================
 
 HTML_FILE = BASE_DIR / "index.html"
@@ -131,29 +213,6 @@ IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
 IS_TERMUX = os.environ.get("PREFIX", "").endswith("com.termux/files/usr")
 MIN_PY = (3, 9)          # Path.is_relative_to 需要 3.9+
-
-def atomic_write(path: Path, data: str, encoding="utf-8"):
-    """原子写: 临时文件 + os.replace。Windows 上目标被占用会 PermissionError,
-    加指数退避重试(官方 issue: 唯一可行办法是带延迟重试)。"""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(data, encoding=encoding)
-    last = None
-    for i in range(6):
-        try:
-            os.replace(tmp, path)
-            return True
-        except PermissionError as e:
-            last = e
-            time.sleep(0.05 * (2 ** i))
-    try:
-        os.replace(tmp, path)      # 最后再试一次, 失败就抛
-    except PermissionError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise last
-    return True
 
 def ffmpeg_path():
     """ffmpeg 可能在 PATH 外(Windows 最常见), 挨个常见安装位置找。"""
@@ -303,6 +362,45 @@ def extract_url(text):
     m = URL_RE.search(text or "")
     return m.group(0) if m else None
 
+def strip_page_params(url):
+    """剥掉分P/合集/分享追踪参数(p / sid / mid / buvid / plat_id / spm ...)。
+    关键: **原样保留其它参数, 不做 URL 解码** ——
+    parse_qs 会把 %2F 解成 '/', 再 urlencode 回去就破坏了 URL 结构(实测踩过)。"""
+    try:
+        head, sep, query = url.partition("?")
+    except Exception:
+        return url
+    if not sep:
+        return url
+    frag = ""
+    if "#" in query:
+        query, _, frag = query.partition("#")
+    drop = {"p", "sid", "season_id", "ep_id", "t", "mid", "buvid", "buvid3",
+            "plat_id", "from_spmid", "is_story_h5", "share_from", "share_medium",
+            "share_plat", "share_session_id", "share_source", "share_tag",
+            "spmid", "unique_k", "timestamp", "vd_source"}
+    kept = []
+    for kv in query.split("&"):
+        if not kv:
+            continue
+        k = kv.split("=", 1)[0].lower()
+        if k in drop:
+            continue
+        kept.append(kv)                    # 原样保留, 不解码
+    out = head + (("?" + "&".join(kept)) if kept else "")
+    if frag:
+        out += "#" + frag
+    return out
+
+
+def bare_url(url):
+    """只剩路径的 URL(去掉 ?query 和 #frag) —— 解析多P 视频的兜底尝试。"""
+    try:
+        return url.split("?", 1)[0].split("#", 1)[0]
+    except Exception:
+        return url
+
+
 def yt_dlp_path():
     """yt-dlp 可执行文件: PATH → 常见位置。找不到返回 None。"""
     exe = shutil.which("yt-dlp")
@@ -316,6 +414,14 @@ def yt_dlp_path():
         if c and os.path.isfile(c) and os.access(c, os.X_OK if not IS_WIN else os.F_OK):
             return c
     return None
+
+def mask_cookie(cv):
+    """给 UI 看的掩码: 只露出键名和值的头尾, 不泄露完整凭据。"""
+    out = []
+    for k, v in cookie_pairs(cv).items():
+        out.append(f"{k}={v[:4]}…{v[-4:]}" if len(v) > 12 else f"{k}={v[:6]}")
+    return "; ".join(out)
+
 
 def cookie_pairs(raw):
     """把用户填的 cookie 串解析成键值对。
@@ -351,30 +457,40 @@ def write_cookie_jar(domain, pairs, path):
         lines.append(f"{domain}\tTRUE\t/\tFALSE\t0\t{k}\t{v}")
     path.write_text("\n".join(lines) + "\n", "utf-8")
 
-def fetch_video_info(url):
-    """解析视频信息 —— 全部交给外部通用下载器 yt-dlp。
-    本项目不内置任何站点解析器/接口调用(2026-10-21 去站点化:
-    原先直连某站 view 接口取标题/封面/分P, 属于"针对特定站点的接口适配",
-    正是第三方工具收到平台律师函时被逐字指控的行为之一 → 全部移除)。
-    附带好处: yt-dlp 的 info.json 自带 uploader/简介/时长/真实分P, 元数据更全。"""
-    exe = yt_dlp_path()
-    if not exe:
-        raise RuntimeError("yt-dlp not found — install it (see README)")
-    cmd = [exe, "--dump-single-json", "--no-warnings", "--no-playlist", "--flat-playlist", url]
-    kw = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if IS_WIN else {}
+def mask_cookie(cv):
+    """给 UI 看的掩码: 只露出键名和值的头尾, 不泄露完整凭据。"""
+    out = []
+    for k, v in cookie_pairs(cv).items():
+        out.append(f"{k}={v[:4]}…{v[-4:]}" if len(v) > 12 else f"{k}={v[:6]}")
+    return "; ".join(out)
+
+
+_info_cache = {}        # url → (时间, 结果); 解析一次要好几秒, 重复链接直接复用
+
+
+def _probe_info(exe, url, kw):
+    """调引擎解析一次, 返回 info dict。"""
+    cmd = [exe, "--dump-single-json", "--no-warnings", "--flat-playlist", url]
     try:
-        p = subprocess.run(cmd, capture_output=True, timeout=60, **kw)
+        p = subprocess.run(cmd, capture_output=True, timeout=90, **kw)
     except subprocess.TimeoutExpired:
-        raise RuntimeError("解析超时(60s)")
-    out = (p.stdout or b"").decode("utf-8", "replace").strip()
-    if not out:
+        raise RuntimeError("解析超时(90s) — 检查网络, 或该站需要登录 cookie")
+    raw = (p.stdout or b"").decode("utf-8", "replace").strip()
+    if not raw:
         err = (p.stderr or b"").decode("utf-8", "replace").strip()[-200:]
         raise RuntimeError(f"解析失败: {err or 'yt-dlp 无输出'}")
     try:
-        d = json.loads(out)
+        d = json.loads(raw)
     except Exception:
         raise RuntimeError("解析失败: 返回不是合法 JSON")
+    if not isinstance(d, dict):
+        err = (p.stderr or b"").decode("utf-8", "replace").strip()[-200:]
+        raise RuntimeError(f"解析失败: yt-dlp 对这个链接没返回信息{(' — ' + err) if err else ''}")
     entries = d.get("entries") or []
+    truncated = False
+    if len(entries) > 200:
+        entries = entries[:200]          # 合集链接几百上千个 → 截断, 别吃光手机内存
+        truncated = True
     pages = []
     for i, e in enumerate(entries):
         if not e:
@@ -387,26 +503,74 @@ def fetch_video_info(url):
     return {"bvid": vid, "title": d.get("title") or vid,
             "owner": d.get("uploader") or d.get("channel") or "",
             "cover": d.get("thumbnail") or "",
-            "pages": pages}
+            "url": d.get("webpage_url") or url,
+            "truncated": truncated, "pages": pages}
 
+
+def fetch_video_info(url):
+    """解析视频信息 —— 全部交给外部通用下载引擎 yt-dlp。
+    本项目不内置任何站点解析器/接口调用(2026-10-21 去站点化:
+    原先直连某站 view 接口取标题/封面/分P, 属于"针对特定站点的接口适配",
+    正是第三方工具收到平台律师函时被逐字指控的行为之一 → 全部移除)。
+
+    两段式探测(通用, 不含站点知识):
+      先用"剥掉分P/追踪参数"的 URL; 若只得到 1 个分P, 再用"只剩路径"的裸 URL 试一次,
+      取分P 多的那个 —— 带 ?p=1 的链接很多站会只提取那一P(2026-10-21 实测复现)。"""
+    hit = _info_cache.get(url)
+    if hit and time.time() - hit[0] < 300:
+        return hit[1]                     # 5 分钟内同一链接直接复用, 不再调引擎
+    exe = yt_dlp_path()
+    if not exe:
+        raise RuntimeError("yt-dlp not found — install it (see README)")
+    kw = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if IS_WIN else {}
+    u1 = strip_page_params(url)
+    out = _probe_info(exe, u1, kw)
+    if len(out.get("pages", [])) <= 1:
+        # 只拿到 1 个分P → 多半是"短链跟到的最终页自带 ?p=1"这类情况。
+        # 拿跟完的最终地址再试两种形态: 剥掉分P参数 / 只剩路径 —— 谁分P多听谁的。
+        final = out.get("url") or u1
+        for cand in (strip_page_params(final), bare_url(final)):
+            if not cand or cand == final:
+                continue
+            try:
+                alt = _probe_info(exe, cand, kw)
+                if len(alt.get("pages", [])) > len(out.get("pages", [])):
+                    # 保留第一次探测拿到的 UP主/封面(flat 模式下可能没这些字段)
+                    for k in ("owner", "cover"):
+                        if not alt.get(k) and out.get(k):
+                            alt[k] = out[k]
+                    out = alt
+            except Exception:
+                pass
+    if len(_info_cache) > 50:
+        _info_cache.clear()
+    _info_cache[url] = (time.time(), out)
+    return out
 def safe_name(t):
     return BAD_CHARS.sub("_", t).strip()[:50] or "未命名"
 
 def safe_media_path(rel):
-    """把 rel 解析成绝对路径, 只允许在 download_dir 或 scan_dirs 之内(防目录穿越)。
-    2026-10-20 修复: 旧版用字符串 startswith 判白名单, "/downloads" 会误匹配
-    "/downloads-evil" 等同前缀兄弟目录 → 改用组件级 is_relative_to(Python 3.9+)。"""
-    target = Path(os.path.expanduser(rel))
-    if not target.is_absolute():
-        target = (DOWNLOAD_DIR / rel).resolve()
-    else:
-        target = target.resolve()
+    """把 rel 解析成绝对路径, 只允许在 download_dir / scan_dirs 之内(防目录穿越)。
+    空串/目录/设备文件一律拒绝 ——
+    以前 rel="" 会变成 Path(".") 也就是下载目录本身, 白名单放行后 open() 直接报错。"""
+    rel = (rel or "").strip()
+    if not rel or "\x00" in rel:
+        return None
+    try:
+        target = Path(os.path.expanduser(rel))
+        target = (DOWNLOAD_DIR / target).resolve() if not target.is_absolute() else target.resolve()
+    except (ValueError, OSError, RuntimeError):
+        return None
     roots = [DOWNLOAD_DIR.resolve()] + [Path(os.path.expanduser(d.strip())).resolve()
                                         for d in SCAN_DIRS.split(",") if d.strip()]
-    if any(target.is_relative_to(r) for r in roots):
-        return target
-    return None
-
+    if not any(target.is_relative_to(r) for r in roots):
+        return None
+    try:
+        if not target.is_file():          # 目录/管道/设备 → 不给
+            return None
+    except OSError:
+        return None
+    return target
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".flv", ".mov", ".m4v", ".ts", ".avi", ".rmvb", ".m4a", ".mp3", ".flac"}
 
 def allowed_roots():
@@ -443,12 +607,23 @@ def rel_of(path: Path):
         return str(path)
 
 def browse_dir(path):
-    """文件夹浏览: 返回子目录 + 视频文件(不入库也能直接播)。"""
+    """文件夹浏览: 返回子目录 + 视频文件(不入库也能直接播)。
+    目录被外部删掉时自动回退到最近存在的父目录 —— 绝不让用户卡在"不是目录"出不来。"""
     target = safe_dir_path(path)
     if target is None:
         return None
-    if not target.is_dir():
-        return {"error": "不是目录", "path": str(target)}
+    # 回退: 目录不存在 → 一路上溯到还存在的父目录(且仍须在白名单内)
+    hops = 0
+    while target is not None and not target.is_dir() and hops < 40:
+        parent = target.parent
+        if parent == target:
+            break
+        target = parent
+        hops += 1
+    if target is None or not target.is_dir():
+        return {"error": "not_found", "path": str(path)}
+    if not any(target.is_relative_to(r) for r in allowed_roots()):
+        return {"error": "not_allowed", "path": str(target)}
     dirs, files = [], []
     try:
         for f in sorted(target.iterdir(), key=lambda x: x.name.lower()):
@@ -466,7 +641,7 @@ def browse_dir(path):
         return {"error": str(e)}
     parent = str(target.parent.resolve()) if target.parent != target else ""
     return {"path": str(target), "parent": parent, "dirs": dirs, "files": files,
-            "can_up": any(target.parent.resolve().is_relative_to(r) for r in allowed_roots())}
+            "moved": hops > 0, "can_up": any(target.parent.resolve().is_relative_to(r) for r in allowed_roots())}
 
 QUEUE_FILE = BASE_DIR / "playlist.json"
 _queue_lock = threading.RLock()
@@ -485,6 +660,52 @@ def save_queue(q):
     with _queue_lock:
         atomic_write(QUEUE_FILE, json.dumps(q, ensure_ascii=False))
     return q
+
+ERROR_HINTS = [
+    # (引擎输出里的关键词, 人话提示) —— 用户看到英文报错会懵, 这里翻译成能行动的话
+    ("sign in to confirm", "该站要求登录 —— 去设置页填 cookie"),
+    ("login required", "该站要求登录 —— 去设置页填 cookie"),
+    ("private video", "私密视频 —— 换个公开的链接"),
+    ("members-only", "会员/付费内容 —— 本工具不碰这类内容"),
+    ("this video is not available", "该视频不可用(可能已删除或地区限制)"),
+    ("requested format is not available", "该站没有可用的视频格式 —— 换个链接试试"),
+    ("unable to extract", "解析失败 —— 更新 yt-dlp 试试"),
+    ("nsig", "需要 JS runtime —— 装 nodejs(pkg install nodejs)"),
+    ("signature extraction failed", "需要 JS runtime —— 装 nodejs(pkg install nodejs)"),
+    ("http error 403", "被拒绝(403) —— 需要 cookie 或被限流"),
+    ("http error 404", "链接失效(404)"),
+    ("http error 429", "被限流(429) —— 等等再试, 或调大 config.ini 的 delay"),
+    ("timed out", "超时 —— 检查网络"),
+    ("no space left", "磁盘满了"),
+    ("ffprobe", "ffmpeg/ffprobe 没装 —— pkg install ffmpeg"),
+    ("ffmpeg", "ffmpeg 没装 —— pkg install ffmpeg"),
+    ("destination", "写入失败 —— 检查下载目录权限"),
+    ("permission denied", "权限不足 —— 检查目录权限"),
+    ("unsupported url", "这个链接 yt-dlp 不支持"),
+]
+
+
+def hint_for(err: str):
+    """把引擎的英文报错翻成能行动的一句话。"""
+    e = (err or "").lower()
+    for k, v in ERROR_HINTS:
+        if k in e:
+            return v
+    return ""
+
+
+_ops_log = []          # 运行日志: 最近 200 条(用户能看到"到底发生了什么")
+
+
+def log_op(msg, level="info"):
+    """记一条操作日志。用户要能看到成功/失败/原因, 不能只有一片静默。"""
+    try:
+        _ops_log.insert(0, {"time": time.time(), "level": level, "msg": str(msg)[:400]})
+        del _ops_log[200:]
+    except Exception:
+        pass
+    return msg
+
 
 def lan_urls():
     """本机在局域网里的可访问地址 —— 手机/iPad 访问服务时要用
@@ -656,6 +877,53 @@ def storage_stats():
             "count": len(items)}
 
 
+_URL_OK = re.compile(r"^https?://[^\s]+$")
+
+
+def safe_url(u):
+    """URL 白名单: 必须是 http(s) 且不含空白。挡掉 yt-dlp 的选项注入
+    (比如 --exec=cmd 被当成参数执行)。"""
+    u = (u or "").strip()
+    return u if _URL_OK.match(u) else ""
+
+
+def public_url_ok(url):
+    """SSRF 防护: 拒绝指向内网/环回/元数据地址的 URL(用户能让服务器去读内网)。"""
+    if not url.startswith(("http://", "https://")):
+        return False
+    try:
+        import ipaddress
+        host = urllib.parse.urlparse(url).hostname
+        if not host:
+            return False
+        if host.lower() in ("localhost", "metadata.google.internal"):
+            return False
+        for info in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+    except Exception:
+        return False
+    return True
+
+
+def _norm_item(it):
+    """队列项规范化: 非 dict / 没有 rel 的一律丢掉。
+    (以前直接 it.get("rel") → 传个字符串就 500)"""
+    if not isinstance(it, dict):
+        return None
+    rel = str(it.get("rel") or "").strip()
+    if not rel:
+        return None
+    try:
+        p = int(it.get("p") or 1)
+    except (TypeError, ValueError):
+        p = 1
+    return {"rel": rel, "title": str(it.get("title") or Path(rel).stem),
+            "bvid": str(it.get("bvid") or ""), "p": p,
+            "name": str(it.get("name") or Path(rel).stem)}
+
+
 def queue_ops(body):
     """队列操作: add/remove/up/down/move/clear/set。返回最新队列。"""
     with _queue_lock:
@@ -663,10 +931,9 @@ def queue_ops(body):
         items = q["items"]
         op = body.get("op", "")
         if op == "add":
-            it = body.get("item")
-            if it and it.get("rel"):
-                if not any(x.get("rel") == it["rel"] for x in items):
-                    items.append(it)
+            it = _norm_item(body.get("item"))
+            if it and not any(x.get("rel") == it["rel"] for x in items):
+                items.append(it)
         elif op == "remove":
             i = int(body.get("i", -1))
             if 0 <= i < len(items):
@@ -687,7 +954,7 @@ def queue_ops(body):
         elif op == "clear":
             items.clear()
         elif op == "set":
-            items = list(body.get("items") or [])
+            items = [x for x in (_norm_item(i) for i in (body.get("items") or [])) if x]
         q["items"] = items
         q["updated"] = time.time()
         return save_queue(q)
@@ -701,14 +968,18 @@ def excluded(path: Path) -> bool:
 
 
 def scan_videos():
-    """全盘扫描视频文件, 按文件夹归组成"部"导入媒体库(自动检测任何来源的视频)。"""
-    lib = load_library()
-    # 面板自己管的目录不重复导入(含外部绝对路径条目)
+    """全盘扫描视频文件, 按文件夹归组成"部"导入媒体库(自动检测任何来源的视频)。
+
+    关键(2026-10-21 修): 扫描本身很慢 —— 手机上全盘 rglob 可能几十秒, 期间用户
+    可能刚打了标签/收藏/删了片。老写法是 load → 慢慢扫 → save, **扫描期间用户的改动
+    全被覆盖**(lost update, 标签集体消失)。现在: 只读阶段只收集, 写阶段用
+    mutate_library() 在锁内合并 —— 并发改动不会被覆盖。"""
+    # ── 1) 只读阶段: 收集要导入的文件夹(全程不碰媒体库) ──
     panel_folders = set()
-    for e in lib.values():
+    for e in load_library().values():
         fo = Path(e.get("folder", ""))
         panel_folders.add(((DOWNLOAD_DIR / fo) if not fo.is_absolute() else fo).resolve())
-    added = 0
+    found = {}                      # folder -> [(文件名, MB)]
     for raw in SCAN_DIRS.split(","):
         root = Path(os.path.expanduser(raw.strip()))
         if not root.is_dir():
@@ -718,9 +989,20 @@ def scan_videos():
                 continue
             folder = f.parent.resolve()
             if folder in panel_folders:
-                continue                              # 面板自己的目录, 跳过
+                continue                          # 面板自己的目录, 跳过
             if excluded(folder):
-                continue                              # 黑名单目录, 跳过
+                continue                          # 黑名单目录, 跳过
+            try:
+                found.setdefault(folder, []).append((f.name, round(f.stat().st_size / 1048576, 1)))
+            except OSError:
+                continue
+
+    # ── 2) 写阶段: 锁内合并 ──
+    added = 0
+
+    def _apply(lib):
+        nonlocal added
+        for folder, files in found.items():
             key = "EXT_" + hashlib.md5(str(folder).encode()).hexdigest()[:10]
             entry = lib.setdefault(key, {"title": folder.name or "未命名", "owner": "本地导入",
                                          "folder": "", "cover": "", "cover_url": "",
@@ -729,14 +1011,22 @@ def scan_videos():
                 try:
                     entry["folder"] = str(folder.relative_to(DOWNLOAD_DIR.resolve()))
                 except ValueError:
-                    entry["folder"] = str(folder)      # 面板目录之外 → 存绝对路径
+                    entry["folder"] = str(folder)  # 面板目录之外 → 存绝对路径
                 added += 1
-            if f.name not in [p.get("file") for p in entry["parts"].values()]:
+            have = [p.get("file") for p in entry["parts"].values()]
+            for name, size in files:
+                if name in have:
+                    continue
                 idx = str(len(entry["parts"]) + 1)
-                entry["parts"][idx] = {"name": f.stem, "file": f.name,
-                                       "size": round(f.stat().st_size / 1048576, 1)}
-    save_library(lib)
-    for key, e in lib.items():
+                entry["parts"][idx] = {"name": Path(name).stem, "file": name, "size": size}
+        return lib
+
+    try:
+        mutate_library(_apply)
+    except Exception as e:
+        log_op(f"扫描写库失败: {e}", "error")
+        return 0
+    for key in list(load_library().keys()):
         if key.startswith("EXT_"):
             snapshot_thumb(key)
     return added
@@ -858,19 +1148,32 @@ def mp4s_of(folder):
 _lib_lock = threading.RLock()
 
 def load_library():
+    """读媒体库。**损坏时必须报错, 不能静默返回空库** ——
+    静默返回 {} 会让下一次 save 把空库写盘, 万级媒体库瞬间清零(数据丢失炸弹)。
+    正确做法: 备份坏文件 + 抛错, 让用户看见并处理。"""
     with _lib_lock:
-        if LIB_FILE.exists():
+        if not LIB_FILE.exists():
+            return {}
+        try:
+            raw = LIB_FILE.read_text("utf-8")
+            d = json.loads(raw)
+        except Exception as e:
+            bak = LIB_FILE.with_name(f"library.corrupt-{int(time.time())}.json")
             try:
-                return json.loads(LIB_FILE.read_text("utf-8"))
-            except Exception:
-                # 损坏自愈: 先把坏文件挪走留证, 返回空库 —— 否则下一次 save 会把空库
-                # 当真库写盘, 万级媒体库瞬间清零(数据丢失炸弹)
-                try:
-                    LIB_FILE.rename(LIB_FILE.with_name(f"library.corrupt-{int(time.time())}.json"))
-                except Exception:
-                    pass
-                return {}
-        return {}
+                LIB_FILE.replace(bak)
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"媒体库文件损坏, 已备份为 {bak.name}。"
+                f"请检查该文件后放回 {LIB_FILE.name}, 或删掉它重建(已下载的视频不会丢)")
+        if not isinstance(d, dict):
+            bak = LIB_FILE.with_name(f"library.corrupt-{int(time.time())}.json")
+            try:
+                LIB_FILE.replace(bak)
+            except OSError:
+                pass
+            raise RuntimeError(f"媒体库格式错误(顶层不是对象), 已备份为 {bak.name}")
+        return d
 
 def save_library(lib):
     with _lib_lock:
@@ -889,11 +1192,55 @@ def ensure_folder(lib, bvid, title):
     (DOWNLOAD_DIR / name).mkdir(parents=True, exist_ok=True)
     return name
 
+_BRIGHT_MIN = 28.0      # 低于这个平均亮度算黑场(视频纯黑的 YAVG 是 16)
+
+def _probe_bright(src, t):
+    # 量某一时刻那一帧的平均亮度(0-255)。失败返回 -1。
+    # 用 64x36 的小图, 解一帧就够, 很快 —— 这是"这一秒是不是黑屏"的判据。
+    exe = ffmpeg_path()
+    if not exe:
+        return -1
+    kw = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if IS_WIN else {}
+    cmd = [exe, "-v", "error", "-nostdin", "-ss", f"{t:.3f}", "-i", str(src),
+           "-frames:v", "1", "-vf", "scale=64:36,signalstats,metadata=print:file=-",
+           "-f", "null", "-"]
+    try:
+        pr = subprocess.run(cmd, capture_output=True, timeout=30, **kw)
+        out = (pr.stdout or b"").decode("utf-8", "replace")
+        for line in out.splitlines():
+            if "YAVG" in line and "=" in line:
+                try:
+                    return float(line.split("=")[-1].strip())
+                except ValueError:
+                    return -1
+    except Exception:
+        return -1
+    # 兜底: 有些输入(比如单张图)带 -ss 会直接吐不出帧 -> 去掉 -ss 再试一次
+    try:
+        pr2 = subprocess.run([exe, "-v", "error", "-nostdin", "-i", str(src),
+                              "-frames:v", "1", "-vf", "scale=64:36,signalstats,metadata=print:file=-",
+                              "-f", "null", "-"], capture_output=True, timeout=30, **kw)
+        out2 = (pr2.stdout or b"").decode("utf-8", "replace")
+        for line in out2.splitlines():
+            if "YAVG" in line and "=" in line:
+                return float(line.split("=")[-1].strip())
+    except Exception:
+        pass
+    return -1
+
 def snapshot_thumb(bvid):
-    """从已下载视频的第3秒抽帧当缩略图(避开开头黑帧) —— 零网络依赖, 保证有图。"""
+    # 从已下载视频里挑一帧当封面 —— 关键是别挑黑屏。
+    # 旧做法: 死 seek 第 3 秒取第一帧 -> 片头黑场就得到一张纯黑封面。
+    # 新做法: 沿时间轴试几个点, 每次先量那一帧的亮度, 黑的就换下一个;
+    # 全都黑就取最亮的那一点。挑中的点再精确抽帧。
+    # 抽出来的图存 {bvid}_s.jpg, 和官方封面 {bvid}.jpg 分开 —— 否则抽帧图
+    # 会把官方封面永远顶掉(用户明明有封面却显示抽帧)。
     entry = load_library().get(bvid)
     if not entry:
         return False
+    target = COVER_DIR / f"{bvid}_s.jpg"
+    if target.exists() and target.stat().st_size > 100:
+        return True                                   # 已有就别重算
     folder = DOWNLOAD_DIR / entry.get("folder", "")
     parts = entry.get("parts", {})
     if not parts:
@@ -902,43 +1249,76 @@ def snapshot_thumb(bvid):
     src = folder / first
     if not src.exists():
         return False
-    target = COVER_DIR / f"{bvid}.jpg"
-    for seek in ("3", "0.5", None):          # 短视频会seek过头, 逐级回退
-        args = []
-        if seek:
-            args += ["-ss", seek]
-        args += ["-i", str(src), "-frames:v", "1", "-vf", "scale=480:-2",
-                 "-q:v", "3", str(target)]
-        ok, err = run_ffmpeg(args, timeout=60)
-        if not ok and err:
-            _cover_errors[bvid] = f"snapshot: {err}"
-            return False
-        if target.exists() and target.stat().st_size > 100:
-            _cover_errors.pop(bvid, None)
-            return True
-    _cover_errors.setdefault(bvid, "snapshot: ffmpeg 未能出图")
+    dur = 0.0
+    try:
+        dur = float((probe_meta(src) or {}).get("duration") or 0)
+    except Exception:
+        dur = 0.0
+    cands = []
+    if dur > 0:
+        for ratio in (0.12, 0.35, 0.60, 0.85):
+            cands.append(round(dur * ratio, 2))
+    cands += [5.0, 2.0, 15.0, 0.0]
+    seen, ordered = set(), []
+    for t in cands:
+        if t in seen:
+            continue
+        seen.add(t)
+        if dur > 0 and t >= dur:
+            continue                                   # 超出时长, 跳过
+        ordered.append(t)
+    best_t, best_v = None, -1.0
+    for t in ordered:
+        v = _probe_bright(src, t)
+        if v < 0:
+            continue
+        if v > best_v:
+            best_v, best_t = v, t
+        if v >= _BRIGHT_MIN:
+            best_t = t                               # 这一秒不黑, 就要它
+            break
+    if best_t is None:
+        best_t = 0.0                                 # 探不出来(ffmpeg 抽风) -> 死取第一帧
+    ok, err = run_ffmpeg(["-ss", f"{best_t:.3f}", "-i", str(src), "-frames:v", "1",
+                          "-vf", "scale=480:-2", "-q:v", "3", str(target)], timeout=90)
+    if not (ok and target.exists() and target.stat().st_size > 100):
+        # 兜底: thumbnail 滤镜自动挑最有代表性的一帧
+        ok, err = run_ffmpeg(["-ss", f"{best_t:.3f}", "-i", str(src),
+                              "-vf", "thumbnail=40,scale=480:-2", "-frames:v", "1",
+                              "-q:v", "3", str(target)], timeout=90)
+    if target.exists() and target.stat().st_size > 100:
+        _cover_errors.pop(bvid, None)
+        return True
+    _cover_errors[bvid] = f"snapshot: {err}"
     return False
 
 _cover_errors = {}      # bvid → 最近一次抓取失败原因(透出给前端诊断)
 
-def fetch_cover(bvid, url):
+def fetch_cover(bvid, url, ref=""):
+    # 抓官方封面。ref = 来源页(视频页)的 URL。
+    # 防盗链要的是来源页的域名, 不是图片自己的域名 —— 用图片域名当 Referer
+    # 一律 403, 表现就是「明明有封面, 却只能显示抽帧」。
+    if not url:
+        return False
     target = COVER_DIR / f"{bvid}.jpg"
-    if target.exists():
+    if target.exists() and target.stat().st_size > 100:
         _cover_errors.pop(bvid, None)
         return True
-    if not url:
-        _cover_errors[bvid] = "库里没存封面地址(这个条目是老版本建的)"
-        return False
-    try:
-        ref = urllib.parse.urlparse(url).scheme + "://" + urllib.parse.urlparse(url).netloc + "/"
-    except Exception:
-        ref = ""
     hdrs = {**UA}
     if ref:
-        hdrs["Referer"] = ref          # 防盗链 Referer 按封面来源域名自动带, 通用
+        hdrs["Referer"] = ref
+    else:
+        try:
+            pr = urllib.parse.urlparse(url)
+            hdrs["Referer"] = f"{pr.scheme}://{pr.netloc}/"
+        except Exception:
+            pass
     try:
         req = urllib.request.Request(url, headers=hdrs)
-        target.write_bytes(urllib.request.urlopen(req, timeout=15).read())
+        data = urllib.request.urlopen(req, timeout=15).read()
+        if len(data) < 100:
+            raise ValueError("cover too small, probably an error page")
+        atomic_write_bytes(target, data)
         _cover_errors.pop(bvid, None)
         return True
     except Exception as e:
@@ -965,6 +1345,20 @@ def library_view_cached(ftag=None, fav=False):
     _view_cache.update(etag=etag, data=data, at=now)
     return data, etag
 
+def _cover_rev(bvid):
+    # 封面版本号: 官方封面和抽帧图分开计。换源时前端 URL 变 -> 浏览器不会拿旧缓存。
+    cj = COVER_DIR / f"{bvid}.jpg"
+    cs = COVER_DIR / f"{bvid}_s.jpg"
+    try:
+        if cj.exists():
+            return int(cj.stat().st_mtime) * 2
+        if cs.exists():
+            return int(cs.stat().st_mtime) * 2 + 1
+    except OSError:
+        pass
+    return 0
+
+
 def library_view(tag=None, fav=False):
     """前端媒体库数据源: 视频卡片(含分P明细) + 未分组散文件。
     tag/fav: 服务端筛选(万级库时别全量传给前端)。"""
@@ -979,7 +1373,8 @@ def library_view(tag=None, fav=False):
             f = folder / d.get("file", "")
             if d.get("file") and f.exists():
                 parts.append({"p": int(p), "name": d.get("name", f"P{p}"),
-                              "file": d["file"], "size": d.get("size", 0)})
+                              "file": d["file"], "size": d.get("size", 0),
+                              "h": int(d.get("h", 0) or 0)})
         tags = e.get("tags") or []
         if tag and tag not in tags:
             continue
@@ -988,7 +1383,8 @@ def library_view(tag=None, fav=False):
         total = round(sum(x["size"] for x in parts), 1)
         mt = max((folder / x["file"]).stat().st_mtime for x in parts) if parts else folder.stat().st_mtime
         videos.append({"bvid": bvid, "title": e["title"], "folder": e["folder"],
-                       "cover": bool(e.get("cover")), "owner": e.get("owner", ""),
+                       "cover": bool(e.get("cover")), "cover_rev": _cover_rev(bvid),
+                       "owner": e.get("owner", ""),
                        "seq": e.get("seq", 0), "tags": tags, "fav": bool(e.get("fav")),
                        "marks": e.get("marks") or [],
                        "parts": sorted(parts, key=lambda x: x["p"]),
@@ -1012,30 +1408,75 @@ def tag_stats():
             fav += 1
     return {"tags": counts, "fav": fav}
 
-def toggle_tag(bvid, tag):
+def mutate_library(fn):
+    """媒体库的唯一写入口: 整个 读-改-写 都在 _lib_lock 内。
+    杜绝 lost update —— 以前 load→改→save 三步不在同一把锁里,
+    两个并发操作(比如打标签 + 扫描)会互相覆盖, 用户的标签/收藏被静默清零。"""
+    with _lib_lock:
+        lib = load_library()
+        out = fn(lib)
+        atomic_write(LIB_FILE, json.dumps(lib, ensure_ascii=False))
+    _bump_view()
+    return out
+
+
+def delete_video(bvid):
+    """删掉一个视频(整个): 取消进行中的下载 + 删文件夹 + 摘库 + 删封面。
+    单个删除和批量删除共用这一份逻辑 —— 批量时前端循环调 /api/delete,
+    中途断网就会删一半, 用户看到"删了一半"的烂摊子, 所以批量必须服务端一次干完。"""
+    with _task_lock:
+        for tt in tasks:
+            if tt["bvid"] == bvid and tt["status"] in ("排队中", "下载中"):
+                tt["status"] = "已取消"
+                if tt.get("proc"):
+                    try:
+                        tt["proc"].terminate()
+                    except Exception:
+                        pass
+    save_tasks()
     lib = load_library()
-    e = lib.get(bvid)
-    if not e:
-        return None
-    tags = e.get("tags") or []
-    if tag in tags:
-        tags.remove(tag)
-    else:
-        tags.append(tag)
-        if len(tags) > 8:
-            tags = tags[:8]
-    e["tags"] = tags
+    entry = lib.pop(bvid, None)
+    if not entry:
+        return False
+    try:
+        shutil.rmtree(DOWNLOAD_DIR / entry["folder"], ignore_errors=True)
+    except Exception:
+        pass
+    for suffix in (".jpg", "_s.jpg"):
+        try:
+            (COVER_DIR / f"{bvid}{suffix}").unlink(missing_ok=True)
+        except OSError:
+            pass
     save_library(lib)
-    return tags
+    log_op(f"已删除: {entry.get('title', bvid)[:50]}")
+    return True
+
+
+def toggle_tag(bvid, tag):
+    def _apply(lib):
+        e = lib.get(bvid)
+        if not e:
+            return None
+        tags = e.get("tags") or []
+        if tag in tags:
+            tags.remove(tag)
+        else:
+            tags.append(tag)
+            if len(tags) > 8:
+                tags = tags[:8]
+        e["tags"] = tags
+        return tags
+    return mutate_library(_apply)
+
 
 def toggle_fav(bvid):
-    lib = load_library()
-    e = lib.get(bvid)
-    if not e:
-        return None
-    e["fav"] = not e.get("fav")
-    save_library(lib)
-    return e["fav"]
+    def _apply(lib):
+        e = lib.get(bvid)
+        if not e:
+            return None
+        e["fav"] = not e.get("fav")
+        return e["fav"]
+    return mutate_library(_apply)
 
 def placeholder_svg(title):
     """无封面时生成的渐变占位图, 永远有东西可显示。"""
@@ -1049,7 +1490,8 @@ def placeholder_svg(title):
 
 # ---------------- 任务队列 ----------------
 tasks = []
-_task_lock = threading.Lock()
+# RLock 而不是 Lock: cancel_task 持锁时会再拿同一把锁 → 普通 Lock 自死锁(用户点"取消"永久转圈)
+_task_lock = threading.RLock()
 _next_id = [0]
 TASKS_FILE = BASE_DIR / "tasks.json"
 
@@ -1063,7 +1505,7 @@ def save_tasks():
     with _task_lock:
         undone = [{k: t.get(k) for k in ("id", "bvid", "title", "parts", "part_names",
                                           "cover", "audio_only", "failed", "created",
-                                          "url", "part_urls")}
+                                          "url", "part_urls", "quality")}
                   for t in tasks if t["status"] in ("排队中", "下载中")]
     try:
         atomic_write(TASKS_FILE, json.dumps(undone, ensure_ascii=False))
@@ -1087,6 +1529,7 @@ def restore_tasks():
                           "parts": d["parts"], "part_names": d.get("part_names", {}),
                           "cover": d.get("cover", ""), "audio_only": d.get("audio_only", False),
                           "url": d.get("url", ""), "part_urls": d.get("part_urls", {}),
+                          "quality": int(d.get("quality", 0) or 0),
                           "status": "排队中", "line": "⚡ restored, resuming",
                           "failed": d.get("failed", []), "proc": None,
                           "created": d.get("created", time.time())})
@@ -1096,27 +1539,70 @@ def restore_tasks():
 def next_seq(lib):
     return max([e.get("seq", 0) for e in lib.values()] + [0]) + 1
 
-def new_task(bvid, title, parts, part_names, cover, url="", part_urls=None):
+def new_task(bvid, title, parts, part_names, cover, url="", part_urls=None, quality=0):
     with _task_lock:
         _next_id[0] += 1
         t = {"id": _next_id[0], "bvid": bvid, "title": title, "parts": parts,
              "part_names": part_names, "cover": cover, "status": "排队中",
-             "url": url, "part_urls": part_urls or {},
+             "url": url, "part_urls": part_urls or {}, "quality": int(quality or 0),
              "line": "waiting", "failed": [], "proc": None, "created": time.time()}
         tasks.append(t)
     save_tasks()
     return t
 
-COOKIE_FILE = BASE_DIR / "cookies.txt"
+COOKIE_DIR = BASE_DIR / "cookies"
+try:
+    COOKIE_DIR.mkdir(exist_ok=True)
+except OSError:
+    pass
+COOKIE_FILE = COOKIE_DIR / "default.txt"
 
-def _cmd(url, audio_only, folder):
-    # cookie 域从链接自动推断(通用) —— 写盘前先删旧的, 避免域名切换后串味
-    if SESSION_COOKIE:
+
+def cookie_jar_path(domain):
+    """每个域名一个 cookie jar 文件 —— 免得多站点的 cookie 互相覆盖。"""
+    h = hashlib.md5((domain or "default").encode()).hexdigest()[:12]
+    return COOKIE_DIR / f"{h}.txt"
+
+
+def load_cookie_map():
+    """config.ini 的 cookies 键: {"域名": "K=V; K2=V2"}"""
+    raw = _CONF.get("cookies", "")
+    try:
+        d = json.loads(raw) if raw else {}
+    except Exception:
+        d = {}
+    return d if isinstance(d, dict) else {}
+
+
+def save_cookie_map(d):
+    save_config_value("cookies", json.dumps(d, ensure_ascii=False))
+    return d
+
+
+def cookie_for_domain(url):
+    """按链接的域名挑最合适的凭据: 精确匹配 → 后缀匹配 → 通用凭据(域名留空的)。"""
+    dom = host_of(url).lstrip(".").lower()
+    m = load_cookie_map()
+    if dom:
+        if dom in m:
+            return m[dom]
+        for k, v in m.items():
+            kk = k.lstrip(".").lower()
+            if kk and dom.endswith(kk):
+                return v
+    return _CONF.get("cookie", "") or m.get("", "") or ""
+
+def _cmd(url, audio_only, folder, quality=0):
+    # cookie: 按链接域名挑对应凭据, 每个域名一个 jar 文件(多站点不打架)
+    cv = cookie_for_domain(url)
+    jar = None
+    if cv:
         dom = host_of(url) or ".invalid"
+        jar = cookie_jar_path(dom)
         try:
-            write_cookie_jar(dom, cookie_pairs(SESSION_COOKIE), COOKIE_FILE)
+            write_cookie_jar(dom, cookie_pairs(cv), jar)
         except OSError:
-            pass
+            jar = None
     if ENGINE == "yt-dlp":
         # ── 全平台通用格式(2026-10-21, 按 yt-dlp 2026 官方做法) ──
         # 唯一全平台通吃的组合: MP4 容器 + H.264(avc1) + AAC(mp4a)
@@ -1126,10 +1612,15 @@ def _cmd(url, audio_only, folder):
         #      → 必须配 --remux-video mp4(否则可能下到 webm/mkv)
         #   2) 别写 hdr:dv —— yt-dlp 默认就排除 Dolby Vision(大多数设备不认)
         #   3) -S 的 vcodec:h264 是"软偏好"不排除, 硬约束要靠 -f
-        FMT = ("bv*[vcodec^=avc1]+ba[acodec^=mp4a]/"
-               "bv*[vcodec^=h264]+ba[acodec^=aac]/"
-               "b[ext=mp4]/"
-               "bv*+ba/b")
+        # 清晰度上限: quality=0 = 自动(最优, 老行为); 720 = 只要 720 及以下
+        # (yt-dlp 的 height<= 是"上限", 站点只有 360P 时会给你 360P, 省空间)
+        cap = int(quality or 0)
+        h = f"[height<={cap}]" if cap > 0 else ""
+        # cap=0 时这段必须和以前**逐字一致**(selftest 有断言), cap>0 时才加过滤
+        FMT = (f"bv*{h}[vcodec^=avc1]+ba[acodec^=mp4a]/"
+               f"bv*{h}[vcodec^=h264]+ba[acodec^=aac]/"
+               f"b{h}[ext=mp4]/"
+               f"bv*{h}+ba/b")
         m = re.search(r"[?&]p=(\d+)", url)
         name = f"P{m.group(1)}" if m else "video"      # 按P命名, 防互相覆盖
         cmd = ["yt-dlp", "--no-playlist", "--no-warnings", "--newline",
@@ -1137,12 +1628,12 @@ def _cmd(url, audio_only, folder):
                "-S", "res,fps,hdr:12,acodec:aac",        # 同编码内取最高画质
                "--merge-output-format", "mp4",
                "--remux-video", "mp4",                   # ← 单文件也强制换壳
-               "--write-info-json", "--no-cleanup",
+               "--write-info-json",
                "--continue", "--part", "--retries", "10", "--fragment-retries", "10",
                "--no-overwrites",
                "-o", str(folder / f"{name}.%(ext)s")]
-        if SESSION_COOKIE:
-            cmd += ["--cookies", str(COOKIE_FILE)]
+        if jar:
+            cmd += ["--cookies", str(jar)]
         if audio_only:
             cmd += ["-x", "--audio-format", "m4a"]
         return cmd + [url]
@@ -1150,12 +1641,12 @@ def _cmd(url, audio_only, folder):
         m = re.search(r"[?&]p=(\d+)", url)
         name = f"P{m.group(1)}" if m else "video"
         cmd = ["you-get", "-o", str(folder), "-O", name]
-        if SESSION_COOKIE:
-            cmd += ["--cookies", str(COOKIE_FILE)]
+        if jar:
+            cmd += ["--cookies", str(jar)]
         return cmd + [url]
     cmd = [YUTTO, "-d", str(folder)]
-    if SESSION_COOKIE:
-        cmd += ["-c", SESSION_COOKIE]
+    if cv:
+        cmd += ["-c", cv]
     if audio_only:
         cmd += ["--audio-only"]
     return cmd + [url]
@@ -1183,12 +1674,15 @@ def absorb_meta(bvid, folder, p):
         "desc": (info.get("description") or "")[:2000],
         "duration": info.get("duration") or 0,
         "thumb": info.get("thumbnail") or "",
+        "height": int(info.get("height") or 0),
         "webpage": info.get("webpage_url") or "",
         "upload_date": info.get("upload_date") or "",
     }
     e["meta"] = meta
     if meta["thumb"] and not e.get("cover_url"):
         e["cover_url"] = meta["thumb"]
+    if meta["webpage"] and not e.get("source_url"):
+        e["source_url"] = meta["webpage"]
     if meta["uploader"] and not e.get("owner"):
         e["owner"] = meta["uploader"]
     if meta["desc"] and not e.get("desc"):
@@ -1200,25 +1694,38 @@ _EXISTS = object()      # 哨兵: 下载成功但文件本来就在(重下场景
 
 def _run_part(task, p, folder):
     """下单个P(重试1次)。返回值三态: Path=新下好的文件 / _EXISTS=已有 / False=真失败"""
-    url = task.get("part_urls", {}).get(str(p)) or task.get("part_urls", {}).get(p)
+    # part_urls 可能是 null(旧数据/手改过的库) → 不能直接 .get
+    purls = task.get("part_urls") or {}
+    url = purls.get(str(p)) or purls.get(p)
     if not url:
         base = task.get("url") or ""
         sep = "&" if "?" in base else "?"
         url = f"{base}{sep}p={p}" if base else ""
+
     for attempt in (1, 2):
         if task["status"] == "已取消":
             return False
         task["line"] = f"P{p} starting (attempt {attempt})..."
         try:
-            proc = subprocess.Popen(_cmd(url, task.get("audio_only", False), folder),
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            # 独立进程组: 取消任务时要能杀掉整棵进程树(yt-dlp 会 spawn ffmpeg,
+            # 只杀父进程会留下 ffmpeg 孤儿继续下载, 白耗流量和电量)
+            pk = {}
+            if IS_WIN:
+                pk["creationflags"] = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                                        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+            else:
+                pk["start_new_session"] = True
+            proc = subprocess.Popen(_cmd(url, task.get("audio_only", False), folder, task.get("quality", 0)),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **pk)
         except Exception as e:
             task["line"] = f"P{p} failed to start: {e}"
+            task["error"] = f"启动下载进程失败: {e}"
             return False
         task["proc"] = proc
         # 心跳监控: 引擎卡死(长时间无输出)时自动终止, 防任务永久悬挂
         fd = proc.stdout.fileno()
         buf, idle = b"", 0
+        tail = []                             # 引擎输出的最后几行(失败时给真原因)
         while True:
             ready, _, _ = select.select([fd], [], [], 5)
             if not ready:
@@ -1239,6 +1746,10 @@ def _run_part(task, p, folder):
             while b"\n" in buf:
                 raw, buf = buf.split(b"\n", 1)
                 line = raw.decode("utf-8", "ignore").strip()
+                if line:
+                    tail.append(line)          # 留最后几行 → 失败时给用户看真原因
+                    if len(tail) > 12:
+                        tail.pop(0)
                 m = PERCENT_RE.search(line)
                 task["line"] = f"P{p} {m.group(1)}%" if m else f"P{p} {line[:80]}"
         proc.wait()
@@ -1246,92 +1757,211 @@ def _run_part(task, p, folder):
         if proc.returncode == 0:
             new = sorted(mp4s_of(folder) - task["_before"], key=lambda x: x.stat().st_mtime)
             return new[-1] if new else _EXISTS
-    return False
+        # 失败: 把引擎说的原话留下来(用户要看到"为什么失败", 不是"P1 失败")
+        reason = " | ".join(tail[-4:]).strip()[:400]
+        task["error"] = reason or f"exit={proc.returncode}"
+        return False
 
 def worker():
+    """下载队列主循环。**必须有 try/except** ——
+    以前任何异常(库条目被删 / part_urls 是 null / 文件名是 Windows 保留名)
+    都会永久杀死这个循环, 之后所有任务永远卡在"下载中", 用户完全不知道发生了什么。"""
     while True:
         time.sleep(0.3)
-        with _task_lock:
-            task = next((t for t in tasks if t["status"] == "排队中"), None)
-        if task is None:
-            continue
-        task["status"] = "下载中"
-        lib = load_library()
-        entry = lib.setdefault(task["bvid"], {"title": task["title"], "owner": "",
-                               "folder": "", "cover": "", "cover_url": "", "parts": {}})
-        entry["cover_url"] = entry["cover_url"] or task.get("cover", "")
-        entry["title"] = task["title"] or entry["title"]
-        if "seq" not in entry:
-            entry["seq"] = next_seq(lib)
-        if not entry["folder"]:
-            entry["folder"] = ensure_folder(lib, task["bvid"], task["title"])
-        if not entry["cover"] and fetch_cover(task["bvid"], task.get("cover")):
-            entry["cover"] = f"{task['bvid']}.jpg"
-        save_library(lib)
-        folder = DOWNLOAD_DIR / entry["folder"]
+        try:
+            _worker_once()
+        except Exception as e:
+            log_op(f"下载线程异常(已恢复): {type(e).__name__}: {e}", "error")
+            time.sleep(1)
 
-        for pi, p in enumerate(task["parts"]):
-            if task["status"] == "已取消":
-                break
-            if pi > 0:                          # 分P之间歇口气, 防限速(可打断)
-                task["line"] = f"P{p} waiting {DELAY_BETWEEN_PARTS}s (rate limit)..."
-                for _ in range(DELAY_BETWEEN_PARTS * 4):
-                    if task["status"] == "已取消":
-                        break
-                    time.sleep(0.25)
-            task["_before"] = mp4s_of(folder)
-            got = _run_part(task, p, folder)
-            if task["status"] == "已取消":
-                break
-            lib = load_library()
-            entry = lib[task["bvid"]]
-            if isinstance(got, Path):
-                if task.get("audio_only") and ENGINE == "you-get":
-                    # you-get 没有纯音频开关: 下完视频后 ffmpeg 流复制抽音轨(不重编码, 秒级)
-                    task["line"] = f"P{p} extracting audio..."
-                    m4a = got.with_suffix(".m4a")
-                    ok, _e = run_ffmpeg(["-i", str(got), "-vn", "-c:a", "copy", str(m4a)], timeout=600)
-                    if ok and m4a.exists() and m4a.stat().st_size > 1024:
-                        got.unlink(missing_ok=True)
-                        got = m4a
-                st = got.stat()
-                entry["parts"][str(p)] = {"name": task["part_names"].get(str(p), f"P{p}"),
-                                          "file": str(got.relative_to(folder)),
-                                          "size": round(st.st_size / 1048576, 1)}
-                task["line"] = f"P{p} done ✓"
-                # 下载那一刻就把元数据抓住(yt-dlp 的 info.json): UP主/简介/时长/封面
+
+def _worker_once():
+    """处理一个队列任务(取不到就立刻返回)。**不能有 continue** ——
+    这里没有循环, continue 会是语法错误。"""
+    with _task_lock:
+        task = next((t for t in tasks if t["status"] == "排队中"), None)
+    if task is None:
+        return
+    task["status"] = "下载中"
+    lib = load_library()
+    entry = lib.setdefault(task["bvid"], {"title": task["title"], "owner": "",
+                           "folder": "", "cover": "", "cover_url": "", "parts": {}})
+    entry["cover_url"] = entry["cover_url"] or task.get("cover", "")
+    entry["source_url"] = entry.get("source_url") or task.get("url", "")   # 来源页: 抓封面的 Referer 用它
+    entry["title"] = task["title"] or entry["title"]
+    if "seq" not in entry:
+        entry["seq"] = next_seq(lib)
+    if not entry["folder"]:
+        entry["folder"] = ensure_folder(lib, task["bvid"], task["title"])
+    if not entry["cover"] and fetch_cover(task["bvid"], task.get("cover"), task.get("url", "")):
+        entry["cover"] = f"{task['bvid']}.jpg"
+    save_library(lib)
+    folder = DOWNLOAD_DIR / entry["folder"]
+
+    for pi, p in enumerate(task["parts"]):
+        if task["status"] == "已取消":
+            break
+        if pi > 0:                          # 分P之间歇口气, 防限速(可打断)
+            task["line"] = f"P{p} waiting {DELAY_BETWEEN_PARTS}s (rate limit)..."
+            for _ in range(DELAY_BETWEEN_PARTS * 4):
+                if task["status"] == "已取消":
+                    break
+                time.sleep(0.25)
+        task["_before"] = mp4s_of(folder)
+        got = _run_part(task, p, folder)
+        if task["status"] == "已取消":
+            break
+        lib = load_library()
+        entry = lib.get(task["bvid"])
+        if not entry:
+            # 用户在下载途中把这个视频删了 → 跳过这个分P, 别让整个 worker 崩
+            task["line"] = f"P{p} skipped (已被删除)"
+            break
+        if isinstance(got, Path):
+            if task.get("audio_only") and ENGINE == "you-get":
+                # you-get 没有纯音频开关: 下完视频后 ffmpeg 流复制抽音轨(不重编码, 秒级)
+                task["line"] = f"P{p} extracting audio..."
+                m4a = got.with_suffix(".m4a")
+                ok, _e = run_ffmpeg(["-i", str(got), "-vn", "-c:a", "copy", str(m4a)], timeout=600)
+                if ok and m4a.exists() and m4a.stat().st_size > 1024:
+                    got.unlink(missing_ok=True)
+                    got = m4a
+            st = got.stat()
+            entry["parts"][str(p)] = {"name": task["part_names"].get(str(p), f"P{p}"),
+                                      "file": str(got.relative_to(folder)),
+                                      "size": round(st.st_size / 1048576, 1)}
+            task["line"] = f"P{p} done ✓"
+            # 下载那一刻就把元数据抓住(yt-dlp 的 info.json): UP主/简介/时长/封面
+            try:
+                m = absorb_meta(task["bvid"], folder, p)
+                if m and m.get("uploader"):
+                    task["line"] = f"P{p} done ✓ · {m['uploader']}"
+                if m and m.get("height"):
+                    try:
+                        entry["parts"][str(p)]["h"] = int(m["height"])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        elif got is _EXISTS:
+            task["line"] = f"P{p} already exists, skipped"
+            # 文件已存在也要写进库, 否则"补下"的片在 UI 里永远看不见
+            cand = None
+            for ext in (".mp4", ".mkv", ".webm", ".m4a"):
+                c2 = folder / f"P{p}{ext}"
+                if c2.is_file():
+                    cand = c2
+                    break
+            if cand is not None:
                 try:
-                    m = absorb_meta(task["bvid"], folder, p)
-                    if m and m.get("uploader"):
-                        task["line"] = f"P{p} done ✓ · {m['uploader']}"
-                except Exception:
+                    entry["parts"][str(p)] = {
+                        "name": task["part_names"].get(str(p), f"P{p}"),
+                        "file": cand.name,
+                        "size": round(cand.stat().st_size / 1048576, 1)}
+                except OSError:
                     pass
-            elif got is _EXISTS:
-                task["line"] = f"P{p} already exists, skipped"
-            else:
-                task["failed"].append(p)
-            save_library(lib)
-        task.pop("_before", None)
-        save_tasks()                                  # 队列有变动就落盘
-        snapshot_thumb(task["bvid"])               # 下载完顺手抽帧, 媒体库立刻有脸
-        if task["status"] == "下载中":
-            task["status"] = "完成" if not task["failed"] else "部分失败"
-            task["line"] = ("all done ✓" if not task["failed"]
-                            else f"P{','.join(map(str, task['failed']))} 失败, 点下方补下按钮")
+        else:
+            task["failed"].append(p)
+            # 失败原因在 _run_part 里已存(引擎原话); 这里兜底
+            task["error"] = task.get("error") or f"P{p} failed"
+        save_library(lib)
+    task.pop("_before", None)
+    save_tasks()                                  # 队列有变动就落盘
+    if snapshot_thumb(task["bvid"]):           # 下载完顺手抽帧, 媒体库立刻有脸
+        lib2 = load_library()
+        e2 = lib2.get(task["bvid"])
+        if e2 is not None and not e2.get("cover"):
+            e2["cover"] = f"{task['bvid']}_s.jpg"
+            save_library(lib2)
+    if task["status"] == "下载中":
+        task["status"] = "完成" if not task["failed"] else "部分失败"
+        task["line"] = ("all done ✓" if not task["failed"]
+                        else f"P{','.join(map(str, task['failed']))} 失败, 点下方补下按钮")
+        if task["failed"]:
+            log_op(f"下载部分失败: {task['title'][:40]} — {task.get('error', '')[:120]}", "error")
+        else:
+            log_op(f"下载完成: {task['title'][:40]}")
+        # 重下事务: 成功才用新文件, 失败就还原备份(绝不丢原文件)
+        bak = task.get("_replace_bak")
+        orig = task.get("_replace_orig")
+        if bak:
+            try:
+                bp = Path(bak)
+                if bp.exists():
+                    if task.get("failed"):
+                        op = Path(orig) if orig else None
+                        if op and op.exists():
+                            op.unlink(missing_ok=True)
+                        bp.replace(orig)          # 失败 → 还原原文件
+                    else:
+                        bp.unlink(missing_ok=True)  # 成功 → 删备份
+            except OSError as ex:
+                log_op(f"重下收尾失败: {ex}", "error")
+
+def kill_tree(proc):
+    """杀掉进程整棵树(yt-dlp + 它 spawn 的 ffmpeg)。只杀父进程会留下孤儿继续下载。"""
+    if not proc:
+        return
+    try:
+        if IS_WIN:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           capture_output=True, timeout=10)
+        else:
+            import signal
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
 
 def cancel_task(tid):
+    hit = None
     with _task_lock:
         for t in tasks:
             if t["id"] == tid and t["status"] in ("排队中", "下载中"):
                 t["status"] = "已取消"
                 if t.get("proc"):
-                    t["proc"].terminate()
-                save_tasks()
+                    kill_tree(t["proc"])          # 杀整棵树, 不留 ffmpeg 孤儿
+                hit = t
+    if hit:                       # 落盘挪到锁外: 避免持锁时做 IO
+        log_op(f"已取消任务 #{tid}")
+        save_tasks()
+    return bool(hit)
 
 # ---------------- HTTP ----------------
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
+    # ── 入口: 任何未捕获异常都要变成可读 JSON, 绝不能让浏览器看到"连接重置" ──
+    def _fail(self, e):
+        try:
+            log_op(f"{getattr(self, 'path', '?')[:80]} → {type(e).__name__}: {e}", "error")
+        except Exception:
+            pass
+        try:
+            self._json({"error": f"服务器出错: {type(e).__name__}: {e}"}, 500)
+        except Exception:
+            pass
+
+    def do_GET(self):
+        try:
+            self._do_GET()
+        except (BrokenPipeError, ConnectionResetError):
+            pass                      # 用户关了页面, 不是错误
+        except Exception as e:
+            self._fail(e)
+
+    def do_POST(self):
+        try:
+            self._do_POST()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            self._fail(e)
+
 
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -1341,7 +1971,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self):
+    def _do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         if u.path == "/":
@@ -1357,8 +1987,11 @@ class Handler(BaseHTTPRequestHandler):
             if not url:
                 return self._json({"error": "没找到链接, 试试粘贴完整 URL"}, 400)
             try:
-                return self._json(fetch_video_info(url))
+                info = fetch_video_info(url)
+                log_op(f"解析成功: {info['title'][:60]}")
+                return self._json(info)
             except Exception as e:
+                log_op(f"解析失败: {e}", "error")
                 return self._json({"error": str(e)}, 502)
         if u.path == "/api/tasks":
             with _task_lock:
@@ -1369,6 +2002,8 @@ class Handler(BaseHTTPRequestHandler):
                     if x["status"] == "排队中":
                         d["line"] = f"queued (#{queued.index(x) + 1})"
                     d["status_code"] = STATUS_CODE.get(x["status"], x["status"])
+                    if x.get("error"):
+                        d["error_hint"] = hint_for(x["error"])
                     out.append(d)
                 return self._json(out)
         if u.path == "/api/browse":                    # 文件夹浏览(不入库也能直接播)
@@ -1410,6 +2045,78 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(universal_copy(bvid, p))
             except Exception as e:
                 return self._json({"error": str(e)}, 500)
+        if u.path == "/api/thumb":                      # 远程封面代理(带防盗链 Referer)
+            url = q.get("url", [""])[0]
+            if not url.startswith(("http://", "https://")):
+                return self._json({"error": "bad url"}, 400)
+            try:
+                key = hashlib.md5(url.encode()).hexdigest()[:16]
+            except Exception:
+                return self._json({"error": "bad url"}, 400)
+            cached = COVER_DIR / f"r_{key}.jpg"
+            if not cached.exists():
+                try:
+                    pr = urllib.parse.urlparse(url)
+                    ref = f"{pr.scheme}://{pr.netloc}/"
+                except Exception:
+                    ref = ""
+                hdrs = {**UA}
+                if ref:
+                    hdrs["Referer"] = ref          # 防盗链: 必须带来源站 Referer
+                try:
+                    req = urllib.request.Request(url, headers=hdrs)
+                    data = urllib.request.urlopen(req, timeout=15).read()
+                    if len(data) > 8:
+                        cached.write_bytes(data)
+                except Exception:
+                    return self._json({"error": "封面取不到(防盗链或网络)"}, 502)
+            if not cached.exists():
+                return self._json({"error": "封面取不到"}, 502)
+            body = cached.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
+        if u.path == "/api/log":                       # 运行日志(用户排查用)
+            return self._json({"items": _ops_log})
+        if u.path == "/api/redownload":                 # 重下: 先下到临时名, 成功才替换(失败不丢原文件)
+            bvid = str(body.get("bvid", ""))
+            p = str(body.get("p", ""))
+            rel = str(body.get("rel", ""))
+            if not bvid or not p:
+                return self._json({"error": "缺 bvid 或 p"}, 400)
+            lib = load_library()
+            e = lib.get(bvid)
+            if not e:
+                return self._json({"error": "库里没这个视频"}, 404)
+            d = (e.get("parts") or {}).get(str(p))
+            folder = DOWNLOAD_DIR / e.get("folder", "")
+            old = folder / (d or {}).get("file", rel.split("/")[-1] if rel else "")
+            # 备份原文件, 下载成功再换, 失败就还原
+            bak = None
+            try:
+                if old.is_file():
+                    bak = old.with_suffix(old.suffix + ".old")
+                    old.replace(bak)
+            except OSError:
+                bak = None
+            t = new_task(bvid, e.get("title", ""), [int(p)],
+                         {str(p): (d or {}).get("name", f"P{p}")}, "",
+                         "", {}, int(body.get("quality", 0) or 0))
+            t["_replace_bak"] = str(bak) if bak else ""
+            t["_replace_orig"] = str(old)
+            log_op(f"重新下载: {e.get('title', '')[:40]} P{p}")
+            return self._json({"id": t["id"]})
+        if u.path == "/api/credentials":               # 凭据列表
+            m = load_cookie_map()
+            out = []
+            for dom, cv in m.items():
+                keys = list(cookie_pairs(cv).keys())
+                out.append({"domain": dom, "keys": keys,
+                            "masked": mask_cookie(cv), "n": len(keys)})
+            return self._json({"items": out})
         if u.path == "/api/dupes":                      # 重复文件检测
             return self._json(find_dupes())
         if u.path == "/api/storage":                    # 磁盘占用一览
@@ -1446,8 +2153,10 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/scan":
             try:
                 n = scan_videos()
+                log_op(f"扫描完成, 导入 {n} 个文件夹")
                 return self._json({"ok": True, "added": n})
             except Exception as e:
+                log_op(f"扫描失败: {e}", "error")
                 return self._json({"error": str(e)}, 500)
         if u.path == "/api/export":
             try:
@@ -1460,20 +2169,27 @@ class Handler(BaseHTTPRequestHandler):
             bvid = u.path.rsplit("/", 1)[-1]
             if not re.fullmatch(r"[A-Za-z0-9_.\-]{1,120}", bvid):
                 return self._json({"error": "bad id"}, 400)
-            jpg = COVER_DIR / f"{bvid}.jpg"
-            if not jpg.exists():                       # 懒加载: 老条目没存地址就回源取
-                url = load_library().get(bvid, {}).get("cover_url", "")
-                if not url:
-                    try:
-                        url = fetch_video_info(bvid)["cover"]
-                    except Exception:
-                        url = ""
-                if url:
-                    fetch_cover(bvid, url)
-            if not jpg.exists():                   # 网络封面挂了 → 从视频抽帧, 必有图
-                snapshot_thumb(bvid)
-            if jpg.exists():
-                body = jpg.read_bytes()
+            jpg = COVER_DIR / f"{bvid}.jpg"        # 官方封面
+            snap = COVER_DIR / f"{bvid}_s.jpg"     # 视频抽帧(兜底)
+            ent = load_library().get(bvid, {})
+            url = ent.get("cover_url", "")
+            ref = ent.get("source_url", "") or (ent.get("meta") or {}).get("webpage", "")
+            # 老版本把抽帧图和官方封面写同一个文件名 -> 官方封面再也下不来。
+            # 迁移: 有封面地址时, 老图先改名为 _s.jpg, 让官方封面重新有机会。
+            if jpg.exists() and not snap.exists() and url:
+                try:
+                    os.replace(jpg, snap)
+                except OSError:
+                    pass
+            if not jpg.exists() and url:
+                # 注意: 不要用 bvid 去调 fetch_video_info —— 那个函数现在只吃 URL,
+                # 传 bvid 会白跑一次 yt-dlp(90秒超时), 表现为"点一下封面就卡住"。
+                fetch_cover(bvid, url, ref)
+            if not jpg.exists() and not snap.exists():
+                snapshot_thumb(bvid)              # 网络封面挂了 -> 抽帧, 必有图
+            path = jpg if jpg.exists() else (snap if snap.exists() else None)
+            if path is not None:
+                body = path.read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "image/jpeg")
                 self.send_header("Cache-Control", "max-age=86400")
@@ -1640,19 +2356,52 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(diagnostics())
         self._json({"error": "not found"}, 404)
 
-    def do_POST(self):
+    def _do_POST(self):
         global SESSION_COOKIE
         u = urllib.parse.urlparse(self.path)
         length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length) or b"{}")
+        raw_body = self.rfile.read(length) or b"{}"
+        try:
+            body = json.loads(raw_body)
+            if not isinstance(body, dict):
+                body = {}
+        except Exception:
+            return self._json({"error": "请求格式不对(不是合法 JSON)"}, 400)
+        if u.path == "/api/credentials":               # 凭据: 增/删/改(POST)
+            dom = str(body.get("domain", "")).strip().lower()
+            cv = str(body.get("cookie", "")).strip()
+            op = body.get("op", "set")
+            m = load_cookie_map()
+            if op == "del":
+                m.pop(dom, None)
+            elif op == "set":
+                if not cv:
+                    return self._json({"error": "cookie 不能为空"}, 400)
+                pairs = cookie_pairs(cv)
+                if not pairs:
+                    return self._json({"error": "cookie 格式不对 —— 应为 KEY=VALUE 或 KEY=VALUE; KEY2=VALUE2"}, 400)
+                m[dom] = cv
+                try:
+                    cookie_jar_path(dom).unlink(missing_ok=True)   # 旧 jar 作废, 下次重写
+                except OSError:
+                    pass
+            else:
+                return self._json({"error": "未知操作"}, 400)
+            save_cookie_map(m)
+            log_op(f"凭据已保存: {dom or '(通用)'} · {', '.join(list(cookie_pairs(m.get(dom,'')).keys())[:5])}")
+            return self._json({"ok": True, "count": len(m)})
         if u.path == "/api/config":
             sd = str(body.get("cookie", "")).strip()
             if not sd:
                 return self._json({"error": "cookie 不能为空"}, 400)
+            pairs = cookie_pairs(sd)
+            if not pairs:
+                return self._json({"error": "cookie 格式不对 —— 应该是 KEY=VALUE 或 KEY=VALUE; KEY2=VALUE2"}, 400)
             save_config_value("cookie", sd)
             SESSION_COOKIE = sd                              # 热生效, 无需重启
             COOKIE_FILE.unlink(missing_ok=True)        # 旧 cookies 缓存作废
-            return self._json({"ok": True})
+            log_op(f"已保存 cookie ({len(pairs)} 项: {', '.join(list(pairs.keys())[:6])})")
+            return self._json({"ok": True, "keys": list(pairs.keys())[:8]})
         if u.path == "/api/tag":
             bvid = str(body.get("bvid", ""))
             tag = str(body.get("tag", ""))[:16]
@@ -1670,6 +2419,41 @@ class Handler(BaseHTTPRequestHandler):
             if fav is None:
                 return self._json({"error": "库里没这个视频"}, 404)
             return self._json({"ok": True, "fav": fav})
+        if u.path == "/api/bulk":                       # 批量操作(媒体库多选: 删除/收藏)
+            op = str(body.get("op", ""))
+            ids = [str(x) for x in (body.get("bvid") or [])][:500]
+            if not ids:
+                return self._json({"error": "没选东西"}, 400)
+            done, failed = [], []
+            if op == "del":
+                for b in ids:
+                    try:
+                        if delete_video(b):
+                            done.append(b)
+                        else:
+                            failed.append(b)
+                    except Exception as e:
+                        log_op(f"批量删除 {b} 失败: {e}", "error")
+                        failed.append(b)
+            elif op in ("fav", "unfav"):
+                want = (op == "fav")
+
+                def _setfav(lib):
+                    for b in ids:
+                        ent = lib.get(b)
+                        if ent is not None:
+                            ent["fav"] = want
+                    return lib
+                try:
+                    mutate_library(_setfav)
+                    done = list(ids)
+                except Exception as e:
+                    log_op(f"批量收藏失败: {e}", "error")
+                    failed = list(ids)
+            else:
+                return self._json({"error": "不认识的操作"}, 400)
+            _bump_view()
+            return self._json({"ok": True, "done": done, "failed": failed})
         if u.path == "/api/queue":
             try:
                 return self._json(queue_ops(body))
@@ -1723,8 +2507,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "至少选 1 个 P"}, 400)
             t = new_task(body["bvid"], body.get("title", ""), parts,
                          body.get("part_names", {}), body.get("cover", ""),
-                         body.get("url", ""), body.get("part_urls", {}))
+                         body.get("url", ""), body.get("part_urls", {}),
+                         int(body.get("quality", 0) or 0))
             t["audio_only"] = bool(body.get("audio_only"))
+            log_op(f"加入队列: {body.get('title', '')[:50]} ({len(parts)} 个分P)")
             return self._json({"id": t["id"]})
         if u.path == "/api/cancel":
             cancel_task(int(body.get("id", 0)))
@@ -1732,24 +2518,33 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/delete":
             bvid = body.get("bvid")
             if bvid:                                   # 删整个视频(文件夹+记录+封面)
-                with _task_lock:                       # 联动取消: 删片 = 停下载
-                    for tt in tasks:
-                        if tt["bvid"] == bvid and tt["status"] in ("排队中", "下载中"):
-                            tt["status"] = "已取消"
-                            if tt.get("proc"):
-                                tt["proc"].terminate()
-                save_tasks()
-                lib = load_library()
-                entry = lib.pop(bvid, None)
-                if entry:
-                    shutil.rmtree(DOWNLOAD_DIR / entry["folder"], ignore_errors=True)
-                    (COVER_DIR / f"{bvid}.jpg").unlink(missing_ok=True)
-                    save_library(lib)
-                return self._json({"ok": True})
+                ok = delete_video(bvid)
+                return self._json({"ok": True, "deleted": ok})
             target = safe_media_path(body.get("rel", ""))
             if target is None:
                 return self._json({"error": "路径不合法"}, 403)
-            target.unlink(missing_ok=True)
+            # 删文件 + 同步把库里的这个分P 摘掉(否则界面显示 0P 但文件已经没了)
+            name = target.name
+            try:
+                target.unlink(missing_ok=True)
+            except OSError as e:
+                return self._json({"error": f"删不掉: {e}"}, 500)
+
+            def _drop(lib):
+                hit = False
+                for bvid, e in lib.items():
+                    parts = e.get("parts") or {}
+                    for pk in list(parts.keys()):
+                        if parts[pk].get("file") == name:
+                            parts.pop(pk)
+                            hit = True
+                    if hit:
+                        e["parts"] = parts
+                return hit
+            try:
+                mutate_library(_drop)
+            except Exception as ex:
+                log_op(f"删文件后清库失败: {ex}", "error")
             _bump_view()
             return self._json({"ok": True})
         self._json({"error": "not found"}, 404)
@@ -1794,7 +2589,7 @@ if __name__ == "__main__":
 PYEOF
 
 cat > "$APP"/index.html <<'HTMLEOF'
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -1818,7 +2613,7 @@ cat > "$APP"/index.html <<'HTMLEOF'
 :root{
   --bg:#09090B; --srf:#111113; --srf2:#18181B; --srf3:#202024;
   --line:#26262B; --line2:#303036;
-  --tx:#FAFAFA; --tx2:#A1A1AA; --tx3:#5C5C64;
+  --tx:#FAFAFA; --tx2:#A1A1AA; --tx3:#8A8A94;
   --ok:#4ADE80; --bad:#F87171; --pink:#FB7299;
   --r:12px; --rs:8px;
   --dur:.16s;
@@ -1827,20 +2622,53 @@ cat > "$APP"/index.html <<'HTMLEOF'
   :root:not([data-theme="dark"]){
     --bg:#F7F7F8; --srf:#FFFFFF; --srf2:#F0F0F2; --srf3:#E9E9EC;
     --line:#E4E4E7; --line2:#D4D4D8;
-    --tx:#18181B; --tx2:#66666E; --tx3:#A1A1AA;
+    --tx:#18181B; --tx2:#66666E; --tx3:#6E6E78;
     --ok:#16A34A; --bad:#DC2626;
   }
 }
 :root[data-theme="light"]{
   --bg:#F7F7F8; --srf:#FFFFFF; --srf2:#F0F0F2; --srf3:#E9E9EC;
   --line:#E4E4E7; --line2:#D4D4D8;
-  --tx:#18181B; --tx2:#66666E; --tx3:#A1A1AA;
+  --tx:#18181B; --tx2:#66666E; --tx3:#6E6E78;
   --ok:#16A34A; --bad:#DC2626;
 }
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html{-webkit-text-size-adjust:100%;background:var(--bg)}
 body{color:var(--tx);font:15px/1.55 -apple-system,"MiSans","Noto Sans CJK SC",system-ui,sans-serif;
-  max-width:600px;margin:0 auto;min-height:100vh;transition:background .25s,color .25s}
+  max-width:600px;margin:0 auto;min-height:100vh;transition:background .25s,color .25s;
+  overflow-x:hidden}
+/* ── 响应式: 手机单/双列 → 平板三列 → 桌面五列, 不留空白也不破版 ── */
+@media (min-width:640px){
+  body{max-width:900px}
+  .page{padding-left:24px;padding-right:24px}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:20px 16px}
+  .appbar{padding-left:24px;padding-right:24px}
+}
+@media (min-width:1024px){
+  body{max-width:1180px}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:22px 18px}
+  /* 设置区在桌面收窄: 表单拉成 1300px 宽没人看得下去 */
+  #page-dl .card{max-width:720px}
+}
+@media (min-width:1400px){
+  body{max-width:1400px}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr))}
+}
+/* 横屏手机: 压缩纵向留白, 播放器全屏优先 */
+@media (orientation:landscape) and (max-height:520px){
+  .appbar{padding-top:12px;padding-bottom:8px}
+  .page{padding-top:0}
+  h2{margin-top:14px}
+}
+/* 用户把系统字体调大时(可访问性): 关键文字用 rem 跟着放大, 布局不塌 */
+@media (max-width:640px){
+  .vcard .vt{font-size:13.5px}
+  .card{padding:14px}
+  .page{padding-left:14px;padding-right:14px}
+  .appbar{padding-left:14px;padding-right:14px}
+}
+/* 刘海屏/挖孔: 顶栏避开安全区 */
+.appbar{padding-top:max(16px, env(safe-area-inset-top))}
 svg.ic{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:1.7;
   stroke-linecap:round;stroke-linejoin:round}
 button{font:inherit;color:inherit}
@@ -1875,11 +2703,12 @@ button{font:inherit;color:inherit}
 .safet{padding-top:max(12px, env(safe-area-inset-top))}
 
 /* ── 顶栏 ── */
-.appbar{position:sticky;top:0;z-index:20;display:flex;align-items:baseline;gap:10px;
+.appbar{position:relative;z-index:20;display:flex;align-items:baseline;gap:10px;
   padding:20px 20px 14px;background:color-mix(in srgb, var(--bg) 88%, transparent);
   backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
-.logo{font-size:21px;font-weight:800;letter-spacing:-.4px}
+.logo{font-size:21px;font-weight:800;letter-spacing:-.4px;display:flex;align-items:center;gap:7px}
 .logo b{color:var(--pink);font-weight:800}
+.logo .lic{width:22px;height:22px;color:var(--tx);flex:none}
 .ver{font-size:11px;color:var(--tx3);font-variant-numeric:tabular-nums}
 .langbtn{margin-left:auto;background:none;border:1px solid var(--line2);color:var(--tx2);
   border-radius:999px;padding:6px 12px;font-size:12px;cursor:pointer;transition:all var(--dur);
@@ -1894,13 +2723,93 @@ button{font:inherit;color:inherit}
 @keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1}}
 h2{font-size:11px;color:var(--tx3);font-weight:600;margin:22px 0 10px;letter-spacing:1.6px;text-transform:uppercase}
 
-/* ── 浮动底栏 ── */
-.tabbar{position:fixed;bottom:calc(14px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);z-index:30;display:flex;
-  background:color-mix(in srgb, var(--srf) 86%, transparent);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
-  border:1px solid var(--line);border-radius:999px;padding:5px;box-shadow:0 8px 30px rgba(0,0,0,.22)}
-.tabbar button{background:none;border:0;color:var(--tx3);font-size:12px;border-radius:999px;
-  padding:9px 18px;display:flex;align-items:center;gap:6px;cursor:pointer;transition:all .18s;white-space:nowrap}
+/* ── 页签栏(改为顶部 sticky 跟随: 原来固定在屏幕底部, 每次用都得滑到最底) ── */
+.tabbar{position:sticky;top:0;z-index:30;margin:0 auto 16px;width:max-content;
+  display:flex;max-width:calc(100vw - 16px);
+  background:color-mix(in srgb, var(--bg) 86%, transparent);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+  border:1px solid var(--line);border-radius:999px;padding:4px;box-shadow:0 6px 20px rgba(0,0,0,.16);
+  overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.tabbar::-webkit-scrollbar{display:none}
+.tabbar button{background:none;border:0;color:var(--tx3);font-size:11px;border-radius:999px;
+  padding:8px 10px;display:flex;align-items:center;gap:4px;cursor:pointer;transition:all .18s;
+  white-space:nowrap;flex:0 0 auto}
+.tabbar button svg.ic{width:15px;height:15px}
 .tabbar button.on{background:var(--srf3);color:var(--tx);font-weight:600}
+@media (max-width:400px){
+  .tabbar button{padding:8px 8px;font-size:10.5px}
+  .tabbar button svg.ic{width:14px;height:14px}
+}
+
+/* ── 播放列表面板(缩略图+名称, 点一下就切) ── */
+#listPanel{position:fixed;right:12px;top:60px;bottom:calc(96px + env(safe-area-inset-bottom));
+  z-index:150;width:min(340px,calc(100% - 24px));display:none;flex-direction:column;
+  background:rgba(16,16,20,.97);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+  border:1px solid rgba(255,255,255,.13);border-radius:14px;overflow:hidden;
+  box-shadow:0 16px 50px rgba(0,0,0,.5);touch-action:pan-y}
+#listPanel.show{display:flex}
+#listPanel .qh{display:flex;align-items:center;gap:8px;padding:12px 14px;
+  border-bottom:1px solid rgba(255,255,255,.1);font-size:12px;font-weight:700;color:#fff}
+#listPanel .qh .spacer{flex:1}
+.plist2{flex:1;overflow:auto;padding:4px 0}
+.plrow{display:flex;align-items:center;gap:9px;padding:7px 12px;cursor:pointer}
+.plrow:active{background:rgba(255,255,255,.07)}
+.plrow.cur{background:rgba(251,114,153,.14)}
+.plrow .plth{width:56px;height:34px;flex:none;border-radius:6px;background:#26262B center/cover no-repeat;
+  display:flex;align-items:center;justify-content:center;color:#666;font-size:11px}
+.plrow .pln{flex:1;min-width:0;font-size:12.5px;color:#EDEDF2;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.plrow.cur .pln{color:#fff;font-weight:600}
+.plrow .plp{font-size:10.5px;color:var(--tx3);flex:none;font-variant-numeric:tabular-nums}
+
+/* ── 站点凭据 ── */
+.credrow{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)}
+.credrow:last-child{border-bottom:0}
+.credrow .cd{flex:none;font-size:12px;font-weight:600;min-width:0;max-width:36%;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;color:var(--tx)}
+.credrow .ck{flex:1;min-width:0;font-size:11px;color:var(--tx3);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+
+/* ── 运行日志 ── */
+.logbox{margin-top:10px;max-height:260px;overflow:auto;font-size:11px;line-height:1.6;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.logrow{display:flex;gap:8px;padding:3px 0;border-bottom:1px solid var(--line);word-break:break-word}
+.logrow .lt{color:var(--tx3);flex:none;font-variant-numeric:tabular-nums}
+.logrow .lm{flex:1;min-width:0;color:var(--tx2);overflow-wrap:anywhere}
+.logrow.er .lm{color:#fca5a5}
+.logrow.wn .lm{color:#fbbf24}
+
+/* 触摸目标: 视觉尺寸不变, 命中区扩到 44px(触屏手指不会点空) */
+.pico::after,.favbtn::after,.queuebtn::after,.tagbar .tgbtn::after,
+#qpanel .qops button::after,.chitem .cdel::after{content:'';position:absolute;inset:-8px;border-radius:50%}
+/* 标签行的伪元素不能盖住上一行的操作按钮(否则点删除会变成"打标签") */
+.tagbar{position:relative;z-index:1}
+.tagbar .tgbtn::after{inset:-10px -6px}
+.plist input{width:24px;height:24px}
+.plist label{padding:14px 2px}
+.btn.sm,.chip{min-height:40px;display:inline-flex;align-items:center;justify-content:center}
+.icbtn{width:44px;height:44px}
+.langbtn{min-height:36px;height:auto;padding:6px 13px}
+
+/* 清晰度下拉 */
+.qsel{background:var(--srf2);border:1px solid var(--line);color:var(--tx);border-radius:10px;
+  padding:8px 10px;font-size:13px;min-height:38px;max-width:46%;font-family:inherit}
+
+/* ── 媒体库多选 ── */
+.selbar{position:fixed;left:0;right:0;bottom:0;z-index:60;display:none;align-items:center;gap:8px;
+  padding:10px 14px calc(10px + env(safe-area-inset-bottom));
+  background:rgba(16,16,20,.97);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border-top:1px solid rgba(255,255,255,.12);box-shadow:0 -8px 30px rgba(0,0,0,.5)}
+.selbar.show{display:flex}
+.btn.on{background:rgba(251,114,153,.16);border-color:rgba(251,114,153,.5);color:#FB7299}
+.selbar .spacer{flex:1}
+.selbar #selCount{font-size:13px;font-weight:700;color:#fff;white-space:nowrap}
+.selbox{position:absolute;top:8px;left:8px;width:26px;height:26px;border-radius:8px;z-index:2;
+  background:rgba(0,0,0,.55);border:2px solid rgba(255,255,255,.8);
+  display:flex;align-items:center;justify-content:center;pointer-events:auto}
+.selbox.on{background:#FB7299;border-color:#FB7299}
+.selbox.on::after{content:'';width:12px;height:7px;border-left:2.5px solid #fff;border-bottom:2.5px solid #fff;
+  transform:rotate(-45deg) translate(1px,-2px)}
+.vcard.sel .cov{outline:3px solid #FB7299;outline-offset:-3px}
 
 /* ── 组件 ── */
 .card{background:var(--srf);border:1px solid var(--line);border-radius:var(--r);padding:16px;margin-bottom:12px}
@@ -1924,6 +2833,8 @@ input[type=text]::placeholder{color:var(--tx3)}
 .empty{text-align:center;color:var(--tx3);font-size:13px;padding:44px 0}
 .empty .big{display:block;margin-bottom:10px;opacity:.5}
 .empty svg.ic{width:30px;height:30px;stroke-width:1.3}
+.emptyActs{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:16px}
+.emptyActs .btn{padding:9px 15px;font-size:13px}
 
 /* ── 解析页 ── */
 .pv{display:flex;gap:14px}
@@ -1936,11 +2847,17 @@ input[type=text]::placeholder{color:var(--tx3)}
 
 /* ── 任务 ── */
 .tcard .tt{font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.tcard .ttx{flex:1 1 100%;min-width:0;overflow-wrap:anywhere;word-break:break-word;line-height:1.4}
 .pill{font-size:11px;padding:2px 9px;border-radius:5px;font-weight:500;background:var(--srf3);color:var(--tx2)}
 .pill.downloading{background:rgba(56,189,248,.12);color:#7DD3FC}
 .pill.done{background:rgba(74,222,128,.1);color:var(--ok)}
 .pill.failed,.pill.partial{background:rgba(248,113,113,.1);color:var(--bad)}
 .tcard .ln{color:var(--tx2);font-size:12px;margin-top:6px;word-break:break-all}
+.errbox{margin-top:8px;padding:8px 10px;border-radius:8px;background:rgba(248,113,113,.09);
+  border:1px solid rgba(248,113,113,.25);color:#fca5a5;font-size:11px;line-height:1.5;
+  word-break:break-word;overflow-wrap:anywhere;max-height:96px;overflow:auto}
+.ehint{margin-top:6px;padding-top:6px;border-top:1px solid rgba(248,113,113,.2);
+  color:#fbbf24;font-weight:600}
 .pct{margin-left:auto;font-size:19px;font-weight:700;font-variant-numeric:tabular-nums}
 .bar{height:3px;border-radius:2px;background:var(--srf3);overflow:hidden;margin-top:10px}
 .bar.ind i{width:36%;animation:slide 1.2s ease-in-out infinite}
@@ -1964,16 +2881,16 @@ input[type=text]::placeholder{color:var(--tx3)}
 .vcard .vt{font-size:13px;font-weight:600;line-height:1.42;display:-webkit-box;-webkit-line-clamp:2;
   -webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;min-width:0}
 .vcard .vm{color:var(--tx3);font-size:11px;margin-top:4px;font-variant-numeric:tabular-nums}
-.vcard .ops{display:flex;gap:6px;margin-top:8px}
+.vcard .ops{display:flex;gap:6px;margin-top:8px;position:relative;z-index:2}
 .vcard .ops .btn{flex:1 1 40%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   border-color:var(--line);color:var(--tx2)}
 .parts{max-height:0;overflow:hidden;transition:max-height .28s ease}
-.parts.open{max-height:900px}
+.parts.open{max-height:none}
 .part{padding:9px 0;border-top:1px solid var(--line)}
 .part .pn{font-size:13px;line-height:1.45;word-break:break-word;overflow-wrap:anywhere;display:block;min-width:0}
 .part .pr{display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap}
 .part .pr .s{color:var(--tx3);font-size:11px;flex:1;min-width:0;font-variant-numeric:tabular-nums}
-.pico{width:32px;height:32px;flex:none;border-radius:50%;display:flex;align-items:center;justify-content:center;
+.pico{position:relative;width:32px;height:32px;flex:none;border-radius:50%;display:flex;align-items:center;justify-content:center;
   cursor:pointer;background:var(--srf2);border:1px solid var(--line);color:var(--tx2);transition:all var(--dur)}
 .pico:active{transform:scale(.9);color:var(--tx)}
 .pico svg.ic{width:14px;height:14px}
@@ -2006,10 +2923,14 @@ input[type=text]::placeholder{color:var(--tx3)}
   background:none;padding:0;flex:none}
 .tagbar .tgbtn.on{outline:2px solid var(--txt);outline-offset:1px}
 .tagbar .tgbtn i{display:block;width:100%;height:100%;border-radius:50%}
-.queuebtn{width:20px;height:20px;border-radius:var(--rs);border:1px solid var(--line);background:none;
+.queuebtn{position:relative;width:20px;height:20px;border-radius:var(--rs);border:1px solid var(--line);background:none;
   color:var(--tx2);cursor:pointer;display:flex;align-items:center;justify-content:center;flex:none;margin-left:auto}
 .queuebtn svg.ic{width:12px;height:12px}
 .queuebtn.on{color:#FB7299;border-color:rgba(251,114,153,.5)}
+/* 标签色点: 必须 position:relative —— 否则它的 ::after 命中区会相对定位祖先,
+   6 个色点的伪元素全叠在一起, 点谁都命中最后那个(2026-10-21 实测) */
+.tagbar .tgbtn{position:relative;width:20px;height:20px;border-radius:50%;
+  border:1px solid var(--line);cursor:pointer;background:none;padding:0;flex:none}
 
 /* ── 文件夹浏览 ── */
 .crumbs{display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-size:12px;color:var(--tx2);
@@ -2029,7 +2950,8 @@ input[type=text]::placeholder{color:var(--tx3)}
 .browsecard .bops{display:flex;gap:6px;flex:none}
 
 /* ── 队列面板 ── */
-#qpanel{position:absolute;right:12px;top:60px;bottom:calc(96px + env(safe-area-inset-bottom));
+#qpanel{position:fixed;right:12px;top:60px;bottom:calc(96px + env(safe-area-inset-bottom));
+  touch-action:pan-y;z-index:150;
   z-index:9;width:min(300px,calc(100% - 24px));display:none;flex-direction:column;
   background:rgba(16,16,20,.96);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
   border:1px solid rgba(255,255,255,.13);border-radius:14px;overflow:hidden}
@@ -2050,6 +2972,7 @@ input[type=text]::placeholder{color:var(--tx3)}
 
 /* ── 章节面板 ── */
 #chapPanel{position:absolute;right:12px;top:60px;bottom:calc(96px + env(safe-area-inset-bottom));
+  touch-action:pan-y;
   z-index:9;width:min(310px,calc(100% - 24px));display:none;flex-direction:column;
   background:rgba(16,16,20,.96);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
   border:1px solid rgba(255,255,255,.13);border-radius:14px;overflow:hidden}
@@ -2110,14 +3033,18 @@ input[type=text]::placeholder{color:var(--tx3)}
 #pstage{position:relative;flex:1;min-height:0;width:100%;background:#000;
   display:flex;align-items:center;justify-content:center;touch-action:none;overflow:hidden}
 #pvideo{width:100%;height:100%;object-fit:contain;background:#000;display:block}
-#phead{position:absolute;top:0;left:0;right:0;z-index:7;display:flex;align-items:center;gap:12px;
+/* 顶栏两行: 第一行 = 标题(整行, 不用挤在按钮中间), 第二行 = 交互按钮 */
+#phead{position:absolute;top:0;left:0;right:0;z-index:7;display:flex;flex-direction:column;gap:10px;
   padding:14px 16px calc(14px + env(safe-area-inset-top));
-  background:linear-gradient(rgba(0,0,0,.72),transparent);
+  background:linear-gradient(rgba(0,0,0,.78),rgba(0,0,0,.35) 60%,transparent);
   transition:opacity .22s}
 #phead.hide{opacity:0;pointer-events:none}
-#phead .mid{flex:1;min-width:0;text-align:center}
-#phead .ttl{font-weight:700;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#phead .sub2{color:var(--tx2);font-size:11px;margin-top:3px}
+#phead .hrow{display:flex;align-items:center;gap:10px}
+#phead .hrow2{gap:8px;flex-wrap:wrap}
+#phead .mid{flex:1;min-width:0}
+#phead .ttl{font-weight:700;font-size:15.5px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+#phead .sub2{color:var(--tx2);font-size:11.5px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .icbtn{display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.1);
   border:0;color:#fff;border-radius:10px;width:38px;height:38px;cursor:pointer;
   backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);transition:transform .1s,opacity .15s}
@@ -2129,18 +3056,23 @@ input[type=text]::placeholder{color:var(--tx3)}
   transition:opacity .22s,transform .22s}
 #pctrl.hide{opacity:0;transform:translateY(10px);pointer-events:none}
 #pbar{height:26px;display:flex;align-items:center;position:relative;cursor:pointer;touch-action:none;margin:0 2px}
-#pbar .track{position:absolute;left:0;right:0;height:4px;border-radius:2px;background:rgba(255,255,255,.22);
-  transition:height .12s}
-#pbar.drag .track{height:8px}
-#pbuf{position:absolute;left:0;height:4px;border-radius:2px;width:0;background:rgba(255,255,255,.32);transition:height .12s}
-#pbar.drag #pbuf{height:8px}
-#pfill{position:absolute;left:0;height:4px;border-radius:2px;width:0;background:#fff;transition:height .12s}
-#pbar.drag #pfill{height:8px}
-#pknob{position:absolute;width:14px;height:14px;border-radius:50%;background:#fff;
-  box-shadow:0 1px 6px rgba(0,0,0,.5);transform:translateX(-50%) scale(0);left:0;transition:transform .12s}
-#pbar.drag #pknob{transform:translateX(-50%) scale(1)}
-#pbar:not(.drag) #pknob{width:0;height:0}
-.prow{display:flex;align-items:center;gap:6px;margin-top:8px}
+/* 进度条: 黑底上也要看得见 —— 轨道加亮 + 填充用品牌色 + 滑块常驻(以前只在拖动时才有) */
+#pbar .track{position:absolute;left:0;right:0;height:6px;border-radius:3px;background:rgba(255,255,255,.30);
+  box-shadow:0 1px 4px rgba(0,0,0,.5);transition:height .12s}
+#pbar.drag .track{height:10px}
+#pbuf{position:absolute;left:0;height:6px;border-radius:3px;width:0;background:rgba(255,255,255,.38);transition:height .12s}
+#pbar.drag #pbuf{height:10px}
+#pfill{position:absolute;left:0;height:6px;border-radius:3px;width:0;transition:height .12s;
+  background:linear-gradient(90deg,#FB7299,#FFA0C6);box-shadow:0 0 12px rgba(251,114,153,.6)}
+#pbar.drag #pfill{height:10px}
+#pknob{position:absolute;width:14px;height:14px;border-radius:50%;background:#fff;border:3px solid #FB7299;
+  box-shadow:0 2px 8px rgba(0,0,0,.7);transform:translateX(-50%);left:0;transition:transform .12s;pointer-events:none}
+#pbar.drag #pknob{transform:translateX(-50%) scale(1.3)}
+.prow{display:flex;align-items:center;gap:6px;margin-top:8px;overflow-x:auto;scrollbar-width:none;
+  padding-bottom:2px;flex-shrink:0;-webkit-overflow-scrolling:touch}
+.prow::-webkit-scrollbar{display:none}
+.prow .icbtn{flex:none;white-space:nowrap}   /* 以前按钮会被挤到换行, 最后一个(全屏)被挤出屏幕 */
+@media (max-width:360px){ .prow .icbtn{width:38px;min-width:38px;padding:0 7px} }
 .icbtn.txt{width:auto;min-width:38px;padding:0 9px;font-size:12px;font-weight:700;letter-spacing:.3px}
 .icbtn.on{color:#FB7299;border-color:rgba(251,114,153,.5)}
 .ptime{color:#fff;font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums;opacity:.92;
@@ -2174,6 +3106,10 @@ input[type=text]::placeholder{color:var(--tx3)}
   background:radial-gradient(120% 90% at 50% 0%, #1b1b26, #000)}
 #pstage.audio #partCover{display:flex}
 #pstage.audio #pvideo{visibility:hidden}
+#pErr{position:absolute;inset:0;z-index:20;display:none;flex-direction:column;align-items:center;
+  justify-content:center;gap:14px;background:rgba(0,0,0,.9);color:#fff;text-align:center;padding:24px}
+#pErr p{font-size:14px;max-width:320px;line-height:1.6}
+#pErr>div{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
 #partCover img{width:min(58vw,280px);aspect-ratio:1;object-fit:cover;border-radius:20px;
   box-shadow:0 18px 60px rgba(0,0,0,.7)}
 #partCover img[src=""],#partCover img:not([src]){display:none}
@@ -2229,19 +3165,31 @@ input[type=text]::placeholder{color:var(--tx3)}
     <symbol id="i-queue" viewBox="0 0 24 24"><path d="M4 6h11M4 12h11M4 18h7M18 10l3 3-3 3M21 13h-8"/></symbol>
     <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9 6.8 19.6l1-5.8-4.3-4.1 5.9-.9L12 3.5z"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M4 12.5l5.2 5.2L20 6.5"/></symbol>
+<symbol id="i-list" viewBox="0 0 24 24"><path d="M8.5 6H20M8.5 12H20M8.5 18H20M4 6h.6M4 12h.6M4 18h.6"/></symbol>
     <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
     <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
   </defs>
 </svg>
 
 <header class="appbar">
-  <div class="logo">D<b>ecache</b></div>
+  <div class="logo"><svg class="lic" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 7V4h7M20 7V4h-7M4 17v3h7M20 17v3h-7" fill="none" stroke="currentColor"
+        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity=".55"/>
+      <path d="M10 8.5l6 3.5-6 3.5v-7z" fill="currentColor"/></svg>De<b>cache</b></div>
   <span class="ver" id="ver">…</span>
   <button class="langbtn" id="themeBtn" title="主题">
     <svg class="ic" style="width:14px;height:14px"><use href="#i-theme" id="themeIcon"/></svg>
   </button>
   <button class="langbtn" id="langBtn">EN</button>
 </header>
+
+<nav class="tabbar">
+  <button class="on" data-tab="dl"><svg class="ic"><use href="#i-down"/></svg><span data-i18n="tabDl">下载</span></button>
+  <button data-tab="task"><svg class="ic"><use href="#i-inbox"/></svg><span data-i18n="tabTask">任务</span></button>
+  <button data-tab="lib"><svg class="ic"><use href="#i-lib"/></svg><span data-i18n="tabLib">媒体库</span></button>
+  <button data-tab="folder"><svg class="ic"><use href="#i-folder"/></svg><span data-i18n="tabFolder">文件夹</span></button>
+</nav>
 
 <!-- 下载 -->
 <section class="page active" id="page-dl">
@@ -2270,6 +3218,20 @@ input[type=text]::placeholder{color:var(--tx3)}
         <input type="checkbox" id="audioOnly" style="width:16px;height:16px;accent-color:currentColor"><span data-i18n="audio">仅音频</span>
       </label>
     </div>
+    <div class="row" style="margin-top:10px;align-items:center;gap:8px">
+      <span class="meta" data-i18n="quality">清晰度</span>
+      <select id="qualitySel" class="qsel" title="清晰度上限">
+        <option value="0" data-i18n="qAuto">自动(最优)</option>
+        <option value="2160">2160P</option>
+        <option value="1440">1440P</option>
+        <option value="1080">1080P</option>
+        <option value="720">720P</option>
+        <option value="480">480P</option>
+        <option value="360">360P</option>
+        <option value="240">240P</option>
+      </select>
+      <span class="meta" data-i18n="qHint">上限, 省空间</span>
+    </div>
     <div class="plist" id="plist"></div>
     <div class="row"><button class="btn" style="width:100%" onclick="download()" id="dlBtn" data-i18n="dl">下载所选</button></div>
   </div>
@@ -2281,7 +3243,7 @@ input[type=text]::placeholder{color:var(--tx3)}
       <button class="btn sm" onclick="saveSess()" data-i18n="save">保存</button>
       <span class="meta" id="sessState"></span>
     </div>
-    <div class="meta" style="margin-top:12px" id="cfgMeta"></div>
+    <div class="meta" style="margin-top:12px;word-break:break-all;overflow-wrap:anywhere" id="cfgMeta"></div>
     <div class="row">
       <button class="btn ghost sm" onclick="importM3u()" data-i18n="m3uImport">导入 m3u 队列</button>
       <input type="file" id="m3uFile" accept=".m3u,.m3u8" style="display:none" onchange="importM3uFile(this)">
@@ -2296,24 +3258,46 @@ input[type=text]::placeholder{color:var(--tx3)}
       <span class="meta" id="installHint"></span>
     </div>
   </div>
+  <h2 style="margin-top:26px"><span data-i18n="creds">站点凭据</span></h2>
+  <div class="card">
+    <div class="meta" style="margin-bottom:8px" data-i18n="credHint">每条 = 一个站点的 cookie。域名留空 = 对所有站生效。填 "KEY=VALUE; KEY2=V2" 或整串 cookie。</div>
+    <div id="credList"></div>
+    <div class="row" style="margin-top:10px">
+      <input type="text" id="credDomain" placeholder="域名(可留空=通用)" autocomplete="off"
+        style="width:34%;flex:none;font-size:12px;padding:9px 10px">
+      <input type="text" id="credCookie" placeholder="KEY=VALUE; ..." autocomplete="off" style="flex:1;min-width:0;font-size:12px;padding:9px 10px">
+    </div>
+    <div class="row">
+      <button class="btn sm" onclick="saveCred()" data-i18n="credAdd">添加/更新</button>
+      <span class="meta" id="credMeta"></span>
+    </div>
+  </div>
+  <h2 style="margin-top:26px"><span data-i18n="logs">运行日志</span></h2>
+  <div class="card">
+    <div class="row" style="margin-top:0">
+      <button class="btn ghost sm" onclick="showLog()"><span data-i18n="refresh">刷新</span></button>
+      <span class="meta" id="logMeta"></span>
+    </div>
+    <div id="logBox" class="logbox"></div>
+  </div>
   <h2 style="margin-top:26px"><span data-i18n="subStyle">字幕样式</span></h2>
   <div class="card">
     <div class="row" style="margin-top:0">
-      <span class="meta" style="width:62px" data-i18n="subSize">字号</span>
-      <input type="range" id="subSize" min="12" max="36" step="1" style="flex:1;accent-color:currentColor" oninput="setSubStyle()">
-      <span class="meta" id="subSizeVal" style="width:34px;text-align:right"></span>
+      <span class="meta" style="width:62px;flex:none" data-i18n="subSize">字号</span>
+      <input type="range" id="subSize" min="12" max="36" step="1" style="flex:1;min-width:0;accent-color:currentColor" oninput="setSubStyle()">
+      <span class="meta" id="subSizeVal" style="width:34px;flex:none;text-align:right"></span>
     </div>
     <div class="row">
-      <span class="meta" style="width:62px" data-i18n="subBg">背景</span>
-      <span class="chips" style="flex:1;padding:0">
+      <span class="meta" style="width:62px;flex:none" data-i18n="subBg">背景</span>
+      <span class="chips" style="flex:1;min-width:0;padding:0;flex-wrap:wrap">
         <span class="chip" data-subbg="shadow" data-i18n="subBgShadow">描边</span>
         <span class="chip" data-subbg="solid" data-i18n="subBgSolid">黑底</span>
         <span class="chip" data-subbg="white" data-i18n="subBgWhite">白底</span>
       </span>
     </div>
     <div class="row">
-      <span class="meta" style="width:62px" data-i18n="subPos">位置</span>
-      <span class="chips" style="flex:1;padding:0">
+      <span class="meta" style="width:62px;flex:none" data-i18n="subPos">位置</span>
+      <span class="chips" style="flex:1;min-width:0;padding:0;flex-wrap:wrap">
         <span class="chip" data-subpos="top" data-i18n="subPosTop">顶部</span>
         <span class="chip" data-subpos="middle" data-i18n="subPosMid">居中</span>
         <span class="chip" data-subpos="bottom" data-i18n="subPosBottom">底部</span>
@@ -2340,13 +3324,21 @@ input[type=text]::placeholder{color:var(--tx3)}
       <svg class="ic" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-export"/></svg>
       <span data-i18n="export">导出备份</span>
     </button>
-    <button class="btn ghost sm" onclick="showDupes()" title="${''}">
+    <button class="btn ghost sm" onclick="showDupes()" title="查重">
       <svg class="ic" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-clist"/></svg>
       <span data-i18n="dupes">查重</span>
+    </button>
+    <button class="btn ghost sm" onclick="openQueue()" id="queueBtn" title="播放队列">
+      <svg class="ic" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-queue"/></svg>
+      <span data-i18n="queue">播放队列</span> <span id="queueCount"></span>
     </button>
     <button class="btn ghost sm" onclick="showStorage()">
       <svg class="ic" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-lib"/></svg>
       <span data-i18n="storage">磁盘</span>
+    </button>
+    <button class="btn ghost sm" id="selModeBtn" onclick="toggleSelMode()">
+      <svg class="ic" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-check"/></svg>
+      <span data-i18n="multiSel">多选</span>
     </button>
   </div>
   <div class="libtop">
@@ -2376,14 +3368,39 @@ input[type=text]::placeholder{color:var(--tx3)}
   <div id="browseList"></div>
 </section>
 
-<nav class="tabbar">
-  <button class="on" data-tab="dl"><svg class="ic"><use href="#i-down"/></svg><span data-i18n="tabDl">下载</span></button>
-  <button data-tab="task"><svg class="ic"><use href="#i-inbox"/></svg><span data-i18n="tabTask">任务</span></button>
-  <button data-tab="lib"><svg class="ic"><use href="#i-lib"/></svg><span data-i18n="tabLib">媒体库</span></button>
-  <button data-tab="folder"><svg class="ic"><use href="#i-folder"/></svg><span data-i18n="tabFolder">文件夹</span></button>
-</nav>
-
 <div id="gtoast"></div>
+
+<div id="selbar" class="selbar">
+  <span id="selCount">已选 0</span>
+  <span class="spacer"></span>
+  <button class="btn ghost sm" onclick="selAll()"><span data-i18n="selAll">全选</span></button>
+  <button class="btn ghost sm" onclick="selFav()"><span data-i18n="selFav">收藏</span></button>
+  <button class="btn danger sm" onclick="selDelete()"><span data-i18n="selDel">删除</span></button>
+  <button class="btn ghost sm" onclick="toggleSelMode()"><span data-i18n="selExit">退出</span></button>
+</div>
+
+<div id="listPanel">
+  <div class="qh"><span data-i18n="playlist">播放列表</span><span class="spacer"></span>
+    <span class="chip" id="listSrc" onclick="toggleListSrc()" data-i18n="fAll" style="padding:2px 10px;font-size:11px">全部</span>
+    <span id="listCount" style="font-weight:400;opacity:.6"></span>
+    <button class="icbtn" id="listClose" style="width:28px;height:28px;background:rgba(255,255,255,.1)">
+      <svg class="ic"><use href="#i-x"/></svg></button>
+  </div>
+  <div class="plist2" id="listBody"></div>
+</div>
+
+<div id="qpanel">
+      <div class="qh"><span data-i18n="queue">播放队列</span><span class="spacer"></span>
+        <span id="qCount" style="font-weight:400;opacity:.6"></span>
+        <button class="icbtn" id="qClose" style="width:28px;height:28px;background:rgba(255,255,255,.1)">
+          <svg class="ic"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="qlist" id="qList"></div>
+      <div style="padding:9px 12px;border-top:1px solid rgba(255,255,255,.1)">
+        <button class="btn ghost sm" id="qClear" style="width:100%;border-color:rgba(255,255,255,.16);color:#bbb"
+                data-i18n="qClear">清空队列</button>
+      </div>
+    </div>
 
 <!-- 工具面板(查重/磁盘) -->
 <div id="sheet">
@@ -2398,28 +3415,26 @@ input[type=text]::placeholder{color:var(--tx3)}
 <div id="pmodal">
   <div id="pstage">
     <video id="pvideo" playsinline autoplay></video>
+    <div id="pErr"><p id="pErrMsg"></p><div>
+      <button class="btn sm" onclick="startPart(FI)" data-i18n="pRetry">重试</button>
+      <button class="btn ghost sm" onclick="closePlayer()" data-i18n="pBack">返回</button></div></div>
     <div id="partCover"><img id="partCoverImg" alt=""><div class="eq"><i></i><i></i><i></i><i></i><i></i></div></div>
     <div id="seekOv"></div>
     <div id="phead">
-      <button class="icbtn" onclick="closePlayer()"><svg class="ic"><use href="#i-x"/></svg></button>
-      <div class="mid">
-        <div class="ttl" id="ptitle"></div>
-        <div class="sub2" id="psub"></div>
+      <div class="hrow">
+        <button class="icbtn" onclick="closePlayer()"><svg class="ic"><use href="#i-x"/></svg></button>
+        <div class="mid">
+          <div class="ttl" id="ptitle"></div>
+          <div class="sub2" id="psub"></div>
+        </div>
+        <button class="icbtn" id="pPip" title="画中画"><svg class="ic"><use href="#i-pip"/></svg></button>
       </div>
-      <button class="icbtn" id="pCC" style="display:none" title="字幕">CC</button>
-      <button class="icbtn" id="pQueue" title="队列"><svg class="ic"><use href="#i-queue"/></svg></button>
-      <button class="icbtn" id="pPip" title="画中画"><svg class="ic"><use href="#i-pip"/></svg></button>
-    </div>
-    <div id="qpanel">
-      <div class="qh"><span data-i18n="queue">播放队列</span><span class="spacer"></span>
-        <span id="qCount" style="font-weight:400;opacity:.6"></span>
-        <button class="icbtn" id="qClose" style="width:28px;height:28px;background:rgba(255,255,255,.1)">
-          <svg class="ic"><use href="#i-x"/></svg></button>
-      </div>
-      <div class="qlist" id="qList"></div>
-      <div style="padding:9px 12px;border-top:1px solid rgba(255,255,255,.1)">
-        <button class="btn ghost sm" id="qClear" style="width:100%;border-color:rgba(255,255,255,.16);color:#bbb"
-                data-i18n="qClear">清空队列</button>
+      <div class="hrow hrow2">
+        <button class="icbtn" id="pCC" style="display:none" title="字幕">CC</button>
+        <button class="icbtn" id="pChap" title="章节"><svg class="ic"><use href="#i-list"/></svg></button>
+        <button class="icbtn" id="pList" title="播放列表"><svg class="ic"><use href="#i-clist"/></svg></button>
+        <button class="icbtn" id="pQueue" title="队列"><svg class="ic"><use href="#i-queue"/></svg></button>
+        <button class="icbtn" id="pFS" title="全屏"><svg class="ic"><use href="#i-fs"/></svg></button>
       </div>
     </div>
     <div id="chapPanel">
@@ -2455,16 +3470,12 @@ input[type=text]::placeholder{color:var(--tx3)}
           <span id="chapMarks"></span></div>
       </div>
       <div class="prow">
-        <button class="icbtn" id="pPlay"><svg class="ic"><use href="#i-pause" id="pPlayIc"/></svg></button>
         <button class="icbtn" id="pPrev"><svg class="ic"><use href="#i-prev"/></svg></button>
         <button class="icbtn" id="pNextB"><svg class="ic"><use href="#i-next"/></svg></button>
+        <button class="icbtn" id="pPlay"><svg class="ic"><use href="#i-pause" id="pPlayIc"/></svg></button>
         <button class="icbtn txt" id="pAB">A–B</button>
-        <button class="icbtn txt" id="pChap" title="章节">≡</button>
         <button class="icbtn txt" id="pRate">1x</button>
         <button class="icbtn txt" id="pAuto">∞</button>
-        <div class="spacer"></div>
-        <button class="icbtn txt" id="pQMode" title="${t('queue')}">☰</button>
-        <button class="icbtn" id="pFS"><svg class="ic"><use href="#i-fs"/></svg></button>
       </div>
     </div>
   </div>
@@ -2489,7 +3500,8 @@ const I18N = {
     hints:['⟷ 横滑进度','右滑音量 · 左滑亮度','双击±10s · 单击暂停'],
     del:'删除', expand:'分P', up:'UP主', partsN:'个分P',
     st:{'排队中':'排队中','下载中':'下载中','完成':'完成','部分失败':'部分失败','失败':'失败','已取消':'已取消'},
-    confirmDelVideo:'删除这部视频及其所有分P文件?', confirmDelFile:'删除 ', confirmRedl:'重新下载 P',
+    confirmDelVideo:'删掉这部视频?\n\n它会连同磁盘上的所有分P文件一起永久删除, 找不回来。\n\n确定要删吗?',
+    confirmDelFile:'删掉这个文件? 永久删除, 找不回来。', confirmRedl:'重新下载 P',
     scanAdded:'新导入', scanFail:'扫描失败', exportFail:'导出失败',
     exportOk1:'备份已生成', exportOk2:'换机: 解压覆盖到 decache 文件夹即可',
     pipNo:'此浏览器不支持画中画', offline:'离线', submitFail:'提交失败', pasteFail:'剪贴板不可用',
@@ -2498,9 +3510,15 @@ const I18N = {
     save:'保存', saved:'已保存 ✓', sessOn:'已配置', sessOff:'未配置',
     dlDone:'下载完成', dlFail:'有下载失败', nextOff:'本集不自动连播',
     fAll:'全部', fFav:'收藏', queue:'播放队列', qClear:'清空队列', qEmpty:'队列是空的',
+    quality:'清晰度', qAuto:'自动(最优)', qHint:'上限, 省空间',
+    multiSel:'多选', selN:'已选 %d 项', selAll:'全选', selFav:'收藏', selDel:'删除', selExit:'退出',
+    selNone:'还没选东西呢', selFavOk:'已收藏 %d 项', selDelOk:'已删除 %d 项', selFail:'批量操作失败',
+    confirmDelBulk:'删掉选中的 %d 个视频?\n\n连同磁盘上所有分P文件一起永久删除, 找不回来。\n\n确定要删吗?',
     qAdd:'加入队列', qAdded:'已加入队列', qItems:'项', tabFolder:'文件夹',
     bRoot:'根目录', bEmpty:'这个文件夹里没有视频',
-    chapters:'章节', chEmpty:'没有章节', chReal:'真实章节', chAuto:'自动分段',
+    bGone:'这个目录已经不存在了(可能刚被删掉)', bNoAccess:'没有权限访问这个目录',
+    bBackRoot:'返回根目录', bMoved:'目录没了, 已自动回到上一级',
+    chapters:'章节', chEmpty:'没有章节', chReal:'真实章节', chAuto:'自动分段', playlist:'播放列表',
     chAdd:'在当前位置标记', chMarked:'已标记', chExport:'导出 m3u',
     m3uImport:'导入 m3u 队列', m3uOk:'已导入', ffMissing:'未找到(需安装)',
     health:'体检(查坏文件)', healthRun:'体检中…', healthOk:'文件都正常', healthBad:'发现损坏',
@@ -2509,11 +3527,30 @@ const I18N = {
     subPosTop:'顶部', subPosMid:'居中', subPosBottom:'底部',
     dupes:'查重', storage:'磁盘', scanning:'扫描中…', noDupes:'没有重复文件',
     waste:'可省', wasteTotal:'共可省', total:'占用', free:'剩余', items:'项',
-    mainPart:'正片', segment:'片段',
+    mainPart:'正片', segment:'片段', delPart:'删除这个分P', confirmDelPart:'只删掉这个分P的文件, 其他的保留。确定删 P',
+    delPartOk:'已删除该分P',
     qUp:'上移', qDown:'下移', qRemove:'移除',
     urlPh:'粘贴视频链接', sessPh:'粘贴 cookie (KEY=VALUE; ...)',
     themeAuto:'主题: 跟随系统', themeLight:'主题: 亮色', themeDark:'主题: 暗色',
+    needUrl:'先粘贴一个链接', parsing:'解析中…', parseFail:'解析失败',
+    cookieEmpty:'先粘贴 cookie', cookieBad:'格式不对 —— 应为 KEY=VALUE',
+    cookieOk:'已保存 ✓ 生效中', cookieSaveFail:'保存失败',
+    logs:'运行日志', refresh:'刷新', loading:'加载中…', entries:'条', noLog:'还没有日志',
+    tagSet:'已标记', favOn:'已收藏 ★', favOff:'已取消收藏', cancelled:'已取消',
+    retrying:'正在重新下载…', deleted:'已删除', opening:'正在打开…',
+    goDl:'去下载视频', goFolder:'浏览文件夹', goScan:'扫描全盘',
+    notFound:'找不到这个视频了(可能已被删除)', delFail:'没删掉',
+    pRetry:'重试', pBack:'返回列表', pGone:'这个视频打不开: 文件可能已被删除',
+    pFmt:'这个格式这台设备播不了(试试生成通用版)',
+    qRemoveConfirm:'从队列里移除这一条?', qRemoved:'已移除',
+    qClearConfirm:'清空整个播放队列? 队列里的内容会全部移除。', qCleared:'队列已清空',
+    qClearFail:'没清掉', cancelConfirm:'取消这个下载任务? 已下载的部分会保留。',
+    cancelFail:'取消失败', lostConn:'连接断了, 正在重试…', reconnected:'连接恢复了',
     access:'手机访问与安装', lanOpen:'在同一 Wi-Fi 下, 手机/平板打开:', lanHint:'手机访问需把 config.ini 的 bind 改成 0.0.0.0',
+    creds:'站点凭据', credHint:'每条 = 一个站点的 cookie。域名留空 = 对所有站生效。填 "KEY=VALUE; ..." 或整串 cookie。',
+    noCreds:'还没有凭据(不需要登录就能下的站不用填)',
+    credAdd:'添加/更新', credCount:'凭据', credDelConfirm:'删除这条凭据?',
+    credSaved:'已保存', credGlobal:'通用',
     install:'装到桌面', installHint:'用浏览器菜单「添加到主屏幕」', installed:'已安装',
     installTip:'浏览器菜单 →「添加到主屏幕 / 安装应用」, 之后点桌面图标即可用',
     uniRun:'生成通用版中…', uniOk:'已生成全平台通用版', uniAlready:'已经是 mp4',
@@ -2526,7 +3563,8 @@ const I18N = {
     hints:['⟷ swipe to seek','R: volume · L: brightness','dbl-tap ±10s · tap pause'],
     del:'Delete', expand:'Parts', up:'Uploader', partsN:'parts',
     st:{'排队中':'Queued','下载中':'Downloading','完成':'Done','部分失败':'Partial','失败':'Failed','已取消':'Cancelled'},
-    confirmDelVideo:'Delete this video and all its parts?', confirmDelFile:'Delete ', confirmRedl:'Re-download P',
+    confirmDelVideo:'Delete this video?\n\nAll its part files will be permanently deleted from disk.\n\nAre you sure?',
+    confirmDelFile:'Permanently delete this file?', confirmRedl:'Re-download P',
     scanAdded:'Imported', scanFail:'Scan failed', exportFail:'Export failed',
     exportOk1:'Backup saved', exportOk2:'New device: extract over the decache folder',
     pipNo:'PiP not supported', offline:'Offline', submitFail:'Submit failed', pasteFail:'Clipboard unavailable',
@@ -2535,9 +3573,16 @@ const I18N = {
     save:'Save', saved:'Saved ✓', sessOn:'Configured', sessOff:'Not set',
     dlDone:'Download finished', dlFail:'Some downloads failed', nextOff:'Autoplay off for this one',
     fAll:'All', fFav:'Favorites', queue:'Queue', qClear:'Clear queue', qEmpty:'Queue is empty',
+    quality:'Quality', qAuto:'Auto (best)', qHint:'cap, saves space',
+    multiSel:'Select', selN:'%d selected', selAll:'All', selFav:'Favorite', selDel:'Delete', selExit:'Exit',
+    selNone:'Nothing selected', selFavOk:'Favorited %d', selDelOk:'Deleted %d', selFail:'Bulk action failed',
+    confirmDelBulk:'Delete %d selected videos?\n\nAll part files will be permanently deleted from disk.\n\nAre you sure?',
     qAdd:'Add to queue', qAdded:'Added to queue', qItems:'items', tabFolder:'Folders',
     bRoot:'Roots', bEmpty:'No videos in this folder',
-    chapters:'Chapters', chEmpty:'No chapters', chReal:'Real chapters', chAuto:'Auto segments',
+    bGone:'This folder no longer exists (maybe just deleted)',
+    bNoAccess:'No permission for this folder',
+    bBackRoot:'Back to root', bMoved:'Folder gone, moved up automatically',
+    chapters:'Chapters', chEmpty:'No chapters', chReal:'Real chapters', chAuto:'Auto segments', playlist:'Playlist',
     chAdd:'Mark here', chMarked:'Marked', chExport:'Export m3u',
     m3uImport:'Import m3u', m3uOk:'Imported', ffMissing:'not found (install it)',
     health:'Health check', healthRun:'Checking…', healthOk:'All files OK', healthBad:'Damaged:',
@@ -2546,12 +3591,32 @@ const I18N = {
     subPosTop:'Top', subPosMid:'Middle', subPosBottom:'Bottom',
     dupes:'Duplicates', storage:'Storage', scanning:'Scanning…', noDupes:'No duplicate files',
     waste:'reclaim', wasteTotal:'Total reclaimable', total:'Used', free:'Free', items:'items',
-    mainPart:'Main', segment:'Segment',
+    mainPart:'Main', segment:'Segment', delPart:'Delete this part', confirmDelPart:'Delete only this part\'s file, keep the others. Delete P',
+    delPartOk:'Part deleted',
     qUp:'Move up', qDown:'Move down', qRemove:'Remove',
     urlPh:'Paste a video link', sessPh:'Paste cookie (KEY=VALUE; ...)',
     themeAuto:'Theme: follow system', themeLight:'Theme: light', themeDark:'Theme: dark',
+    needUrl:'Paste a link first', parsing:'Parsing…', parseFail:'Parse failed',
+    cookieEmpty:'Paste a cookie first', cookieBad:'Bad format — should be KEY=VALUE',
+    cookieOk:'Saved ✓ active', cookieSaveFail:'Save failed',
+    logs:'Runtime log', refresh:'Refresh', loading:'Loading…', entries:'entries', noLog:'No log yet',
+    tagSet:'Tagged', favOn:'Favourited ★', favOff:'Unfavourited', cancelled:'Cancelled',
+    retrying:'Re-downloading…', deleted:'Deleted', opening:'Opening…',
+    goDl:'Go download', goFolder:'Browse folders', goScan:'Scan disk',
+    notFound:'Video not found (maybe deleted)', delFail:'Could not delete',
+    pRetry:'Retry', pBack:'Back to list', pGone:'Cannot play: the file may be gone',
+    pFmt:'This device cannot play this format (try the universal copy)',
+    qRemoveConfirm:'Remove this from the queue?', qRemoved:'Removed',
+    qClearConfirm:'Clear the whole queue? Everything in it will be removed.',
+    qCleared:'Queue cleared', qClearFail:'Could not clear',
+    cancelConfirm:'Cancel this download? Downloaded parts are kept.',
+    cancelFail:'Cancel failed', lostConn:'Connection lost, retrying…', reconnected:'Connection restored',
     access:'Phone access & install', lanOpen:'On the same Wi-Fi, open on phone/tablet:',
     lanHint:'For phone access set bind = 0.0.0.0 in config.ini',
+    creds:'Site credentials', credHint:'Each entry = one site\'s cookie. Empty domain = applies to all. Format "KEY=VALUE; ...".',
+    noCreds:'No credentials yet (sites that work without login don\'t need one)',
+    credAdd:'Add / Update', credCount:'Credentials', credDelConfirm:'Delete this credential?',
+    credSaved:'Saved', credGlobal:'Global',
     install:'Add to home screen', installHint:'Browser menu → "Add to Home Screen"', installed:'Installed',
     installTip:'Browser menu → "Add to Home Screen / Install app", then tap the icon',
     uniRun:'Making universal copy…', uniOk:'Universal copy ready', uniAlready:'Already mp4',
@@ -2583,14 +3648,102 @@ $('langBtn').onclick = () => { LANG = LANG === 'zh' ? 'en' : 'zh';
 
 /* ═══ 基础 ═══ */
 let current = null, LIB = {videos:[], loose:[]}, SORT = 'time_desc', LIB_SHOW = 60;
-const api = async (path, opts) => {
-  const r = await fetch(path, opts ? {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(opts)} : undefined);
-  return r.json();
-};
+
+/* 错误说人话: 把技术报错翻译成"用户能行动"的话 */
+const ERR_ZH = [
+  ['failed to fetch', '连不上服务器 —— Termux 里跑 bash ~/decache/start.sh'],
+  ['networkerror', '连不上服务器 —— 服务没起? 或网络断了'],
+  ['not allowed', '路径不在允许的目录内'],
+  ['permission', '权限不足'],
+  ['timed out', '超时 —— 检查网络'],
+  ['解析超时', '解析超时 —— 检查网络, 或该站需要登录 cookie'],
+  ['yt-dlp not found', '没装 yt-dlp —— 跑 pkg install yt-dlp'],
+  ['not found', '文件或目录不存在'],
+  ['unsupported', '这个链接不支持'],
+  ['invalid', '参数不对'],
+  ['abort', '已取消'],
+];
+function errText(e) {
+  const s = (e && (e.message || e.error)) || String(e || '');
+  const low = s.toLowerCase();
+  for (const [k, v] of ERR_ZH) if (low.includes(k.toLowerCase())) return v;
+  return s.length > 160 ? s.slice(0, 160) + '…' : (s || '未知错误');
+}
+
+let _lastToast = '', _lastToastAt = 0;
+/* 进度记录会无限增长, 撑爆 localStorage 配额后进度再也存不上 → 只留最近 200 条 */
+function prunePos() {
+  try {
+    const ks = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('take_pos_')) ks.push(k);
+    }
+    if (ks.length > 200) ks.slice(0, ks.length - 200).forEach(k => localStorage.removeItem(k));
+  } catch (e) {}
+}
+function savePos(rel, t) { try { localStorage.setItem('take_pos_' + rel, t); } catch (e) {} }
+
+/* 进度记录会无限增长, 撑爆 localStorage 配额后进度再也存不上 → 只留最近 200 条 */
+function prunePos() {
+  try {
+    const ks = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('take_pos_')) ks.push(k);
+    }
+    if (ks.length > 200) ks.slice(0, ks.length - 200).forEach(k => localStorage.removeItem(k));
+  } catch (e) {}
+}
+function savePos(rel, t) { try { localStorage.setItem('take_pos_' + rel, t); } catch (e) {} }
+
 function toast(msg) {
-  const g = $('gtoast'); g.textContent = msg; g.classList.add('show');
-  clearTimeout(toast._t); toast._t = setTimeout(() => g.classList.remove('show'), 2400);
+  if (!msg) return;
+  const g = $('gtoast');
+  const now = Date.now();
+  // 同一条消息 3 秒内不重复弹(否则轮询会把它永远钉在屏幕上)
+  if (msg === _lastToast && now - _lastToastAt < 3000) return;
+  _lastToast = msg; _lastToastAt = now;
+  g.textContent = msg;
+  g.classList.add('show');
+  // 播放器开着时上移, 别盖住控制条
+  g.style.bottom = $('pmodal').classList.contains('open')
+    ? 'calc(160px + env(safe-area-inset-bottom))' : '96px';
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => g.classList.remove('show'), 2600);
+}
+/* 全局 API 包装: 网络错误/服务端 error 一律 toast 人话, 绝不静默 */
+async function api(path, opts) {
+  let r;
+  try {
+    r = await fetch(path, opts ? {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(opts)} : undefined);
+  } catch (e) {
+    const msg = errText(e);
+    toast(msg);
+    logLocal('ERR', path + ' → ' + msg);
+    throw new Error(msg);
+  }
+  let j = {};
+  try { j = await r.json(); } catch {}
+  if (j && j.error) {
+    const msg = errText(j.error);
+    toast(msg);
+    logLocal('ERR', path + ' → ' + msg);
+    throw new Error(msg);
+  }
+  if (!r.ok) {
+    const msg = 'HTTP ' + r.status;
+    toast(msg);
+    throw new Error(msg);
+  }
+  return j;
+}
+/* 本地操作日志(与后端 /api/log 合并显示) */
+const _localLog = [];
+function logLocal(level, msg) {
+  _localLog.unshift({t: Date.now(), level, msg: String(msg).slice(0, 300)});
+  if (_localLog.length > 100) _localLog.pop();
 }
 /* 页签高亮: 纯 class 切换(样式全在 CSS, 不碰内联 style) */
 document.querySelector('.tabbar').addEventListener('click', e => {
@@ -2606,24 +3759,38 @@ const pasteFromClipboard = async () => {
   try { $('url').value = await navigator.clipboard.readText(); }
   catch { toast(t('pasteFail')); }
 };
-const fmtT = t0 => { const d = new Date(t0*1000);
-  return `${d.getMonth()+1}-${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
+const fmtT = t0 => {
+  if (!t0) return '';
+  const d = new Date(t0 * 1000);
+  if (isNaN(d.getTime())) return '';
+  return `${d.getMonth()+1}-${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+};
 
 /* ═══ 解析/下载 ═══ */
 async function parse() {
   $('perr').textContent = '';
   const raw = $('url').value.trim();
-  const d = await api('/api/info?url=' + encodeURIComponent(raw));
-  if (d.error) { $('perr').textContent = d.error; return; }
-  current = d;
-  current.url = raw;
-  $('infoCard').style.display = 'block';
-  $('cover').src = d.cover;
-  $('vtitle').textContent = d.title;
-  $('vowner').textContent = `${t('up')}: ${d.owner} · ${d.pages.length} ${t('partsN')}`;
-  $('plist').innerHTML = d.pages.map(p =>
-    `<label><input type="checkbox" class="pc" value="${p.page}" checked>
-     <span>P${p.page} · ${esc(p.part || t('mainPart'))}</span></label>`).join('');
+  if (!raw) { $('perr').textContent = t('needUrl'); return; }
+  const btn = document.querySelector('#page-dl .btn');
+  if (btn) { btn.disabled = true; btn.textContent = t('parsing'); }
+  try {
+    const d = await api('/api/info?url=' + encodeURIComponent(raw));
+    if (d.error) { $('perr').textContent = d.error; return; }
+    current = d;
+    current.url = d.url || raw;      // 用解析出来的最终地址(短链已跟完), 不再用短链下载
+    $('infoCard').style.display = 'block';
+    $('cover').src = d.cover ? '/api/thumb?url=' + encodeURIComponent(d.cover) : '';
+    $('vtitle').textContent = d.title;
+    $('vowner').textContent = `${t('up')}: ${d.owner} · ${d.pages.length} ${t('partsN')}`;
+    $('plist').innerHTML = d.pages.map(p =>
+      `<label><input type="checkbox" class="pc" value="${p.page}" checked>
+       <span>P${p.page} · ${esc(p.part || t('mainPart'))}</span></label>`).join('');
+  } catch (e) {
+    $('perr').textContent = t('parseFail') + ': ' + e;
+  } finally {
+    const b = document.querySelector('#page-dl .btn');
+    if (b) { b.disabled = false; b.textContent = t('parse'); }
+  }
 }
 function selAll(v) { document.querySelectorAll('.pc').forEach(c => c.checked = v); }
 async function download(partsOverride) {
@@ -2639,7 +3806,8 @@ async function download(partsOverride) {
   try {
     await api('/api/download', {bvid: current.bvid, title: current.title, cover: current.cover,
                                 parts, part_names, part_urls, url: current.url || '',
-                                audio_only: $('audioOnly').checked});
+                                audio_only: $('audioOnly').checked,
+                                quality: +($('qualitySel') ? $('qualitySel').value : 0) || 0});
     switchTab('task');
   } catch (e) { toast(t('submitFail') + ': ' + e); }
   $('dlBtn').disabled = false;
@@ -2669,31 +3837,45 @@ async function refreshTasks() {
       <span class="pill ${x.status_code}">${t('st')[x.status] || x.status}</span>
       <span class="pct">${m ? m[1] + '%' : ''}</span></div>
       <div class="ln">${esc(x.line || '')}</div>
+      ${x.error ? `<div class="errbox">${esc(x.error)}${x.error_hint ? `<div class="ehint">${esc(x.error_hint)}</div>` : ''}</div>` : ''}
       ${(retry || cancel) ? `<div class="row" style="margin-top:8px">${retry}${cancel}</div>` : ''}
       ${m ? `<div class="bar"><i style="width:${m[1]}%"></i></div>`
           : (x.status_code === 'downloading' ? '<div class="bar ind"><i></i></div>' : '')}</div>`;
-  }).join('') : `<div class="empty"><span class="big"><svg class="ic"><use href="#i-inbox"/></svg></span>${t('noTask')}</div>`;
+  }).join('') : `<div class="empty"><span class="big"><svg class="ic"><use href="#i-inbox"/></svg></span>
+      <div>${t('noTask')}</div>
+      <div class="emptyActs"><button class="btn sm" onclick="switchTab('dl')">${t('goDl')}</button></div></div>`;
 }
 const renderTasks = refreshTasks;
 $('tasks').addEventListener('click', e => {
   const r = e.target.closest('[data-retry]');
   if (r) { const x = LAST_TASKS.find(z => z.id === +r.dataset.retry); if (!x) return;
     current = {bvid: x.bvid, title: x.title, pages: x.failed.map(p => ({page:p, part:(x.part_names||{})[p] || ('P'+p)}))};
+    toast(t('retrying'));
     download(x.failed); return; }
   const c = e.target.closest('[data-cancel]');
-  if (c) { const card = c.closest('.tcard');
-    if (card) { card.style.opacity = '.35'; c.disabled = true; }
-    api('/api/cancel', {id: +c.dataset.cancel}); return; }
+  if (c) {
+    if (!confirm(t('cancelConfirm'))) return;
+    const card = c.closest('.tcard');
+    c.disabled = true; if (card) card.style.opacity = '.35';
+    api('/api/cancel', {id: +c.dataset.cancel})
+      .then(() => { toast(t('cancelled')); })
+      .catch(err => { c.disabled = false; if (card) card.style.opacity = '';
+                      toast(t('cancelFail') + ': ' + errText(err)); })
+      .finally(() => refreshTasks());
+    return;
+  }
 });
 
 /* ═══ 章节 (v6.4) ═══ */
 let CHAPTERS = [], CHAP_REAL = false, CHAP_MARKS = [];
-async function loadChapters(rel, dur) {
+let _gen = 0;
+async function loadChapters(rel, dur, gen) {
   CHAPTERS = []; CHAP_MARKS = []; CHAP_REAL = false;
   renderChapters();
   if (!rel) return;
   try {
     const d = await api('/api/chapters?rel=' + encodeURIComponent(rel) + '&dur=' + (dur || 0));
+    if (gen !== undefined && gen !== _gen) return;    // 已经切到别的片了
     CHAPTERS = d.chapters || [];
     CHAP_REAL = !!d.real;
     renderChapters();
@@ -2712,19 +3894,34 @@ function renderChapters() {
 }
 function renderChapList() {
   const list = $('chapList');
+  if (!list) return;
+  // 章节清单 = 容器真章节 + 用户标记, 按时间排序(这行别删, 少了整个脚本会 ReferenceError)
   const all = [...CHAPTERS.map(c => ({t: c.start, title: c.title || t('segment')})),
                ...CHAP_MARKS.map(m => ({t: m.t, title: m.title, mark: true}))].sort((a, b) => a.t - b.t);
   $('chapMeta').textContent = all.length ? (CHAP_REAL ? t('chReal') : t('chAuto')) : '';
   if (!all.length) { list.innerHTML = `<div class="qempty">${t('chEmpty')}</div>`; return; }
   const cur = v.currentTime || 0;
-  const sheet = thumbURL && thumbReady ? thumbURL : '';
+  const sheet = (thumbReady && thumbURL) ? thumbURL : '';
+  const vd = (FLAT[FI] || {}).vd || {};
+  const cover = (vd.bvid && /^BV/i.test(vd.bvid)) ? `/api/cover/${encodeURIComponent(vd.bvid)}?v=${vd.cover_rev||0}` : '';
   list.innerHTML = all.map((c, i) => {
     const near = Math.abs(c.t - cur) < 2.5;
-    /* 缩略图切片: 伪章节用雪碧图对应格, 真章节用最近的一格 */
-    const gi = CHAPTERS.length ? Math.min(CHAPTERS.length - 1, Math.max(0, Math.round(c.t / (v.duration || 1) * CHAPTERS.length) - 0)) : 0;
-    const bg = sheet ? `background-image:url(${sheet});background-size:${thumbW}px ${thumbH}px;background-position:-${(gi % thumbCols) * (thumbW / thumbCols)}px -${Math.floor(gi / thumbCols) * (thumbH / Math.ceil(CHAPTERS.length / thumbCols))}px` : '';
+    let style = '', label = '';
+    if (sheet) {
+      // 雪碧图切片(最理想)
+      const gi = CHAPTERS.length
+        ? Math.min(CHAPTERS.length - 1, Math.max(0, Math.floor(c.t / (v.duration || 1) * CHAPTERS.length)))
+        : 0;
+      const cw = thumbW / thumbCols, ch = thumbH / Math.max(1, Math.ceil(CHAPTERS.length / thumbCols));
+      style = `background-image:url(${sheet});background-size:${thumbW}px ${thumbH}px;` +
+              `background-position:-${(gi % thumbCols) * cw}px -${Math.floor(gi / thumbCols) * ch}px`;
+    } else if (cover) {
+      style = `background-image:url(${cover});background-size:cover`;
+    } else {
+      label = String(i + 1);          // 都没就显示序号, 绝不给黑框
+    }
     return `<div class="chitem${near ? ' cur' : ''}" data-cht="${c.t}">
-      <span class="cthumb" style="${bg}"></span>
+      <span class="cthumb" style="${style}">${label}</span>
       <span class="cn">${esc(c.title)}</span>
       <span class="ct">${fmtDur(c.t)}</span>
       ${c.mark ? `<button class="cdel" data-chdel="${c.t}"><svg class="ic"><use href="#i-x"/></svg></button>` : ''}
@@ -2819,7 +4016,10 @@ function openSheet(title, html) {
 $('sheetClose').onclick = () => $('sheet').classList.remove('show');
 async function showDupes() {
   openSheet(t('dupes'), `<div class="empty">${t('scanning')}</div>`);
-  const d = await api('/api/dupes');
+  let d;
+  try { d = await api('/api/dupes'); }
+  catch (e) { $('sheetBody').innerHTML = `<div class="empty">${esc(errText(e))}
+    <div class="emptyActs"><button class="btn ghost sm" onclick="showDupes()">${t('refresh')}</button></div></div>`; return; }
   if (!d.groups?.length) {
     $('sheetBody').innerHTML = `<div class="empty">${t('noDupes')}</div>`;
     return;
@@ -2828,17 +4028,21 @@ async function showDupes() {
     <div class="dgroup">
       <div class="dgh">${g.size_mb}MB × ${g.files.length} <span>${t('waste')} ${g.waste_mb}MB</span></div>
       ${g.files.map(f => `<div class="dfile"><span class="dn">${esc(f.name)}</span>
-        <span class="dmeta">${esc(f.title.slice(0, 18))} P${f.p}</span></div>`).join('')}
+        <span class="dmeta">${esc(String(f.title || '').slice(0, 18))} P${f.p}</span></div>`).join('')}
     </div>`).join('') + `<div class="meta" style="margin-top:12px">${t('wasteTotal')} ${d.waste_mb}MB</div>`;
 }
 async function showStorage() {
   openSheet(t('storage'), `<div class="empty">${t('scanning')}</div>`);
-  const d = await api('/api/storage');
-  const mx = d.items[0]?.size_mb || 1;
+  let d;
+  try { d = await api('/api/storage'); }
+  catch (e) { $('sheetBody').innerHTML = `<div class="empty">${esc(errText(e))}
+    <div class="emptyActs"><button class="btn ghost sm" onclick="showStorage()">${t('refresh')}</button></div></div>`; return; }
+  const items = d.items || [];
+  const mx = (items[0] && items[0].size_mb) || 1;
   $('sheetBody').innerHTML = `
     <div class="meta" style="margin-bottom:10px">
       ${t('total')} ${d.total_mb}MB · ${d.count} ${t('items')} · ${t('free')} ${d.free_mb}MB</div>
-    ${d.items.map(x => `<div class="srow">
+    ${items.map(x => `<div class="srow">
       <span class="sn">${esc(x.title)}</span>
       <span class="sbar"><i style="width:${(x.size_mb / mx * 100).toFixed(1)}%"></i></span>
       <span class="sm">${x.size_mb}MB</span></div>`).join('')}`;
@@ -2859,7 +4063,131 @@ function applyTheme() {
 $('themeBtn').onclick = () => {
   THEME = THEME === 'auto' ? 'light' : THEME === 'light' ? 'dark' : 'auto';
   applyTheme();
+  toast(THEME === 'light' ? t('themeLight') : THEME === 'dark' ? t('themeDark') : t('themeAuto'));
 };
+
+/* ═══ 播放列表面板(缩略图+名称, 像 MPC-HC 那样边看边切) ═══ */
+function renderList() {
+  const body = $('listBody');
+  if (!body) return;
+  $('listCount').textContent = FLAT.length + ' ' + (t('items') || '');
+  if (!FLAT.length) { body.innerHTML = `<div class="qempty">${t('qEmpty')}</div>`; return; }
+  body.innerHTML = FLAT.map((x, i) => {
+    const vd = x.vd || {};
+    const bvid = (vd.bvid || '');
+    const cov = bvid && /^BV/i.test(bvid)
+      ? `style="background-image:url(/api/cover/${encodeURIComponent(bvid)}?v=${(FLAT[FI]||{}).vd?.cover_rev||0})"` : '';
+    const title = (vd.title || x.rel || '').slice(0, 60);
+    const pno = x.p && x.p.p ? `P${x.p.p}` : '';
+    return `<div class="plrow${i === FI ? ' cur' : ''}" data-pli="${i}">
+      <span class="plth" ${cov}></span>
+      <span class="pln">${esc(title)}</span>
+      <span class="plp">${esc(pno)}</span>
+    </div>`;
+  }).join('');
+}
+$('listBody').addEventListener('click', e => {
+  const r = e.target.closest('[data-pli]');
+  if (!r) return;
+  startPart(+r.dataset.pli);
+  renderList();
+});
+$('pList').onclick = () => {
+  const on = $('listPanel').classList.toggle('show');
+  $('qpanel').classList.remove('show');
+  $('chapPanel').classList.remove('show');
+  if (on) renderList();
+  poke();
+};
+$('listClose').onclick = () => $('listPanel').classList.remove('show');
+
+/* ═══ 媒体库多选(批量删除/收藏) ═══ */
+let SEL_MODE = false, SEL = new Set();
+function toggleSelMode() {
+  SEL_MODE = !SEL_MODE;
+  if (!SEL_MODE) SEL.clear();
+  $('selbar').classList.toggle('show', SEL_MODE);
+  const b = $('selModeBtn');
+  if (b) b.classList.toggle('on', SEL_MODE);
+  updateSelBar();
+  renderLib();
+}
+function updateSelBar() {
+  const el = $('selCount');
+  if (el) el.textContent = t('selN').replace('%d', SEL.size);
+}
+function toggleSel(bvid) {
+  if (!bvid) return;
+  if (SEL.has(bvid)) SEL.delete(bvid); else SEL.add(bvid);
+  updateSelBar();
+  renderLib();
+}
+function selAll() {
+  const vids = LIB.videos || [];
+  const all = vids.length && vids.every(v => SEL.has(v.bvid));
+  SEL.clear();
+  if (!all) vids.forEach(v => SEL.add(v.bvid));
+  updateSelBar();
+  renderLib();
+}
+async function selFav() {
+  if (!SEL.size) { toast(t('selNone')); return; }
+  const ids = [...SEL];
+  try {
+    const r = await api('/api/bulk', {bvid: ids, op: 'fav'});
+    toast(t('selFavOk').replace('%d', (r.done || []).length));
+  } catch (err) { toast(t('selFail') + ': ' + errText(err)); }
+  SEL.clear(); updateSelBar(); loadLib();
+}
+async function selDelete() {
+  if (!SEL.size) { toast(t('selNone')); return; }
+  if (!confirm(t('confirmDelBulk').replace('%d', SEL.size))) return;
+  const ids = [...SEL];
+  try {
+    const r = await api('/api/bulk', {bvid: ids, op: 'del'});
+    toast(t('selDelOk').replace('%d', (r.done || []).length));
+  } catch (err) { toast(t('selFail') + ': ' + errText(err)); }
+  SEL.clear(); updateSelBar(); loadLib();
+}
+
+/* ═══ 站点凭据管理(多域名 cookie) ═══ */
+async function loadCreds() {
+  const list = $('credList');
+  if (!list) return;
+  try {
+    const r = await api('/api/credentials');
+    const items = r.items || [];
+    if (!items.length) { list.innerHTML = `<div class="meta">${t('noCreds')}</div>`; $('credMeta').textContent = ''; return; }
+    list.innerHTML = items.map(x => `
+      <div class="credrow">
+        <span class="cd">${esc(x.domain || '通用')}</span>
+        <span class="ck" title="${esc(x.masked)}">${esc(x.keys.join(','))}</span>
+        <button class="btn danger sm" data-creddel="${esc(x.domain)}" aria-label="${t('del')}">✕</button>
+      </div>`).join('');
+    $('credMeta').textContent = t('credCount') + ': ' + items.length;
+  } catch (e) {}
+}
+$('credList').addEventListener('click', async e => {
+  const del = e.target.closest('[data-creddel]');
+  if (!del) return;
+  if (!confirm(t('credDelConfirm') + ' (' + del.dataset.creddel + ')')) return;
+  try { await api('/api/credentials', {op: 'del', domain: del.dataset.creddel});
+        toast(t('deleted')); loadCreds(); }
+  catch (err) { toast(errText(err)); }
+});
+async function saveCred() {
+  const dom = ($('credDomain').value || '').trim().toLowerCase();
+  const cv = ($('credCookie').value || '').trim();
+  if (!cv) { toast(t('cookieEmpty')); return; }
+  if (!cv.includes('=')) { toast(t('cookieBad')); return; }
+  try {
+    const r = await api('/api/credentials', {op: 'set', domain: dom, cookie: cv});
+    if (r.error) { toast(r.error); return; }
+    $('credCookie').value = ''; $('credDomain').value = '';
+    toast(t('credSaved') + ' · ' + (dom || t('credGlobal')));
+    loadCreds(); loadCfg();
+  } catch (e) { toast(t('cookieSaveFail') + ': ' + errText(e)); }
+}
 
 /* ═══ 局域网 / 安装到桌面 / iOS 兼容 ═══ */
 async function loadLan() {
@@ -2889,6 +4217,26 @@ async function makeUni(bvid, p, btn) {
     loadLib();
   } catch (e) { toast(t('uniFail')); }
   finally { btn.style.opacity = ''; }
+}
+
+/* ═══ 运行日志面板 ═══ */
+async function showLog() {
+  const box = $('logBox');
+  box.innerHTML = `<div class="meta">${t('loading')}</div>`;
+  let server = [];
+  try {
+    const r = await fetch('/api/log');
+    const j = await r.json();
+    server = (j.items || []).map(x => ({t: x.time * 1000, level: x.level, msg: x.msg}));
+  } catch (e) { server = []; }
+  const all = [...server, ..._localLog].sort((a, b) => b.t - a.t).slice(0, 80);
+  $('logMeta').textContent = all.length ? all.length + ' ' + t('entries') : '';
+  box.innerHTML = all.length ? all.map(x => {
+    const d = new Date(x.t);
+    const ts = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+    const lv = x.level === 'error' ? 'er' : (x.level === 'warn' ? 'wn' : 'ok');
+    return `<div class="logrow ${lv}"><span class="lt">${ts}</span><span class="lm">${esc(x.msg)}</span></div>`;
+  }).join('') : `<div class="meta">${t('noLog')}</div>`;
 }
 
 /* ═══ 标签 / 收藏 / 队列 (v6.2) ═══ */
@@ -2924,11 +4272,15 @@ $('filterChips').addEventListener('click', e => {
   loadLib();
 });
 async function toggleTag(bvid, tag) {
-  await api('/api/tag', {bvid, tag});
+  const r = await api('/api/tag', {bvid, tag});
+  if (!r) { toast(t('notFound')); return; }
+  toast(t('tagSet') + ' ' + tag);
   loadTagStats(); loadLib();
 }
 async function toggleFav(bvid) {
-  await api('/api/fav', {bvid});
+  const r = await api('/api/fav', {bvid});
+  if (r == null) { toast(t('notFound')); return; }
+  toast(r.fav ? t('favOn') : t('favOff'));
   loadTagStats(); loadLib();
 }
 async function queueAdd(item) {
@@ -2946,6 +4298,8 @@ async function loadQueue() {
 function renderQueue() {
   const items = QUEUE.items || [];
   $('qCount').textContent = items.length ? items.length + ' ' + t('qItems') : '';
+  const qc = $('queueCount');
+  if (qc) qc.textContent = items.length ? '(' + items.length + ')' : '';
   const list = $('qList');
   if (!items.length) { list.innerHTML = `<div class="qempty">${t('qEmpty')}</div>`; return; }
   const cur = (FLAT[FI] || {}).rel;
@@ -2966,38 +4320,71 @@ $('qList').addEventListener('click', async e => {
   const pl = e.target.closest('[data-qplay]');
   if (up) { await api('/api/queue', {op:'up', i:+up.dataset.qup}); loadQueue(); return; }
   if (dn) { await api('/api/queue', {op:'down', i:+dn.dataset.qdown}); loadQueue(); return; }
-  if (del) { await api('/api/queue', {op:'remove', i:+del.dataset.qdel}); loadQueue(); return; }
+  if (del) {
+    if (!confirm(t('qRemoveConfirm'))) return;
+    await api('/api/queue', {op:'remove', i:+del.dataset.qdel});
+    toast(t('qRemoved'));
+    loadQueue(); return;
+  }
   if (pl) {
     const it = QUEUE.items[+pl.dataset.qplay];
     if (it) { FLAT = QUEUE.items.map(x => ({rel:x.rel, vd:{title:x.title, bvid:x.bvid}, p:{p:x.p, name:x.name}}));
       startPart(+pl.dataset.qplay); }
   }
 });
-$('qClear').onclick = async () => { await api('/api/queue', {op:'clear'}); loadQueue(); };
+$('qClear').onclick = async () => {
+  if (!confirm(t('qClearConfirm'))) return;
+  try { await api('/api/queue', {op:'clear'}); toast(t('qCleared')); loadQueue(); }
+  catch (e) { toast(t('qClearFail') + ': ' + errText(e)); }
+};
 $('qClose').onclick = () => $('qpanel').classList.remove('show');
-$('pQueue').onclick = () => { $('qpanel').classList.toggle('show'); loadQueue(); poke(); };
-/* 队列模式开关: 播放列表从「全库」切到「我的队列」 */
-$('pQMode').onclick = () => {
+$('pQueue').onclick = () => { openQueue(); poke(); };
+/* 队列抽屉是全局的 —— 任何页面都能打开, 不必先进播放器 */
+function openQueue() {
+  $('qpanel').classList.add('show');
+  $('chapPanel').classList.remove('show');
+  loadQueue();
+}
+/* 队列模式开关(播放列表来源: 全库 ↔ 我的队列) —— 按钮在播放列表面板里 */
+function toggleListSrc() {
   if (!QUEUE_MODE && !(QUEUE.items || []).length) { toast(t('qEmpty')); return; }
   QUEUE_MODE = !QUEUE_MODE;
-  $('pQMode').classList.toggle('on', QUEUE_MODE);
   const cur = (FLAT[FI] || {}).rel;
   FLAT = buildFlat();
   const i = FLAT.findIndex(x => x.rel === cur);
   if (i >= 0) FI = i;
   else if (FLAT.length) startPart(0);
+  const b = $('listSrc');
+  if (b) b.textContent = QUEUE_MODE ? t('queue') : t('fAll');
+  renderList();
   toast(QUEUE_MODE ? t('queue') : t('fAll'));
-  poke();
-};
+}
 
 /* ═══ 文件夹浏览 ═══ */
 let BROWSE_PATH = '';
 async function browse(path) {
   BROWSE_PATH = path || '';
-  const d = await api('/api/browse' + (BROWSE_PATH ? '?path=' + encodeURIComponent(BROWSE_PATH) : ''));
+  let d;
+  try {
+    d = await api('/api/browse' + (BROWSE_PATH ? '?path=' + encodeURIComponent(BROWSE_PATH) : ''));
+  } catch (e) {
+    $('browseList').innerHTML = `<div class="card" style="text-align:center;padding:28px 16px">
+      <div class="meta" style="margin-bottom:14px">${esc(errText(e))}</div>
+      <button class="btn ghost sm" onclick="browse('')">${t('bBackRoot')}</button></div>`;
+    return;
+  }
   const box = $('browseList');
   const cr = $('crumbs');
-  if (d.error) { box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; cr.innerHTML = ''; return; }
+  if (d.error) {
+    // 目录没了/没权限 → 一定要给"回去"的路, 绝不让用户卡死
+    cr.innerHTML = `<span class="cb" data-bp="">${t('bRoot')}</span>`;
+    box.innerHTML = `<div class="card" style="text-align:center;padding:28px 16px">
+      <div style="font-size:28px;margin-bottom:8px">🫥</div>
+      <div class="meta" style="margin-bottom:14px">${esc(d.error === 'not_found' ? t('bGone') : t('bNoAccess'))}</div>
+      <button class="btn ghost sm" onclick="browse('')">${t('bBackRoot')}</button></div>`;
+    return;
+  }
+  if (d.moved) toast(t('bMoved'));
   cr.innerHTML = d.path
     ? (d.can_up ? `<span class="cb" data-bp="${esc(d.parent)}">..</span><span class="sep">/</span>` : '')
       + `<span class="cb" data-bp="">${t('bRoot')}</span><span class="sep">/</span><span class="cb" style="color:var(--tx)">${esc(d.path.split(/[\\/]/).filter(Boolean).pop() || d.path)}</span>`
@@ -3019,7 +4406,10 @@ async function browse(path) {
       </span>
     </div>`).join('');
   box.innerHTML = `<div class="card" style="padding:2px 14px">${dirs || files
-    ? dirs + files : `<div class="empty" style="padding:30px 0">${t('bEmpty')}</div>`}</div>`;
+    ? dirs + files : `<div class="empty" style="padding:30px 0">
+        <div>${t('bEmpty')}</div>
+        <div class="emptyActs"><button class="btn ghost sm" onclick="browse('');">${t('bBackRoot')}</button></div>
+      </div>`}</div>`;
 }
 $('browseList').addEventListener('click', e => {
   const dir = e.target.closest('[data-bdir]');
@@ -3029,6 +4419,7 @@ $('browseList').addEventListener('click', e => {
   const f = e.target.closest('[data-bfile]');
   if (f) {
     const rel = f.dataset.bfile;
+    toast(t('opening'));
     FLAT = [{rel, vd:{title: rel.split(/[\\/]/).pop()}, p:{p:1, name:''}}];
     startPart(0);
     $('pmodal').classList.add('open');
@@ -3054,13 +4445,13 @@ async function loadLib() {
 async function scanNow(btn) {
   btn.disabled = true;
   try { const r = await api('/api/scan');
-    toast(r.error ? t('scanFail') + ': ' + r.error : `${t('scanAdded')} ${r.added}`);
+    toast(`${t('scanAdded')} ${r.added}`);
     loadLib();
   } finally { btn.disabled = false; }
 }
 async function exportNow() {
   const r = await api('/api/export');
-  toast(r.error ? t('exportFail') + ': ' + r.error : `${t('exportOk1')} (${r.size}MB) — ${t('exportOk2')}`);
+  toast(`${t('exportOk1')} (${r.size}MB) — ${t('exportOk2')}`);
 }
 document.querySelectorAll('#sortChips .chip').forEach(c => c.onclick = () => {
   document.querySelectorAll('#sortChips .chip').forEach(x => x.classList.toggle('on', x === c));
@@ -3093,43 +4484,52 @@ function libSearchDebounced() {         // 搜索防抖: 万级库每个键入�
 
 function renderLib() {
   const q = $('q').value.trim().toLowerCase();
-  let vids = LIB.videos.filter(v => !q || v.title.toLowerCase().includes(q)
-    || (v.owner || '').toLowerCase().includes(q));
+  let vids = LIB.videos.filter(v => !q || String(v.title || '').toLowerCase().includes(q)
+    || String(v.owner || '').toLowerCase().includes(q));
   const hidden = Math.max(0, vids.length - LIB_SHOW);
-  vids.sort((a,b) => SORT==='name' ? a.title.localeCompare(b.title,'zh')
+  vids.sort((a,b) => SORT==='name' ? String(a.title||'').localeCompare(String(b.title||''),'zh')
               : SORT==='seq' ? (a.seq||0)-(b.seq||0)
               : SORT==='time_asc' ? a.updated-b.updated : b.updated-a.updated);
   $('libCount').textContent = LIB.videos.length;
   $('lib').innerHTML = vids.length ? vids.slice(0, LIB_SHOW).map(v => `
-    <div class="vcard">
-      <div class="cov" data-play="${v.bvid}"><img src="/api/cover/${v.bvid}?t=${Math.floor(v.updated)}" loading="lazy"><span class="n">${v.parts.length}P</span></div>
-      <button class="favbtn${v.fav ? ' on' : ''}" data-fav="${v.bvid}" title="${t('fFav')}">
+    <div class="vcard${SEL_MODE ? ' sel' : ''}">
+      <div class="cov" data-play="${esc(v.bvid)}">${SEL_MODE ? `<span class="selbox${SEL.has(v.bvid) ? ' on' : ''}" data-sel="${esc(v.bvid)}"></span>` : ''}<img src="/api/cover/${encodeURIComponent(v.bvid)}?t=${Math.floor(v.updated)||0}&v=${v.cover_rev||0}" loading="lazy" alt="${esc(v.title)}"><span class="n">${v.parts.length}P</span></div>
+      <button class="favbtn${v.fav ? ' on' : ''}" data-fav="${esc(v.bvid)}" title="${t('fFav')}" aria-label="${t('fFav')}">
         <svg class="ic"><use href="#i-star"/></svg></button>
       <div class="bd">
         <div class="vt">${esc(v.title)}</div>
-        <div class="vm">${v.total || 0}MB · ${fmtT(v.updated)}</div>
+            <div class="vm">${v.total || 0}MB · ${fmtT(v.updated)}${(() => { const h = Math.max.apply(null, v.parts.map(p => p.h || 0).concat([0])); return h ? " · " + h + "P" : ""; })()}</div>
         <div class="ops">
-          <button class="btn ghost sm" data-toggle="${v.bvid}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-clist"/></svg> ${v.parts.length}</button>
-          <button class="btn ghost sm" data-health="${v.bvid}" title="${t('health')}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-scan"/></svg></button>
-          <button class="btn danger sm" data-delvideo="${v.bvid}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-trash"/></svg></button>
+          <button class="btn ghost sm" data-toggle="${esc(v.bvid)}" aria-label="${t('expand')}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-clist"/></svg> ${v.parts.length}</button>
+          <button class="btn ghost sm" data-health="${esc(v.bvid)}" title="${t('health')}" aria-label="${t('health')}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-scan"/></svg></button>
+          <button class="btn danger sm" data-delvideo="${esc(v.bvid)}" aria-label="${t('del')}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-trash"/></svg></button>
         </div>
         <div class="tagbar">
           ${TAGS.map(tg => `<button class="tgbtn${(v.tags||[]).includes(tg.k) ? ' on' : ''}" data-tagbtn="${v.bvid}|${tg.k}" title="${tg.k}"><i style="background:${tg.c}"></i></button>`).join('')}
-          <button class="queuebtn" data-qadd="${v.bvid}" title="${t('qAdd')}"><svg class="ic"><use href="#i-plus"/></svg></button>
+          <button class="queuebtn" data-qadd="${esc(v.bvid)}" title="${t('qAdd')}" aria-label="${t('qAdd')}"><svg class="ic"><use href="#i-plus"/></svg></button>
         </div>
-        <div class="parts" id="parts-${v.bvid}">
+        <div class="parts" id="parts-${esc(v.bvid)}">
           ${v.parts.map(p => `<div class="part">
             <span class="pn">P${p.p} ${esc(p.name)}</span>
             <div class="pr"><span class="s">${p.size}MB</span>
-              <span class="pico" data-redl="${v.bvid}|${p.p}|${esc(v.folder)}/${esc(p.file)}"><svg class="ic"><use href="#i-export"/></svg></span>
-              <span class="pico" data-uni="${v.bvid}|${p.p}" title="${t('uniCompat')}"><svg class="ic"><use href="#i-clist"/></svg></span>
-              <span class="pico" data-open="${esc(v.folder)}/${esc(p.file)}"><svg class="ic" style="fill:currentColor;stroke:none"><use href="#i-play"/></svg></span></div></div>`).join('')}
+              <span class="pico" data-redl="${esc(v.bvid)}" data-p="${esc(p.p)}" data-rel="${esc(v.folder)}/${esc(p.file)}" title="${t('confirmRedl')}"><svg class="ic"><use href="#i-export"/></svg></span>
+              <span class="pico" data-uni="${esc(v.bvid)}" data-p="${esc(p.p)}" title="${t('uniCompat')}" aria-label="${t('uniCompat')}"><svg class="ic"><use href="#i-clist"/></svg></span>
+              <span class="pico" data-open="${esc(v.folder)}/${esc(p.file)}" role="button" aria-label="${t('expand')}"><svg class="ic" style="fill:currentColor;stroke:none"><use href="#i-play"/></svg></span>
+              <span class="pico" data-delp="${esc(v.bvid)}" data-delp-p="${esc(p.p)}" data-delp-rel="${esc(v.folder)}/${esc(p.file)}" title="${t('delPart')}" aria-label="${t('delPart')}"><svg class="ic"><use href="#i-trash"/></svg></span></div></div>`).join('')}
         </div>
       </div>
     </div>`).join('') + (hidden > 0
       ? `<button class="btn ghost" style="grid-column:1/-1" onclick="LIB_SHOW+=80;renderLib()">${hidden}+</button>` : '')
-      : `<div class="empty" style="grid-column:1/-1"><span class="big"><svg class="ic"><use href="#i-lib"/></svg></span>${q ? t('emptySearch') : t('emptyLib')}</div>`;
-  const loose = LIB.loose.filter(f => !q || f.name.toLowerCase().includes(q));
+      : `<div class="empty" style="grid-column:1/-1">
+          <span class="big"><svg class="ic"><use href="#i-lib"/></svg></span>
+          <div>${q ? t('emptySearch') : t('emptyLib')}</div>
+          ${q ? '' : `<div class="emptyActs">
+            <button class="btn sm" onclick="switchTab('dl')">${t('goDl')}</button>
+            <button class="btn ghost sm" onclick="switchTab('folder')">${t('goFolder')}</button>
+            <button class="btn ghost sm" onclick="scanNow(this)">${t('goScan')}</button>
+          </div>`}
+        </div>`;
+  const loose = LIB.loose.filter(f => !q || String(f.name || '').toLowerCase().includes(q));
   $('looseWrap').style.display = loose.length ? 'block' : 'none';
   $('loose').innerHTML = loose.map(f => `<div class="file"><span class="n">${esc(f.name)}</span>
     <span class="meta">${f.size}MB</span>
@@ -3137,6 +4537,8 @@ function renderLib() {
     <button class="btn danger sm" data-delloose="${esc(f.rel)}"><svg class="ic" style="width:13px;height:13px"><use href="#i-trash"/></svg></button></div>`).join('');
 }
 $('lib').addEventListener('click', async e => {
+  const selb = e.target.closest('[data-sel]');
+  if (selb) { e.stopPropagation(); toggleSel(selb.dataset.sel); return; }
   const favb = e.target.closest('[data-fav]');
   if (favb) { e.stopPropagation(); toggleFav(favb.dataset.fav); return; }
   const tagBtn = e.target.closest('[data-tagbtn]');
@@ -3151,11 +4553,24 @@ $('lib').addEventListener('click', async e => {
     }
     return;
   }
+  const dp = e.target.closest('[data-delp]');
+  if (dp) {
+    e.stopPropagation();
+    const bvid = dp.dataset.delp, pp = dp.dataset.delpP, rel = dp.dataset.delpRel;
+    if (!confirm(t('confirmDelPart') + ' P' + pp + '?')) return;
+    dp.style.opacity = '.4';
+    try {
+      await api('/api/delete', {rel});
+      toast(t('delPartOk'));
+    } catch (err) { toast(t('delFail') + ': ' + errText(err)); }
+    dp.style.opacity = '';
+    loadLib();
+    return;
+  }
   const io = e.target.closest('[data-uni]');
   if (io) {
     e.stopPropagation();
-    const [bb, pp] = io.dataset.uni.split('|');
-    makeUni(bb, pp, io);
+    makeUni(io.dataset.uni, io.dataset.p, io);
     return;
   }
   const hb = e.target.closest('[data-health]');
@@ -3170,36 +4585,55 @@ $('lib').addEventListener('click', async e => {
     return;
   }
   const pf = e.target.closest('[data-play]');
-  if (pf) { const vd = LIB.videos.find(x => x.bvid === pf.dataset.play);
-    if (vd && vd.parts.length) openRel(vd.folder + '/' + vd.parts[0].file); return; }
+  if (pf) {
+    if (SEL_MODE) { toggleSel(pf.dataset.play); return; }   // 多选模式下点封面 = 勾选, 不播放
+    const vd = LIB.videos.find(x => x.bvid === pf.dataset.play);
+    if (vd && vd.parts.length) openRel(vd.folder + '/' + vd.parts[0].file); return;
+  }
   const rd = e.target.closest('[data-redl]');
-  if (rd) { const [bvid, p, rel] = rd.dataset.redl.split('|');
-    if (!confirm(t('confirmRedl') + p + '?')) return;
-    await api('/api/delete', {rel});
-    const vd = LIB.videos.find(x => x.bvid === bvid);
-    const part_names = {}; vd.parts.forEach(x => part_names[x.p] = x.name);
-    current = {bvid, title: vd.title, pages: vd.parts.map(x => ({page: x.p, part: x.name}))};
+  if (rd) {
+    if (!confirm(t('confirmRedl') + rd.dataset.p + '?')) return;
+    const bvid = rd.dataset.redl, p = rd.dataset.p, rel = rd.dataset.rel;
     rd.style.opacity = '.35'; rd.style.pointerEvents = 'none';
-    await api('/api/download', {bvid, title: vd.title, cover: '', parts: [parseInt(p)],
-      part_names, url: current?.url || '', part_urls: {}});
-    switchTab('task'); return; }
+    try {
+      // 先下载到临时名, 成功后再替换 —— 失败不会丢原文件
+      await api('/api/redownload', {bvid, p, rel});
+      toast(t('retrying'));
+      switchTab('task');
+    } catch (err) {
+      toast(t('delFail') + ': ' + errText(err));
+      rd.style.opacity = ''; rd.style.pointerEvents = '';
+    }
+    return;
+  }
   const tg = e.target.closest('[data-toggle]');
   if (tg) { const p = $('parts-' + tg.dataset.toggle);
     p.classList.toggle('open'); return; }
   const dv = e.target.closest('[data-delvideo]');
-  if (dv) { if (!confirm(t('confirmDelVideo'))) return;
-    LIB.videos = LIB.videos.filter(x => x.bvid !== dv.dataset.delvideo);
-    renderLib();
-    api('/api/delete', {bvid: dv.dataset.delvideo}).then(loadLib); return; }
+  if (dv) {
+    if (!confirm(t('confirmDelVideo'))) return;
+    const bvid = dv.dataset.delvideo;
+    try {
+      await api('/api/delete', {bvid});
+      toast(t('deleted'));
+    } catch (err) { toast(t('delFail') + ': ' + errText(err)); }
+    loadLib();                       // 无论成败都以服务端为准
+    return;
+  }
   const o = e.target.closest('[data-open]');
   if (o) openRel(o.dataset.open);
 });
 $('loose').addEventListener('click', async e => {
   const d = e.target.closest('[data-delloose]');
-  if (d) { if (!confirm(t('confirmDelFile') + d.dataset.delloose + '?')) return;
-    LIB.loose = LIB.loose.filter(f => f.rel !== d.dataset.delloose);
-    renderLib();
-    api('/api/delete', {rel: d.dataset.delloose}).then(loadLib); return; }
+  if (d) {
+    if (!confirm(t('confirmDelFile'))) return;
+    try {
+      await api('/api/delete', {rel: d.dataset.delloose});
+      toast(t('deleted'));
+    } catch (err) { toast(t('delFail') + ': ' + errText(err)); }
+    loadLib();
+    return;
+  }
   const o = e.target.closest('[data-open]');
   if (o) openRel(o.dataset.open);
 });
@@ -3210,10 +4644,10 @@ const RATES = [1, 1.25, 1.5, 2, 0.75, 0.5];
 let RATE_I = Math.max(0, RATES.indexOf(parseFloat(localStorage.getItem('take_rate') || '1')));
 /* 兼容性降级(2026-10-21): Android WebView 根本没有 PiP API(直接抛错),
    老 WebView 也没有 wakeLock —— feature-detect 后再决定要不要显示按钮。*/
+const v = $('pvideo'), bar = $('pctrl'), phead = $('phead');   // 必须先于 HAS_PIP 声明: 否则下面读 v 会 TDZ
 const HAS_PIP = !!(document.pictureInPictureEnabled || (v.requestPictureInPicture && !/wv/i.test(navigator.userAgent)));
 const HAS_WAKELOCK = !!(navigator.wakeLock && navigator.wakeLock.request);
 const posKey = r => 'take_pos_' + r;
-const v = $('pvideo'), bar = $('pctrl'), phead = $('phead');
 let dragging = false, barT = 0, wl = null;
 
 /* 队列模式: FLAT 来自队列而非全库(开关在播放器控制行 ☰) */
@@ -3223,7 +4657,7 @@ function buildFlat() {
     return QUEUE.items.map(x => ({rel:x.rel, vd:{title:x.title, bvid:x.bvid}, p:{p:x.p, name:x.name}}));
   }
   const vids = [...LIB.videos];
-  vids.sort((a,b) => SORT==='name' ? a.title.localeCompare(b.title,'zh')
+  vids.sort((a,b) => SORT==='name' ? String(a.title||'').localeCompare(String(b.title||''),'zh')
               : SORT==='seq' ? (a.seq||0)-(b.seq||0)
               : SORT==='time_asc' ? a.updated-b.updated : b.updated-a.updated);
   const items = [];
@@ -3234,9 +4668,11 @@ function buildFlat() {
 function openRel(rel) {
   FLAT = buildFlat();
   let i = FLAT.findIndex(x => x.rel === rel);
-  if (i < 0) { FLAT = [{rel, vd: {title: rel.split('/').pop()}, p: {p: 1, name: ''}}]; i = 0; }
+  if (i < 0) { FLAT = [{rel, vd: {title: rel.split(/[\\/]/).pop()}, p: {p: 1, name: ''}}]; i = 0; }
   startPart(i);
   $('pmodal').classList.add('open');
+  poke();                        // 控制条立刻显示, 别让用户干等
+  renderList();                  // 播放列表面板同步刷新
   if (!localStorage.getItem('take_hint_done')) {
     $('phint').classList.add('show');
     setTimeout(() => { $('phint').classList.remove('show');
@@ -3263,7 +4699,9 @@ function updateMeta() {
 const AUDIO_RE = /\.(m4a|mp3|flac|aac|ogg|opus|wav|mka)$/i;
 
 function startPart(i) {
-  if (i < 0 || i >= FLAT.length) return;
+  if (!FLAT.length) { toast(t('qEmpty')); return; }
+  i = Math.max(0, Math.min(FLAT.length - 1, Number(i) || 0));
+  if (!FLAT[i]) return;
   FI = i;
   const {rel, vd, p} = FLAT[i];
   $('ptitle').textContent = vd.title || p.name;
@@ -3272,35 +4710,44 @@ function startPart(i) {
   v.playbackRate = RATES[RATE_I];
   $('pRate').textContent = RATES[RATE_I] + 'x';
   const saved = parseFloat(localStorage.getItem(posKey(rel)) || 0);
+  let _seeked = false;
   v.onloadedmetadata = () => {
-    if (saved > 5 && saved < v.duration - 8) v.currentTime = saved;
+    if (!_seeked && saved > 5 && saved < v.duration - 8) { v.currentTime = saved; _seeked = true; }
     setTime();
     setProg(v.currentTime / (v.duration || 1));
+    loadChapters(rel, v.duration);   // 时长这时才准, 章节分段才对
+    // 预热缩略图雪碧图 —— 以前只有"拖进度条"才生成, 章节面板打开时永远是黑的
+    ensureThumbs(rel, v.duration);
   };
   v.play().catch(() => {});
+  $('pErr').style.display = 'none';
   $('pPrev').disabled = i <= 0;
   $('pNextB').disabled = (MODE_I === 0 && i >= FLAT.length - 1);
   /* 音频模式: 音频文件隐藏 video 层, 显示封面+律动 */
   const isAudio = AUDIO_RE.test(rel);
   $('pstage').classList.toggle('audio', isAudio);
   $('partCoverImg').src = (vd.bvid && vd.bvid.startsWith('BV'))
-    ? `/api/cover/${vd.bvid}?t=${Math.floor(vd.updated || 0)}` : '';
+    ? `/api/cover/${vd.bvid}?t=${Math.floor(vd.updated || 0)}&v=${vd.cover_rev || 0}` : '';
   /* A-B / UpNext / 缩略图缓存 重置 */
   abSt = 0; renderAB();
   nextCardShown = false; nextCancelled = false;
   $('pnext').classList.remove('show');
-  if (thumbURL) { URL.revokeObjectURL(thumbURL); thumbURL = ''; thumbReady = false; }
+  if (thumbURL && thumbURL !== 'pending') URL.revokeObjectURL(thumbURL);
+  thumbURL = ''; thumbReady = false;
   $('pthumb').style.display = 'none';
-  loadSubs(rel);
-  loadChapters(rel, v.duration);
+  const myGen = ++_gen;                 // 代次令牌: 旧请求的响应直接丢弃
+  loadSubs(rel, myGen);
+  loadChapters(rel, 0, myGen);
   updateMeta();
   poke();
 }
 function poke() {
   bar.classList.remove('hide'); phead.classList.remove('hide');
   clearTimeout(barT);
+  // 5 秒(原来 3.2 秒太短, 手机上根本来不及点); 暂停时不自动隐藏
   barT = setTimeout(() => { if (!v.paused && !dragging && !pdrag) {
-    bar.classList.add('hide'); phead.classList.add('hide'); } }, 3200);
+    bar.classList.add('hide'); phead.classList.add('hide');
+    $('pthumb').style.display = 'none'; } }, 6000);   // 6 秒: 手机上手速慢, 3 秒根本来不及点
 }
 async function keepAwake(on) {
   if (!HAS_WAKELOCK) return;
@@ -3333,6 +4780,23 @@ v.addEventListener('progress', () => {
 const togglePlay = () => v.paused ? v.play().catch(() => {}) : v.pause();
 $('pPlay').onclick = togglePlay;
 let pdrag = false, pRatio = 0;
+/* 缩略图预览: 在指定时间比例处显示(进度条拖动 + 画面横滑共用) */
+function showThumbAt(ratio, clientX) {
+  if (!dur) return;
+  const pt = $('pthumb'), sr = stage.getBoundingClientRect();
+  pt.style.display = 'flex';
+  const x = (clientX != null) ? clientX : sr.left + sr.width * ratio;
+  pt.style.left = Math.max(92, Math.min(sr.width - 92, x - sr.left)) + 'px';
+  $('pthumbT').textContent = fmtDur(ratio * dur);
+  if (thumbReady) {
+    const k = Math.min(thumbN - 1, Math.max(0, Math.floor(ratio * thumbN)));
+    const cw = thumbW / thumbCols, ch = thumbH / Math.ceil(thumbN / thumbCols);
+    $('pthumbImg').style.backgroundImage = 'url(' + thumbURL + ')';
+    $('pthumbImg').style.backgroundSize = thumbW + 'px ' + thumbH + 'px';
+    $('pthumbImg').style.backgroundPosition = '-' + (k % thumbCols) * cw + 'px -' + Math.floor(k / thumbCols) * ch + 'px';
+  }
+}
+
 function pSeekTo(cx) {
   const r = pbar.getBoundingClientRect();
   pRatio = Math.max(0, Math.min(1, (cx - r.left) / r.width));
@@ -3378,9 +4842,29 @@ $('pPip').onclick = async () => {
   catch { toast(t('pipNo')); }
 };
 
+/* 播放失败: 文件被删 / 404 / 格式不支持 → 给提示和出口, 不能满屏黑 */
+v.addEventListener('error', () => {
+  if (!v.getAttribute('src')) return;
+  const code = v.error ? v.error.code : 0;
+  if (code === 4) { $('pErrMsg').textContent = t('pFmt'); }   // 格式不支持
+  else { $('pErrMsg').textContent = t('pGone'); }
+  $('pErr').style.display = 'flex';
+});
+v.addEventListener('stalled', () => { $('pTime').textContent = $('pTime').textContent; });
+
+/* 播放失败: 文件被删 / 404 / 格式不支持 → 给提示和出口, 不能满屏黑 */
+v.addEventListener('error', () => {
+  if (!v.getAttribute('src')) return;
+  const code = v.error ? v.error.code : 0;
+  if (code === 4) { $('pErrMsg').textContent = t('pFmt'); }   // 格式不支持
+  else { $('pErrMsg').textContent = t('pGone'); }
+  $('pErr').style.display = 'flex';
+});
+v.addEventListener('stalled', () => { $('pTime').textContent = $('pTime').textContent; });
+
 /* 手势 */
 const stage = $('pstage'), ov = $('seekOv');
-let sx = 0, sy = 0, baseT = 0, baseV = 0, gmode = 0, gdelta = 0, dur = 0, ovT = 0;
+let sx = 0, sy = 0, baseT = 0, baseV = 0, gmode = 0, gdelta = 0, dur = 0, ovT = 0, _thumbHideT = 0;
 function ovShow(txt) { ov.textContent = txt; ov.style.display = 'block';
   clearTimeout(ovT); ovT = setTimeout(() => ov.style.display = 'none', 1000); }
 let baseB = parseFloat(sessionStorage.getItem('take_bright') || '1');
@@ -3412,8 +4896,10 @@ stage.addEventListener('touchmove', e => {
   e.preventDefault();
   if (gmode === 1 && dur) {
     gdelta = Math.max(-150, Math.min(150, Math.round(dx / 5)));
-    v.currentTime = Math.max(0, Math.min(dur, baseT + gdelta));
+    const nt = Math.max(0, Math.min(dur, baseT + gdelta));
+    v.currentTime = nt;
     ovShow((gdelta >= 0 ? '+' : '') + gdelta + 's');
+    showThumbAt(nt / dur, tt.clientX);   // 画面上滑动也要出缩略图(原来只有进度条有)
   } else if (gmode === 2) {
     const nv = Math.max(0, Math.min(1, baseV - dy / 250));
     v.volume = nv; v.muted = nv === 0;
@@ -3425,7 +4911,11 @@ stage.addEventListener('touchmove', e => {
 }, {passive: false});
 stage.addEventListener('touchend', () => {
   if (gmode === 1) { toast((gdelta >= 0 ? '+' : '') + gdelta + 's');
-    localStorage.setItem(posKey(FLAT[FI].rel), v.currentTime); }
+    localStorage.setItem(posKey(FLAT[FI].rel), v.currentTime);
+    // 横滑时弹出的缩略图要自己消失(旧 bug: 这条路没有隐藏逻辑, 缩略图一直挂在那)
+    clearTimeout(_thumbHideT);
+    _thumbHideT = setTimeout(() => { $('pthumb').style.display = 'none'; }, 350);
+  }
   gmode = 0;
 });
 function ripple(side, label) {
@@ -3450,32 +4940,38 @@ stage.addEventListener('click', e => {
   lastTap = now;
   tapTimer = setTimeout(() => {
     tapTimer = null;
-    if (bar.classList.contains('hide')) poke();
-    else { bar.classList.add('hide'); phead.classList.add('hide'); clearTimeout(barT); }
+    // 点一下永远是「显示出来, 停 6 秒」—— 不要再用第二次点击把它秒收,
+    // 那会让按钮只闪一瞬(旧 bug: touchstart 先显示, 这里再藏一次)
+    poke();
   }, 280);
 });
 
 /* ═══ v6.1: 缩略图预览 / 字幕 / A-B / Up Next ═══ */
 let thumbURL = '', thumbReady = false, thumbN = 12, thumbCols = 4, thumbW = 640, thumbH = 480;
 function ensureThumbs(rel, dur) {
+  if (!rel || !dur || thumbURL) return;      // 已有就别重复生成
   thumbURL = 'pending';
   fetch('/api/thumbs?rel=' + encodeURIComponent(rel) + '&dur=' + dur)
     .then(r => r.ok ? r.blob() : null)
-    .then(b => { if (!b) { thumbURL = ''; return; }
+    .then(b => {
+      if (!b) { thumbURL = ''; renderChapters(); return; }
       thumbURL = URL.createObjectURL(b);
       const im = new Image();
-      im.onload = () => { thumbW = im.naturalWidth; thumbH = im.naturalHeight; thumbReady = true; };
+      im.onload = () => { thumbW = im.naturalWidth; thumbH = im.naturalHeight; thumbReady = true;
+                          renderChapters(); showThumbAt(0, null); };
+      im.onerror = () => { thumbURL = ''; };
       im.src = thumbURL;
     })
     .catch(() => { thumbURL = ''; });
 }
 
 let SUBS = [];
-function loadSubs(rel) {
+function loadSubs(rel, gen) {
   SUBS = [];
   $('pCC').style.display = 'none';
   [...v.querySelectorAll('track')].forEach(t => t.remove());
   api('/api/subs?rel=' + encodeURIComponent(rel)).then(d => {
+    if (gen !== undefined && gen !== _gen) return;
     if (!d.subs?.length) return;
     SUBS = d.subs;
     d.subs.forEach((s, i) => {
@@ -3540,7 +5036,7 @@ v.addEventListener('timeupdate', () => {
     const item = FLAT[MODE_I === 0 ? FI + 1 : (FI + 1) % L];
     $('pNextTitle').textContent = `${item.vd.title || ''} P${item.p.p ?? ''}`;
     $('pNextCov').src = (item.vd.bvid && item.vd.bvid.startsWith('BV'))
-      ? '/api/cover/' + item.vd.bvid : '';
+      ? '/api/cover/' + item.vd.bvid + '?v=' + (item.vd.cover_rev || 0) : '';
     $('pnext').classList.add('show');
     nextCardShown = true;
   }
@@ -3653,18 +5149,34 @@ function importM3uFile(inp) {
 }
 async function saveSess() {
   const v = $('cfgCookie').value.trim();
-  if (!v) return;
-  await api('/api/config', {cookie: v});
-  $('cfgCookie').value = '';
-  toast(t('saved'));
-  loadCfg();
+  if (!v) { toast(t('cookieEmpty')); return; }
+  if (!v.includes('=')) { toast(t('cookieBad')); return; }
+  try {
+    const r = await api('/api/config', {cookie: v});
+    if (r.error) { toast(r.error); return; }
+    $('cfgCookie').value = '';
+    toast(t('cookieOk') + (r.keys?.length ? ' (' + r.keys.join(',') + ')' : ''));
+    loadCfg();
+  } catch (e) { toast(t('cookieSaveFail')); }
 }
-setInterval(() => { refreshTasks(); loadLib(); }, 3000);
+let _pollBusy = false, _pollFail = 0;
+async function pollTick() {
+  if (_pollBusy || document.hidden) return;   // 隐藏时不轮询(省电) + 不堆积
+  _pollBusy = true;
+  try {
+    await refreshTasks();
+    await loadLib();
+    if (_pollFail) { _pollFail = 0; toast(t('reconnected')); }
+  } catch (e) {
+    if (++_pollFail === 1) toast(t('lostConn'));   // 只在第一次断时提示
+  } finally { _pollBusy = false; }
+}
+setInterval(pollTick, 3000);
 applyLang();
 refreshTasks(); loadLib(); checkVer(); loadCfg(); loadTagStats(); loadQueue();
 initSubStyleUI();
 applyTheme();
-loadLan();
+loadLan(); loadCreds();
 </script>
 </body>
 </html>
@@ -3748,6 +5260,7 @@ server.LIB_FILE = HOME / "library.json"
 server.TASKS_FILE = HOME / "tasks.json"
 server.QUEUE_FILE = HOME / "playlist.json"
 server.COOKIE_FILE = HOME / "cookies.txt"
+server.CONFIG_FILE = HOME / "config.ini"      # 隔离! 否则测试会写坏用户真实的 config.ini
 # config.ini 也隔离: import 时 load_config() 会在项目目录生成一个(若原本不存在)→ 删掉,
 # 之后所有配置读写都指向临时 HOME, 用户真实 config.ini 一个字节都不碰
 server.CONFIG_FILE = HOME / "config.ini"
@@ -3827,13 +5340,15 @@ chk("diagnostics 有 hints 列表", isinstance(dg.get("hints"), list))
 # 7b) 引擎分支(2026-10-21: 默认换 yt-dlp, you-get 保留兜底)
 old_engine = server.ENGINE
 old_cookie = server.SESSION_COOKIE
-server.SESSION_COOKIE = "K=V; K2=V2"
+server.save_config_value("cookie", "K=V; K2=V2")          # 真写进 config(内存+文件)
+server.save_config_value("cookies", json.dumps({"videos.example.org": "AK=AV; BK=BV"}))
 server.ENGINE = "yt-dlp"
 cmd = server._cmd("https://videos.example.org/watch/xyz?p=3", False, DL)
 chk("yt-dlp 分支用 yt-dlp", cmd[0] == "yt-dlp", str(cmd[:3]))
 chk("yt-dlp 分支带 info.json", "--write-info-json" in cmd, str(cmd))
 chk("yt-dlp 分支按 P 命名", "P3.%(ext)s" in " ".join(cmd), str(cmd))
 chk("yt-dlp 分支带 cookie", "--cookies" in cmd, str(cmd))
+chk("cookie jar 按域名分文件(不共用)", "cookies" in str(cmd) and "default.txt" not in str(cmd), str(cmd))
 server.ENGINE = "you-get"
 cmd2 = server._cmd("https://videos.example.org/watch/xyz?p=3", False, DL)
 chk("you-get 分支仍可用", cmd2[0] == "you-get", str(cmd2[:3]))
@@ -3883,6 +5398,47 @@ chk("UA: iOS Chrome 命中", ua_picks_mp4("Mozilla/5.0 (iPhone; CPU iPhone OS 17
 chk("UA: iOS Firefox 命中", ua_picks_mp4("Mozilla/5.0 (iPad; CPU OS 17_0) FxiOS/120.0"))
 chk("UA: 桌面 Chrome 不命中", not ua_picks_mp4("Mozilla/5.0 (Windows NT 10.0) Chrome/120.0"))
 chk("UA: 安卓 Chrome 不命中", not ua_picks_mp4("Mozilla/5.0 (Linux; Android 14) Chrome/120.0 Mobile"))
+
+# 关键全局必须存在(防止"以为改了其实没改"——2026-10-21 踩过 _info_cache 漏声明的坑)
+for gname in ("_info_cache", "_ops_log", "_view_cache", "_lib_lock", "_queue_lock",
+               "STATUS_CODE", "COOKIE_FILE", "QUEUE_FILE", "LIB_FILE", "TASKS_FILE",
+               "BIND", "SESSION_COOKIE", "ENGINE", "COOKIE_FILE"):
+    chk(f"全局 {gname} 已定义", hasattr(server, gname), "缺失!")
+
+# 关键函数必须存在
+for fname in ("fetch_video_info", "browse_dir", "safe_dir_path", "safe_media_path",
+              "cookie_pairs", "host_of", "write_cookie_jar", "hint_for", "log_op",
+              "universal_copy", "probe_meta", "run_ffmpeg", "atomic_write", "lan_urls",
+              "find_dupes", "storage_stats", "queue_ops", "yt_dlp_path", "ffprobe_path",
+              "cookie_for_domain", "load_cookie_map", "save_cookie_map", "mask_cookie"):
+    chk(f"函数 {fname} 存在", hasattr(server, fname), "缺失!")
+
+# 定义顺序: atomic_write 必须在 load_config 之前(否则 import 就崩)
+_src = Path(server.__file__).read_text("utf-8")
+chk("atomic_write 定义在 load_config 之前",
+    _src.index("def atomic_write(") < _src.index("def load_config():"), "顺序错了, import 会 NameError")
+
+# 分P参数剥离(2026-10-21 用户实测: 带 ?p=1 的链接只解析出 1 个分P)
+u = server.strip_page_params("https://www.bilibili.com/video/BV1x/?buvid=Z&p=1&plat_id=114&share_from=ugc")
+chk("剥离 ?p= 参数", "p=1" not in u, u)
+chk("剥离分享追踪参数(buvid/mid/plat_id)", "buvid=" not in u and "plat_id=" not in u, u)
+chk("保留路径", "/video/BV1x" in u, u)
+chk("剥掉合集 sid", "sid=" not in server.strip_page_params("https://x.com/v?sid=9&p=2"), "")
+chk("无参数不动", server.strip_page_params("https://x.com/v") == "https://x.com/v")
+chk("非 ASCII 参数值不被解码破坏",
+    "%2F" in server.strip_page_params("https://x.com/v?a=x%2Fy&p=1"),
+    server.strip_page_params("https://x.com/v?a=x%2Fy&p=1"))
+
+# 凭据管理: 增/删/查
+server.save_config_value("cookies", json.dumps({}))
+m = server.load_cookie_map()
+chk("凭据表初始为空", isinstance(m, dict) and len(m) == 0, str(m))
+
+# 解析缓存真能跑(不依赖网络: 塞一条假数据验证读写)
+server._info_cache["https://example.org/x"] = (server.time.time(), {"bvid": "t", "title": "T",
+    "owner": "o", "cover": "", "pages": [{"page": 1, "part": "p", "url": "u"}]})
+chk("解析缓存可写", "https://example.org/x" in server._info_cache)
+server._info_cache.clear()
 
 # 8) HTTP 层
 t = threading.Thread(target=server.main, daemon=True)
@@ -4040,6 +5596,175 @@ if s == 200:
     d = json.loads(b)
     chk("api/uni 成功或明确报错", d.get("ok") or d.get("error"), str(d)[:120])
 
+# ── 封面链路(2026-10-21 用户实测: 有封面却显示抽帧) ──
+# 根因: 抓官方封面时 Referer 用了图片自己的域名, 防盗链要的是**来源页**域名 -> 一律 403
+#      另外老版本把抽帧图和官方封面写同一个文件名, 抽帧图会把官方封面永远顶掉
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_cover_broken = False
+try:
+    _JPG = b"\xff\xd8\xff\xe0" + b"0" * 300
+    _REF = {"v": ""}
+
+    class _ImgHost(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.headers.get("Referer", "") != _REF["v"]:
+                self.send_response(403)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(_JPG)))
+            self.end_headers()
+            self.wfile.write(_JPG)
+
+    _img = ThreadingHTTPServer(("127.0.0.1", 0), _ImgHost)
+    _IPORT = _img.server_address[1]
+    threading.Thread(target=_img.serve_forever, daemon=True).start()
+    _IURL = f"http://127.0.0.1:{_IPORT}/cover.jpg"
+    _PAGE = f"http://127.0.0.1:{_IPORT}/video.html"
+    _REF["v"] = _PAGE
+
+    _old_cover_dir = server.COVER_DIR
+    server.COVER_DIR = HOME / "covers"
+    server.COVER_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 1) Referer 用来源页 -> 官方封面下得来
+    tgt = server.COVER_DIR / "BVref.jpg"
+    tgt.unlink(missing_ok=True)
+    _ok = server.fetch_cover("BVref", _IURL, _PAGE)
+    chk("fetch_cover 带来源页 Referer 时能下到官方封面", _ok and tgt.exists(), f"ok={_ok}")
+    # 2) Referer 不对 -> 必须失败(不能拿图片域名蒙混过关)
+    tgt2 = server.COVER_DIR / "BVbad.jpg"
+    tgt2.unlink(missing_ok=True)
+    _ok2 = server.fetch_cover("BVbad", _IURL, "http://evil.example/")
+    chk("fetch_cover Referer 不对时明确失败", (not _ok2) and (not tgt2.exists()), f"ok={_ok2}")
+
+    # 3) /api/cover 走完整链路: 官方优先
+    libc = server.load_library()
+    libc["BVcover"] = {"title": "封面测试", "owner": "", "folder": "", "cover": "",
+                        "cover_url": _IURL, "source_url": _PAGE, "parts": {}, "seq": 90}
+    server.save_library(libc)
+    s, b = get("/api/cover/BVcover")
+    chk("GET /api/cover 优先返回官方封面", s == 200 and b.startswith(b"\xff\xd8"), f"{s} {b[:12]}")
+
+    # 4) 老库迁移: 老版抽帧图占着 {bvid}.jpg -> 改名让位, 官方封面重新生效
+    (server.COVER_DIR / "BVcover.jpg").write_bytes(b"\xff\xd8old-snapshot")
+    (server.COVER_DIR / "BVcover_s.jpg").unlink(missing_ok=True)
+    s, b = get("/api/cover/BVcover?v=2")
+    chk("老库迁移: 抽帧图让位给官方封面", s == 200 and b == _JPG, f"{s} {b[:12]}")
+    chk("老库迁移: 抽帧图被改名成 _s.jpg", (server.COVER_DIR / "BVcover_s.jpg").exists())
+
+    # 5) 没有来源页 -> 图片站 403 -> 自动回退(占位图/抽帧), 不能 500
+    libc2 = server.load_library()
+    libc2["BVnoref"] = {"title": "无来源页", "owner": "", "folder": "", "cover": "",
+                         "cover_url": _IURL, "source_url": "", "parts": {}, "seq": 91}
+    server.save_library(libc2)
+    s, b = get("/api/cover/BVnoref")
+    chk("Referer 不对时 /api/cover 仍能出图(回退占位/抽帧)", s == 200 and len(b) > 0, f"{s}")
+    server.COVER_DIR = _old_cover_dir
+except Exception as _e:
+    _cover_broken = True
+    chk("封面链路测试可运行", False, f"{type(_e).__name__}: {_e}")
+
+# 6) 选帧避黑屏(需要 ffmpeg, 没有就跳过)
+if server.ffmpeg_path():
+    try:
+        import subprocess as _sp
+        _vd = DL / "blackvid"
+        _vd.mkdir(parents=True, exist_ok=True)
+        _vp = _vd / "P1.mp4"
+        if not _vp.exists():
+            _sp.run([server.ffmpeg_path(), "-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:r=25:d=4",
+                     "-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=6",
+                     "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]",
+                     "-c:v", "libx264", "-pix_fmt", "yuv420p", str(_vp)],
+                    capture_output=True, timeout=180)
+        _oldcd = server.COVER_DIR
+        server.COVER_DIR = HOME / "covers2"
+        server.COVER_DIR.mkdir(parents=True, exist_ok=True)
+        _libv = server.load_library()
+        _libv["BVblk"] = {"title": "黑屏片", "owner": "", "folder": "blackvid", "cover": "",
+                          "cover_url": "", "parts": {"1": {"name": "P1", "file": "P1.mp4", "size": 1}},
+                          "seq": 92}
+        server.save_library(_libv)
+        (server.COVER_DIR / "BVblk_s.jpg").unlink(missing_ok=True)
+        _okv = server.snapshot_thumb("BVblk")
+        _out = server.COVER_DIR / "BVblk_s.jpg"
+        _bright = -1
+        if _out.exists():
+            # 量输出图的亮度: 图输入带 -ss 会吐不出帧, 所以这里不套 _probe_bright
+            _pr = _sp.run([server.ffmpeg_path(), "-v", "error", "-i", str(_out), "-frames:v", "1",
+                           "-vf", "signalstats,metadata=print:file=-", "-f", "null", "-"],
+                          capture_output=True, timeout=60)
+            for _ln in (_pr.stdout or b"").decode("utf-8", "replace").splitlines():
+                if "YAVG" in _ln and "=" in _ln:
+                    _bright = float(_ln.split("=")[-1].strip())
+                    break
+        chk("snapshot_thumb 选到不黑的帧(前 4 秒是黑场)", _okv and _bright >= 28, f"bright={_bright}")
+        server.COVER_DIR = _oldcd
+    except Exception as _e2:
+        chk("选帧测试可运行", False, f"{type(_e2).__name__}: {_e2}")
+else:
+    print("  SKIP 选帧避黑屏测试(本机没有 ffmpeg)")
+
+# ── 批量操作(媒体库多选: 删除/收藏) ──
+# 关键: 必须**服务端一次干完**。前端循环调 /api/delete 的话, 中途断网就删一半。
+if True:
+    _bd = DL / "bulkdir"
+    _bd.mkdir(parents=True, exist_ok=True)
+    (_bd / "b1.mp4").write_bytes(b"x" * 32)
+    (_bd / "b2.mp4").write_bytes(b"x" * 32)
+    _lib = server.load_library()
+    _lib["BVbulk1"] = {"title": "批量1", "owner": "", "folder": "bulkdir", "cover": "",
+                       "cover_url": "", "parts": {"1": {"name": "P1", "file": "b1.mp4", "size": 1}},
+                       "seq": 60}
+    _lib["BVbulk2"] = {"title": "批量2", "owner": "", "folder": "bulkdir", "cover": "",
+                       "cover_url": "", "parts": {"1": {"name": "P1", "file": "b2.mp4", "size": 1}},
+                       "seq": 61}
+    server.save_library(_lib)
+
+    s, b = post("/api/bulk", {"bvid": ["BVbulk1", "BVbulk2"], "op": "fav"})
+    d = json.loads(b) if s == 200 else {}
+    chk("POST /api/bulk 批量收藏", s == 200 and len(d.get("done", [])) == 2, f"{s} {b[:120]}")
+    _l2 = server.load_library()
+    chk("批量收藏写进库了", _l2.get("BVbulk1", {}).get("fav") is True
+        and _l2.get("BVbulk2", {}).get("fav") is True, str(_l2.get("BVbulk1", {}))[:100])
+
+    s, b = post("/api/bulk", {"bvid": ["BVbulk1", "BVbulk2"], "op": "del"})
+    d = json.loads(b) if s == 200 else {}
+    chk("POST /api/bulk 批量删除", s == 200 and len(d.get("done", [])) == 2, f"{s} {b[:120]}")
+    _l3 = server.load_library()
+    chk("批量删除把条目摘了", "BVbulk1" not in _l3 and "BVbulk2" not in _l3, "还在库里")
+    chk("批量删除把文件也删了", not _bd.exists(), "文件夹还在")
+
+    s, b = post("/api/bulk", {"bvid": [], "op": "del"})
+    chk("批量空选要报错(别默默成功)", s == 400, f"{s} {b[:80]}")
+    s, b = post("/api/bulk", {"bvid": ["BVx"], "op": "乱来"})
+    chk("批量不认识的操作要报错", s == 400, f"{s} {b[:80]}")
+
+# ── 清晰度上限(用户要能选清晰度省空间; 默认仍是自动最优) ──
+# 真站实测(2026-10-21): 自动 -> 1080P, 选 720 -> 720P, 选 360 -> 360P, 编码仍是 avc1+mp4a
+if True:
+    _c0 = server._cmd("https://example.com/v", False, DL, 0)
+    _c720 = server._cmd("https://example.com/v", False, DL, 720)
+    _f0 = _c0[_c0.index("-f") + 1]
+    _f720 = _c720[_c720.index("-f") + 1]
+    chk("默认(自动)不带清晰度限制", "height" not in _f0, _f0[:100])
+    chk("选 720 时格式串带 height<=720", "height<=720" in _f720, _f720[:140])
+    chk("选 720 时仍优先 avc1+mp4a(全平台兼容不破)",
+        "avc1" in _f720 and "mp4a" in _f720, _f720[:140])
+    _c360 = server._cmd("https://example.com/v", False, DL, 360)
+    chk("选 360 时格式串带 height<=360", "height<=360" in _c360[_c360.index("-f") + 1],
+        _c360[_c360.index("-f") + 1][:120])
+    _t = server.new_task("BVqual", "清晰度", [1], {"1": "P1"}, "", "", {}, 720)
+    chk("任务记住清晰度上限", _t.get("quality") == 720, str(_t.get("quality")))
+    _t2 = server.new_task("BVqual2", "清晰度", [1], {"1": "P1"}, "", "", {})
+    chk("默认任务 quality=0(自动)", _t2.get("quality") == 0, str(_t2.get("quality")))
+
 print("\n== 结果 ==")
 print("全部通过 ✅" if ok else "有失败 ❌")
 sys.exit(0 if ok else 1)
@@ -4068,6 +5793,73 @@ cat > "$APP"/HANDOVER.md <<'MDEOF'
 - **v6.0 UI**（2026-10-20 重设计）：timeless 单色风——UI 灰阶退后、封面是唯一彩色、emoji 全换内联 SVG
   图标（`<symbol>` 库）、亮暗双主题（系统跟随，播放器恒暗）、沉浸式播放器（顶栏/控制条自动隐藏、
   双击涟漪、缓冲条显示、手势提示首次显示后消失）。JS 逻辑与 API 未变，改样式别动 hook id。
+- **v6.8 分P 修复 + 凭据管理（2026-10-21 用户实测驱动）**：
+  ① **分P 只显示 1 个的根因**：短链跟到的最终页**自带 `?p=1`**，yt-dlp 见到 `p=` 参数就只提取
+     那一P（`_type: video` 而非 `playlist`）。**修法（通用，不含站点知识）**：两段式探测 ——
+     先用剥掉分P/追踪参数的 URL 试；若只得到 1 个分P，再拿**跟完的最终地址**试
+     「剥参数」和「只剩路径」两种形态，谁分P 多听谁的。
+     另：`strip_page_params` 必须**原样保留参数值**（`parse_qs` 会把 `%2F` 解成 `/` 再
+     urlencode 回去，**破坏 URL 结构**，实测踩过）。
+  ② **站点凭据管理**：按域名分组存 cookie（`cookies` 键 + `cookies/<hash>.txt` jar），
+     域名留空 = 通用凭据；UI 有列表/掩码显示/删除/添加；下载时按链接域名自动挑。
+  ③ **端到端真机测试** `e2e_real_test.py`：用本机真 yt-dlp 解析真实短链，断言分P 数。
+- **v6.10 播放器重排 + 清晰度 + 多选（2026-10-21 用户实机截图驱动）**：
+  ① **播放器 UI 重排**：标题**独占第一行**（第二行放章节/播放列表/队列/全屏），
+     全屏按钮从控制行挪到顶栏 —— 控制行以前 7 个按钮在 360px 屏上**最后一个被挤出屏幕**。
+  ② **控制条 6 秒**，且**点一下永远是「显示出来」**：老逻辑 `touchstart` 先 `poke()` 显示、
+     280ms 后 `click` 处理器看到"已经显示"又藏一次 → 控制条只闪 **0.28 秒**（用户实测
+     "一瞬间就消失，来不及点"）。现在单击只 `poke()`，不再有"第二次点击秒收"。
+  ③ **进度条黑底可见**：轨道 `rgba(255,255,255,.30)`、填充用品牌粉渐变、
+     **滑块常驻**（以前 `not(.drag)` 时宽高为 0，等于没有滑块）。
+  ④ **横滑缩略图 350ms 自动消失**（以前只有进度条那条路会藏，画面横滑弹出来的缩略图
+     一直挂在那）。控制条隐藏时也顺手收掉。
+  ⑤ **清晰度可调**（用户要"选清晰度省空间，其余自动最优"）：下载面板加下拉
+     `自动(最优) / 2160 / 1440 / 1080 / 720 / 480 / 360 / 240`，**上限语义**
+     （yt-dlp `height<=N`，站点只有 360P 就给 360P）。后端 `_cmd(..., quality)`
+     拼 `height<=N` 过滤，**cap=0 时格式串逐字不变**（selftest 有断言）。
+     真站实测：自动→1080P、选 720→720P、选 360→360P，且仍是 avc1+mp4a（全平台兼容不破）。
+     卡片上显示实际分辨率（`part.h`），省没省空间看得见。
+  ⑥ **媒体库多选**：工具栏「多选」→ 卡片出勾选框 → 底部操作条（全选/收藏/删除/退出）。
+     批量走 `POST /api/bulk`（**服务端一次干完**，前端循环调 delete 中途断网会删一半）。
+  ⑦ **修 lost update**：`scan_videos()` 以前 load→全盘扫→save，扫描期间（手机上可能
+     几十秒）用户的标签/收藏/删除全被覆盖。已改成「只读收集 + `mutate_library()` 锁内合并」。
+- **v6.9 封面链路重做 + 播放器补漏（2026-10-21 用户实测驱动）**：
+  ① **封面**：官方封面下不下来是因为 Referer 用了**图片自己的域名**，防盗链要的是
+     **来源页域名** → 库里新增 `source_url`（下载时的网页地址），`fetch_cover(bvid, url, ref)`
+     用它当 Referer。官方封面存 `{bvid}.jpg`，**抽帧图改存 `{bvid}_s.jpg`** —— 以前两者
+     同名，抽帧图会把官方封面永远顶掉（用户明明有封面却显示抽帧）。老库自动迁移：
+     有 `cover_url` 时老图改名 `_s.jpg`，官方封面重新生效。
+  ② **抽帧避黑屏**：`snapshot_thumb` 先 `ffprobe` 拿时长，沿 12%/35%/60%/85%/5s/2s/15s/0
+     依次试，每次**先用 `_probe_bright()` 量那一帧的平均亮度**，黑（YAVG<28）就换下一个，
+     全黑就取最亮的那个点。旧逻辑死 seek 第 3 秒 → 片头黑场 = 纯黑封面。
+  ③ **缓存击穿**：封面 URL 带 `cover_rev`（官方/抽帧分开计的 mtime 版本号），换源后
+     浏览器不会继续拿 24h 旧图。
+  ④ **播放器**：控制条自动隐藏 3.2s → **5s** 且**暂停时不隐藏**；打开视频即**预热缩略图**
+     雪碧图（以前只有拖进度条才生成，章节面板打开永远是黑框）；章节缩略图有
+     雪碧图 → 封面 → 序号三级 fallback，**绝不给黑框**；**画面上横滑**也出缩略图
+     （`showThumbAt()` 抽成进度条/手势共用）。
+  ⑤ **播放列表面板**（用户要 MPC-HC 那种）：播放器顶栏 ≡ 打开，面板 = 当前播放列表
+     `FLAT`，每项带缩略图 + 名称 + P 号，点击即切；来源可切「全库 / 我的队列」。
+  ⑥ **分P 单独删除**：分P 行加 🗑 → `POST /api/delete {rel}` 删文件，**后端同步把该分P
+     从库里摘掉**（否则界面显示 0P 但文件已经没了）。
+  ⑦ **修了两个真 bug**：`data-uni`/`data-redl` 改成独立属性后事件处理还在 `split("|")`
+     → 「生成通用版」永远失败；`$('pQMode')` 按钮挪走后绑定代码还在 → 抛错让**整个 JS
+     停摆**（媒体库都不渲染）。
+- **v6.7 全面加固（智障用户标准 · 2026-10-21）**：
+  两路并行代码审计（前端 2079 行 / 后端 1902 行）后按"普通用户会乱点"的标准修：
+  ① **失败路径全有出口**：播放器 error 态（黑屏给提示+重试+返回）、查重/磁盘/目录
+     失败不再永远卡"扫描中"、目录被删自动回退父目录、任务取消失败恢复按钮
+  ② **取消任务不再死锁**（`_task_lock` 改 RLock + 落盘挪出锁区）
+  ③ **worker 永不自杀**（整个循环包 try/except，任何异常只记日志不杀循环）
+  ④ **数据不丢**：原子写改唯一临时名+fsync、`mutate_library()` 单一写入口消灭
+     lost update、库损坏时**报错并备份**而不是静默清空
+  ⑤ **子进程组**：取消任务杀整棵树（Windows 用 taskkill /T /F），不留 ffmpeg 孤儿
+  ⑥ **全局异常兜底**：任何未捕获异常都变成可读 JSON，浏览器不再显示"连接重置"
+  ⑦ **安全**：SSRF 拦截（拒绝内网/元数据地址）、yt-dlp 选项注入拦截、
+     `safe_media_path("")` 拒绝（原来会放行下载目录本身）
+  ⑧ **响应式**：320/390/1440px 三档零横向溢出（实测 scrollWidth == 视口宽）；
+     顶栏与页签栏不再重叠；触摸目标命中区扩到 44px；`--tx3` 对比度升到 AA
+  ⑨ **重下不丢文件**：先备份原文件，下载成功才替换，失败自动还原
 - **v6.6 PWA / 自启 / iOS 兼容**（2026-10-21）：
   ① **PWA**（点图标即用）：`manifest.json` + `sw.js` + `icons/`（`tools/make-icons.mjs`
      纯 Node 手写 PNG 编码器生成，零依赖）→ 浏览器「添加到主屏幕」后当 App 用。
@@ -4233,21 +6025,68 @@ exclude_dirs =         # 扫描排除（逗号分隔的路径片段，命中即�
 11. **safe_media_path 的 startswith 漏洞**（v6 修）：字符串前缀匹配会放行 `/downloads-evil` 这类同前缀兄弟目录 → 必须用 `Path.is_relative_to` 组件级比较。
 12. **install.sh 手工同步屎山**（v6 治）：Kimi 时代 start.bat heredoc 被重复追加 6 遍，后段覆盖前段、中间全是尸体 → 已改由 `sync_install.mjs` 生成，禁止手工编辑 install.sh。
 13. **前端 XSS**（v6 修）：innerHTML 拼接标题/文件名从未转义，标题可注入脚本 → 全部插值点走 `esc()`；任务重试按钮原 `data-retry='${JSON}'` 属性内嵌 JSON 也会被引号击穿，已改存 id 回查数组。
+14. **封面 Referer 用错域名**（v6.9 修）：防盗链认的是**来源页**域名，代码里写成了图片自己的
+    域名 → 官方封面一律 403 → 用户看到的是抽帧图。**通用解**：Referer 用「下载时那个网页地址」
+    的域名（库里存 `source_url`），不是硬编码任何站点。
+15. **抽帧图和官方封面同名**（v6.9 修）：老版 `{bvid}.jpg` 谁先写谁赢，抽帧图一旦落地，
+    官方封面**永远**下不下来。现在官方 = `{bvid}.jpg`，抽帧 = `{bvid}_s.jpg`，互不打架。
+16. **TDZ：`const` 声明前用它 = 整页暴毙**（v6.9 修）：`const HAS_PIP` 写在
+    `const v` 前面三行。浏览器**支持画中画就短路没事**（`||` 短路），不支持的设备
+    直接 ReferenceError → 页面全白。**声明顺序 = 依赖顺序**。
+17. **模板串漏进纯 HTML**（v6.9 修）：`<script>` 之外的 HTML 里写 `${t('x')}` → 界面
+    显示字面量。纯 HTML 要用 `data-i18n="x"`。
+19. **后台扫描 = lost update**（v6.10 修）：`scan_videos()` 以前 load → 全盘 rglob →
+    save，手机上扫描几十秒，期间用户打的标签/收藏**全被覆盖**。凡是"读-算-写"里
+    **算的过程很慢**的，都不能直接 load→save，必须走 `mutate_library()`。
+20. **touchstart 显示 + click 再藏**（v6.10 修）：控制条"只闪 0.28 秒"的真凶。
+    单击路径上**只能有一个地方决定显隐**。
+18. **`$('x').onclick` 指向已删元素 = 整个 JS 停摆**（v6.9 修）：一个 null 的 onclick
+    抛错，后面的代码**全不执行**，表现是「页面什么都不渲染」而不是「那个按钮坏了」。
+    **每次改完 HTML 必跑 id 悬空检查**（扫 `$('x')` 引用的 id 是否还在 HTML 里）。
 
 ## 7. 测试 SOP
 
 ```bash
-# 服务端
-python3 -m py_compile server.py
-# 前端：抽 script 机检（本仓库实践）
+# 1) 语法闸
+python3 -m py_compile server.py selftest.py chaos_test.py fake_yt_dlp_test.py
 sed -n '/<script>/,/<\/script>/p' index.html | sed '1d;$d' > /tmp/check.js
 node --check /tmp/check.js
-# 安装器
-bash -n install.sh
+
+# 2) 四套自动化测试(全离线, 不碰用户数据)
+python3 selftest.py          # 161 项: 端点/白名单/全局存在性/队列/路径/UA/封面链路/批量/清晰度
+python3 chaos_test.py        # 68 项: 脏数据/并发/死锁/穿越/注入/SSRF/20端点不5xx
+python3 fake_yt_dlp_test.py  # 17 项: 假 yt-dlp 真跑解析链路/缓存/null不崩
 ```
 
-**假引擎回归法**：写个假 `yutto`/`you-get` shell 脚本（秒建文件 / 指定 P 失败 / sleep 模拟卡死），
-设假 HOME 环境变量启动 server.py，urllib 打各端点断言。本工具链全部功能（队列/恢复/强杀/扫描/流/导出）均可无网自测。
+**规则**：改任何代码 → 三套测试全绿才能提交。
+
+**改前端(index.html)额外必跑两道闸**（`node --check` 只查语法，下面这些它一个都查不出来）：
+
+```bash
+node frontcheck.mjs   # 五道静态闸: id 悬空 / 未声明标识符 / 模板串泄漏 / 语法 / 缺图标
+node smoke.mjs        # 加载期冒烟: 用 DOM 桩真跑一遍脚本, 谁抛错报谁
+```
+
+- **闸1 id 悬空**：`$('x')` 引用的 id 在 HTML 里没了 → 抛 null 错 → **后面所有代码都不执行**，
+  表现是「页面什么都不渲染」，不是「那个按钮坏了」。
+- **闸2 未声明标识符**：少写一行 `const all = ...` → ReferenceError → 整页 JS 暴毙。
+- **闸3 模板串泄漏**：纯 HTML 区（`<script>` 之前）出现 `${...}` → 界面上直接显示
+  `${t('x')}` 字面量（按钮文字变成乱码，但按钮还能点 → 更难发现）。
+- **闸4 语法**：等价于 `node --check`。
+
+**为什么要有这两道闸**：2026-10-21 一天之内，前端连续炸了三次 ——
+① `$('pQMode')` 指向已删按钮（整页停摆）；② `renderChapList` 少写一行 `const all`
+（整页停摆）；③ `const HAS_PIP` 在 `const v` **前面三行**用了 `v`（TDZ，
+**浏览器不支持画中画就整页暴毙**，支持的话短路没事 —— 这种雷最难查）。
+```
+另外 `smoke.mjs` 是**项目自带的**（纯 Node，无依赖），不用 playwright 也能跑。测试发现的问题**当场修**，不许留"下次再说"。
+
+**别再犯的错（2026-10-21 血泪）**：
+- 用编辑工具改代码后**必须 grep 验证真的写进去了** —— 我有过三次"以为改了其实没改"
+  （`_info_cache` 声明、解析缓存逻辑、i18n 重复行），其中一次让用户的手机直接解析失败
+- 改完立刻跑 `py_compile` + `node --check`，别靠肉眼
+- 换行符会混（CRLF/LF），编辑工具匹配不上就换 node 脚本按行改
+- `worker` 里的循环体曾被误拆成 `_worker_once()` 却留着 `continue` → 整个下载循环语法坏掉
 
 ## 8. 常见维护任务
 
@@ -4388,6 +6227,147 @@ self.addEventListener('fetch', e => {
 });
 SWEOF
 
+mkdir -p "$APP/icons"
+cat > "$APP/icons/icon-192.png.b64" <<'Iicon-192.pngB64'
+iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAYAAABS3GwHAAADEElEQVR42u3cQW4iQRBFwdq2uC23
+4awsaHGB7h1k6QXS21u/MmZsjzRrbfQ5jsdHe7R8HLcgcfACwtErjcGDKgnBAyoJwYMpCcEDKQvB
+oyiLwGMoicADKAvB6MoiMLayCIysLALjKovAqEojMKiyAIypLAIjKovAeEojMJyyAIymNAKDKQvA
+WEojMJSyAIykNAIDKQvAOEojMIwAkIoAjKI0AoMIAAkAKQbAGEojMIQAkACQAPhJ7+fr7zkAbwGA
+ADA6AAAYHQAAjA5ADIDRBYDRAQDA6AAAMGZ0h9lCBgAAAAAAAAAAAAAAAI4GAAAEAAACAAABAIAA
+AEAAACAAABAAAAgAAAQAAAIAAAEAgAAAQAAAIAAAEAAACAAABAAA8t4A3H5tjhaA9GPZoREAF39a
+2QKA/F/X9gAg//2qTQDI/8BmFwDyv7GwDQD5X9nZBwAABIB/tBEAUQAQAJAHAAEAeQAQAJAHAAEA
+eQAQAACA3QAoA4AAgDwACADIA4AAgDwACADIA4AAgDwACAAAwJ4AlAFAAEAeAAQA5AFAAEAeAAQA
+5AFAAEAeAAQAAGBnAMoAIAAgDwACAPIAIAAgDwACAPIAIAAgDwACAACwPwBlABAAkAcAAQB5ABAA
+kAcAAQB5ABAAkAcAAQAAeBcAygAgACAPAAIA8gAgACAPAAIA8gAgACAPAAIAAPBeAJQBQABAHgAE
+GwKY/KA7ApiOYOrXDoAAMIgAMIgAMIgAAEAAACAAABAAAAgAAAQAAAIAAAEAgAAAQAAAIAAAEAAA
+CAAABAAAAgAAAQCAAABAAAAAAAAAAADAnP97x2F6CwAEgNEBAMDoABQBfD9GBwAAowMAgNEBAMDo
+AAAgFQJAABhCAEgASEEAECh9/AAIAIMIACkKAAKljx8AAWAYlQFAoPTxA6A8AAiUPn4AlAcAgdLH
+D4DyACBQ+vgBUB4ABEofPwTKHz8Eyh8/AMoDgEDp44dA+eOHQPnjh0D544dA+eMHQfnDh0COHwI5
+fhDk8EGQwwdBDh8EOXwY5OiB0OiDPwE/DxWGK7GrlgAAAABJRU5ErkJggg==Iicon-192.pngB64
+base64 -d "$APP/icons/icon-192.png.b64" > "$APP/icons/icon-192.png" 2>/dev/null && rm -f "$APP/icons/icon-192.png.b64"
+cat > "$APP/icons/icon-512.png.b64" <<'Iicon-512.pngB64'
+iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAYAAAD0eNT6AAAM8ElEQVR42u3bMQ7iSBBAUacWt+U2
+PisBiJjABAi567+W3gVMdfXfnZltc5Y/+357Avyb7es4HnEA8eA4HnoAYeB47AEQBY4HHwBB4Hj0
+ARADjkcfADHgePQBEAOORx8AMeB4+AEQAo6HHwAh4Hj4ARACjocfACHg4Tf0AAgBDz8ACAEPPwBC
+wPHwAyAEHI8/ACLA8fADIAQcjz8AIsDx8AMgBByPPwAiwPHwAyAEHI8/ACLA8fgDIAI8/AYLACHg
+8QcAEeDxBwAR4PEHABHg8QcAEeDxBwAR4PEHABHg4QcAIeDxBwAR4PEHABEgAABAAHj8AUAEePwB
+QAR4/AEgGwF+ZACIRYAfFwBiEeBHBYBYBPgxASAYAX5IAIgFgB8RAGIR4McDgFgE+NEAIBgBfjAA
+iAWAHwsAYhHgRwKAYAT4gQAgFgB+HACIRYAfBQCCEeAHAYBYAPgxACAWAX4EAAhGgB8AAGIB4OMD
+QDACfHgAiAWAjw4AwQjwwQEgFgA+NgAEI8CHBoBYAPjIABCMAB8YAGIB4OMCQDACfFgAiAWAjwoA
+wQjwQQEgFgA+JgAEI8CHBIBYAPiIABCMAB8QAAQAADA9AHw8AAhGgA8HAAIAAJgeAD4aAAQjwAcD
+AAEAAEwPAB8LAIIR4EMBgAAAAKYHgI8EAMEI8IEAQAAAAAIAABgXAD4OAAQjwIcBAAEAAAgAAEAA
+AADrB4CPAgDBCPBBAEAAAAACAAAQAACAAAAAFgwAHwMAghHgQwCAAAAABAAAIAD48Lgf/Ji5wo7A
+jhAALrfLDXYEdoQAcLldbrAj7AhzJQBcbpcb7Ag7AgHgcrvcYEfYEQgAl9vlBjvCjkAAuNwuN9gR
+dgQCwOV2ucGOsCMEAC63yw12hB0hAHC5XW6wI+wIAYDL7XKDHWFHDAoAH8HldrnBjrAjBAAut8sN
+doQdIQBwuV1usCPsCAGAy+1ygx1hRwgAXG6XG+wIO0IAuNy43GBH2BECwOXG5QY7wo4QAC43Ljd2
+BHaEAHC5DTVgV9qVAsBQG2rArrQrBYChBrAr7UoBYKgB7Eq7UgAYagC7EgFgqAHsSgSAoQawKxEA
+hhrArkQAGGoAuxIBYKgB7EoBgKEGsCsFAIYawK4UABhqALtSAGCoAexKAWCoDTWAXSkADLWhBrAr
+BYChNtSAXWlXCgBDbagBu9KuFACG2lADdqVdKQAMNYBdaVcKAEMNYFfalQLAUAPYlb6nADDUAHYl
+AsBQA9iVCABDDWBXIgAMNYBdiQAw1AB2pQDAUAPYlQIAQw1gVwoADDWAXSkAMNQAdqUAMNSGGsCu
+FACG2lAD2JUCwFAbagC7UgAYakMN2JV2pQAw1IYasCvtSgFgqH1PwK60KwWAoQawK+1KAWCoAexK
+u1IAGGoAuxIBYKgB7EoEgKEGsCsRAIYawK5EABhqALtSAGCoAexKAYChBrArBQCGGsCuFAAYagC7
+UgBgqAHsSgFgqA01gF0pAAy1oQawKwWAoTbUgF1pVwoAQ22oAbvSrhQAhtr3BOxKu1IAGGoAu9Ku
+FACGGsCutCsFgKEGsCsRAIYawK5EABhqALsSAWCoAexKBIChBrArBYAPYagB7EoBgKEGsCsFAIZ6
+8d/GdwC7EgFgqAUAYFciAKgsHN8CQAAQ/S8O3wNAABD9X46+CYAAIPpnjr4LgAAg+peOfBtAAPgI
+RP/Wse8DCAAQAAACACr/7tg3AgQABANABAACAKIBIAIAAQDRABABgACAaACIAEAAQDQARAAgAEAA
+AAgAqASACAAEAEQDQAQAAgCiASACAAEA0QAQAYAAgGgAiABAAEA0AEQAIABAAAAIAKgEgAgABABE
+A0AEAAIAogEgAgABANEAEAGAAIBoAIgAQABANABEACAAQAAACACoBIAIAAQARANABAACAKIBIAIA
+AQDRABABgACAaACIAEAAQDQARAAgAEAAAAgAqASACAAEAEQDQAQAAgCiASACAAEA0QAQAYAAgGgA
+iABAAEA0AEQAIABAAAAIAKgEgAgABABEA0AEAAIAogEgAgABANEAEAGAAIBoAIgAQABANABEACAA
+QAAACACoBIAIAAQARANABAACAKIBIAIAAQDRABABgACAaACIAEAAQDQARAAgAEAAAAgAqASACAAE
+AEQDQAQAAgCiASACAAEA0QAQAYAAgGgAiABAAEA0AEQAIABAAAAIAKgEgAgABABEA0AEAAIAogEg
+AgABANEAEAGAAIBoAIgAQABANABEACAAQAAACAAEgAgAEAAIABEACAAQACIAEAAgAEQAIABAAIgA
+QACAABABgAAAASAAAAEAAkAEAAIABIAIAAQACAARAAgAEAAiABAAIABEACAAQACIAEAAgAAQAIAA
+AAEgAgABAAJABAACAASACAAEAAIAEQAIAAQAIgAEgI+AAEAEgAAAAYAAAAEAAkAEAAIABIAIAAQA
+CAARAAgAEAAiABAAIABEACAAQACIAEAAgAAQAIAAAAEgAgABAAJABAACAASACAAEAAgAEQAIABAA
+IgAQACAARAAgABAACABAACAAEAGAAEAAIAJAAIAAQASAAAABgAgAAQACABEAAgAEACIABAAIAAQA
+CAAQAIgAEAAgAEQAIABAAIgAQACAABABgAAAASACAAEAAkAEAAIABIAAAAQACAARAAgAEAAiABAA
+CABEACAAEACIAEAAIAAQASAAQAAgAkAAgABAAIAAAAGACAABAAIAEQACAAQAIgAEAAgARAAIABAA
+iAAQACAAEAEgAEAAIABAAIAAQASAAAABgAgAAQACALMNAgAEgAgABAAIABEACADwSIoAQAAgABAA
+gAC45iPjewoA3Bv30W8uAAw1AgB3x330ewsAQw1gV9qVAsBQA9iVCABDDWBXIgAMNYBdiQAw1AB2
+JQLAUAPYlQIAQw1gVwoADDWAXSkAMNQAdqUAwFAD2JUCAEMNYFcKAENtqAHsSgFgqA01gF0pAAy1
+oQbsSrtSABhqQw3YlXalADDUhhqwK+1KAWCoAexKu1IAGGoAu9KuFACGGsCuRAAYagC7EgFgqAHs
+SgSAoQawKxEAhhrArhQAPoKhBrArBQCGGsCuFAAYagC7UgBgqAHsSgGAoQawKwWAoTbUAHalADDU
+hhrArhQAhtpQA3alXSkADLWhBuxKu1IAGGpDDdiVdqUAMNQAdqVdKQAMNYBdaVcKAEMNYFciAAw1
+gF2JADDUAHYlAsBQA9iVCABDDWBXIgAMNYBdKQAw1AB2pQDAUAPYlQIAQw1gVwoADDWAXSkADLWh
+BrArBYChNtQAdqUAMNSGGrAr7UoBYKgNNWBX2pUCwFAbasCutCsFgKEGsCvtSgFgqAHsSrtSABhq
+ALvS9xQAhhrArkQAGGoAuxIBYKgB7EoEgKEGsCsRAIYawK4UABhqALtSAGCoAexKAYChBrArBQCG
+GsCuFACG2lAD2JUCwFDjcoMdYUcIAJcblxs7AjtCALjcuNzYEdgRAsDlxuXGjsCOEAAuNy43dgR2
+hABwuV1usCOwIwSAy+1ygx2BuRIALrfLDXaEHYEAcLldbrAj7Ai+C4D38SFcbpcb7Ag7QgDgcrvc
+YEfYEQIAl9vlBjvCjhAAuNwuN9gRdoQAwOV2ucGOsCMEgMuNyw12hB0hAFxuXG5wp+0IAeBy43Jj
+R2BHCACXG5cbOwI7QgC43Ljc2BHYEQIAABAAAIAAAAAEAAAgAACA0wAQAQAQfPwFAAAIAABAAAAA
+AgAAEAAAwMIBIAIAIPj4CwAAEAAAgAAAAAQAADAnAEQAAAQffwEAAAIAABAAAMDYABABABB8/AUA
+AAgAAKASACIAAIKPvwAAAAEAAFQCQAQAQPDxFwAAIAAAgEoAiAAACD7+AgAABAAAUAkAEQAAwcdf
+AABANABEAAAEH38BAADRABABABB8/AUAAEQDQAQAQPDxFwAAEA0AEQAAwcdfAABANABEAAAEH38B
+AADRABABABB8/AUAAEQDQAQAQPDxFwAAEA0AEQAAwcdfBABA9PEXAAAQDQARAADBx18EAED08RcA
+ABANABEAAMHHXwQAQPTxFwAAEA0AEQAAwcdfBABA9PEXAQAQffwFAABEA0AEAEDw8RcBABB9/EUA
+AEQffxEAANHHXwQAQPTxFwEAEH38RQAAHv/wMQAACAARAAAefxEAAB5/IQAAHn4RAAAefxEAAB5/
+EQAAHn8RAAAefxEAAB5/EQAAHn8hAAAefhEAAB5/EQAAHn8hAICH3xEBAHj8HSEAgIffEQEAePwd
+IQCAh98RAQB4/B0hAICH3xECAHj4HSEAgIffEQIAePgdIQCAh98RAgB4+B0hAODhdxwhAODhdxwx
+AODRdxwxAODRdxwxAODRdxwxAODRdxxBAODBdxxRAOCxdxxhAOChv8h5AS9pcdjcI+dTAAAAAElF
+TkSuQmCCIicon-512.pngB64
+base64 -d "$APP/icons/icon-512.png.b64" > "$APP/icons/icon-512.png" 2>/dev/null && rm -f "$APP/icons/icon-512.png.b64"
+cat > "$APP/icons/icon-maskable-512.png.b64" <<'Iicon-maskable-512.pngB64'
+iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAYAAAD0eNT6AAAJKklEQVR42u3bwZGkMBQFQV0VeIs3
+2MoB+cAFQpWHdEC/N17tTM+Y83gAgJbhEQBAAAAAAgAAEAAAgAAAAAQAACAAAAABAAAIAABAAAAA
+AgAAEAAAgAAAAAQAACAAAAABAAAIAABAAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAA
+BAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAA
+CAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAAAgAAEAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAA
+EAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAABICHAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAA
+AAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAEAAeAQAEAAAgAAAAAQAACAAAAABAAAIAABAAAAA
+AgAAEAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAA
+BAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAA
+CAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAA
+EAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAHgIQBAAAAAAgAAEAAAgAAAAAQAACAA
+AAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAAABAAAIAAAQAB4BAAQAACAAAAABAAAIAABAAAAA
+AgAAEAAAgAAAAAQAACAAAAABAC/d5+UdAAQAAgAAAUAiAEQAgAAgGgAiAEAAEA0AEQAgAIgGgAgA
+EABEA0AEAAgAogEgAgAB4BEQAAACACoBIAIAAQCbDfvX3Mi9QQCAQcC9QQCAQcC9QQCAQcC9QQCA
+QcC9QQCAQcC9QQCAQXBv9wYBgEEwCO7t3iAAMAgGwb3dGwQABsEguLd7gwDAIBgE93ZvEAAYBIPg
+3u6NAACDYBDc270RAGAQDIJ7uzcCAAyCQXBv90YAgEEwCO7t3ggAMAgGwb3dCAEABsEguDcIADAI
+uDcIANhwENzDZ8h7IgAg+j9CNxEAIAAg+iNhdxEAIAAg+jthtxEAIAAg+qUw9xEAIADAt8IRACAA
+oBIARkEAgAAAAYAAAAEAlQAwDAIABABEA8A4CAAQABANAAMhAEAAQDQAjIQAAAEA0QAwFAIABABE
+A8BYCAAQACAAEAAgAKASAAZDAIAAgGgAGA0BAAIAogFgOAQACACIBoDxEAAgACAaAAZEAIAAgGgA
+GBEBAAIAoqHgXoAAgOhPCtwMEAAQ/VWBuwECAKLfFXA7QABA9MuC7gcIAIj+tYAbAgIAon8u6I6A
+AAABACAAoBAAIgAQABANABEACACIBoAIAAQARANABAACAKIBIAIAAQDRABABgAAAAQAgAKASACIA
+EAAQDQARAAgAiAaACAAEAEQDQAQAAgCiASACAAEA0QAQAYAAAAEAIAAQACIAQAAgAEQAIABAAIgA
+QACAABABgAAAASACAAEAAkAEAAIABIAAAAQACAARAAgAEAAiABAAIABEACAAQACIAEAAgAAQAYAA
+AAEgAgABAAJAAAACAASACAAEAAgAEQAIABAAIgAQAAgARAAgABAAiAAQAB4BAYAIAAEAAgABAAIA
+BIAIAAQAGHYR4DMklBAAIABEgM+Qf5MIABAAIkAAgAAAASACBAAIABAAIkAAgAAAASAABAAIABAA
+IkAAgAAAASACBAAIABAAIkAAgABAABhfESAAQAAgABABAgAEAAIAESAAQAAgABAAAgAEAAIAESAA
+QAAgAGhGgABAAHgEBADBCBAACACPgAAgGAECAAHgERAABCNAACAAPAICgGAECAAEgEdAACAABAAC
+AAQAhQgQAAgAj4AA4OcRIHBAAIAACEaAAAABAAIgGAECAAQACIBgBAgAEAAgAIIRIABAAIAAEAAC
+AAQAAoBCBAgAEAAgAIIRIABAAIAACEaAAAABAAIgGAECAAQACIBgBAgAEAAgAIIRIABAAIAAEAAC
+AAQAAoBCBAgAEAAgAIIRIABAAIAACEaAAAABAAIgGAECAAQACAAEAAgABAAIABAAIBSMLCAAwHCK
+AEAAIAAQAYAAQAAgAkAAgABABIAAAAGACAABAAIAEQACAAQAAgAEAAgARAAIABAAiAAQAACAAAAA
+BAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAACAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAA
+CAAAQAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAEAAeAQAEAAAgAAAAAQAACAAAQAAAAAIAABAA
+AIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAIAABAAAAAAgAAEAAAgAAAAAQAACAA
+AAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAAABAAAIAAAQAACAAAAABAAAIAAAAAEAAAgAAEAA
+AAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAAAgAAAAAQAACAAAQAAAAAIAABAAAIAA
+AAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAgAABAAAAAAgAAEAAAgAAAAAQAACAAAAAB
+AAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAAABAAAIAABAAACAAPAIACAAAAABAAAIAABAAAAAAgAA
+EAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAEAAAAACAAAQAACAAAAABAAA
+IAAAAAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAIAAAAAEAAAgAAAAAQAACAAA
+QAAAAAIAABAAAIAAAAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAABAAAIAABAAAAAAgAAEAAA
+gAAAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAAABAAACAABoWXNs2z/UdKfJAAAA
+AElFTkSuQmCCIicon-maskable-512.pngB64
+base64 -d "$APP/icons/icon-maskable-512.png.b64" > "$APP/icons/icon-maskable-512.png" 2>/dev/null && rm -f "$APP/icons/icon-maskable-512.png.b64"
+cat > "$APP/icons/apple-touch-icon.png.b64" <<'Iapple-touch-icon.pngB64'
+iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAYAAAA9zQYyAAACyUlEQVR42u3cMW7CUABEQbeI2+Y2
+OSsFKCegilmex9Lr0f5Btik4jvHrdrs/tdXhghV6iAU3xIIbZIENsvKwHZAysB2KEqgdhDKwja8M
+aqMrg9rYyqA2sjKojasMaqMqg9qYyqA2olKoDagMaOMpg9poSqE2mDKgjaUUakMpA9pISqE2kDKg
+jaMUasMIaGkRtFGUQm0QAS0tgjaGUqgNIaAloCWgpV3Qj5/fj3XVQ77S5kADDbRxgQYaaKDPAG1c
+oIE2LtBAvx/Xz069LwzQAhpoAQ20gAZaQAMNNNACGmgBDbSABlpAAw000AIaaAENtIAGWkADDTTQ
+AhpoAQ20gAYaaKCBBhpoAQ30+88DJdBAC+jlwwCzEdCe4YEu3y6hADr3/AcG0LkXGjiA9oYuoIEW
+0CeBhhroHGiogc6BhhroHGiogc6BhhroHGiogQZaQC+DhhroHGiogc6BhhroHGiogc6BhhroHGio
+gQZaQC+DhhroHGiogc6BhhroHGiogc6BhhroHGiogQZaQC+DhhroHGiogc6BhhroHGiogc6Bhhro
+HGiogQZaQC+DhhroHGiogc6BhhroHGiogc6BhhroHGiogQZaQC+DhhroHGiogc6BhhroHGiogc6B
+hhroHGioR0GvHRjQrTMF+otAr6IG2i31Mo9tQAtooAU00AIaaAENNNBAC2igBTTQAhpoAQ000EAL
+aKAFNNACGmgBDTTQQAtooAU00AIaaKCBBhpooAX0N4H2Ry02BxpomwMNdBb032VcoIE2LtBAAw10
+DLQEtAS0gJaAloCW/g801EphBlpAS8ugoVYKM9ACWloGDbVSmIFWDjTUSmEGWjnQUCuFGWjlQEOt
+FGaolcMMtHKgoVYKM9TKYYZaOcxQK4cZauUwQ60cZqiVwwy1cpjBVg4y1EpiBls5yGArCRlsJSHD
+rSRiuCE+63oBVh/GAvQvGgEAAAAASUVORK5CYII=Iapple-touch-icon.pngB64
+base64 -d "$APP/icons/apple-touch-icon.png.b64" > "$APP/icons/apple-touch-icon.png" 2>/dev/null && rm -f "$APP/icons/apple-touch-icon.png.b64"
 
 echo "════ 4/4 完成 ════"
 # 开机自启(Termux:Boot): 装了 Termux:Boot 就自动配, 没装就提示一句

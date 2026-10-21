@@ -38,6 +38,7 @@ server.LIB_FILE = HOME / "library.json"
 server.TASKS_FILE = HOME / "tasks.json"
 server.QUEUE_FILE = HOME / "playlist.json"
 server.COOKIE_FILE = HOME / "cookies.txt"
+server.CONFIG_FILE = HOME / "config.ini"      # 隔离! 否则测试会写坏用户真实的 config.ini
 # config.ini 也隔离: import 时 load_config() 会在项目目录生成一个(若原本不存在)→ 删掉,
 # 之后所有配置读写都指向临时 HOME, 用户真实 config.ini 一个字节都不碰
 server.CONFIG_FILE = HOME / "config.ini"
@@ -117,13 +118,15 @@ chk("diagnostics 有 hints 列表", isinstance(dg.get("hints"), list))
 # 7b) 引擎分支(2026-10-21: 默认换 yt-dlp, you-get 保留兜底)
 old_engine = server.ENGINE
 old_cookie = server.SESSION_COOKIE
-server.SESSION_COOKIE = "K=V; K2=V2"
+server.save_config_value("cookie", "K=V; K2=V2")          # 真写进 config(内存+文件)
+server.save_config_value("cookies", json.dumps({"videos.example.org": "AK=AV; BK=BV"}))
 server.ENGINE = "yt-dlp"
 cmd = server._cmd("https://videos.example.org/watch/xyz?p=3", False, DL)
 chk("yt-dlp 分支用 yt-dlp", cmd[0] == "yt-dlp", str(cmd[:3]))
 chk("yt-dlp 分支带 info.json", "--write-info-json" in cmd, str(cmd))
 chk("yt-dlp 分支按 P 命名", "P3.%(ext)s" in " ".join(cmd), str(cmd))
 chk("yt-dlp 分支带 cookie", "--cookies" in cmd, str(cmd))
+chk("cookie jar 按域名分文件(不共用)", "cookies" in str(cmd) and "default.txt" not in str(cmd), str(cmd))
 server.ENGINE = "you-get"
 cmd2 = server._cmd("https://videos.example.org/watch/xyz?p=3", False, DL)
 chk("you-get 分支仍可用", cmd2[0] == "you-get", str(cmd2[:3]))
@@ -173,6 +176,47 @@ chk("UA: iOS Chrome 命中", ua_picks_mp4("Mozilla/5.0 (iPhone; CPU iPhone OS 17
 chk("UA: iOS Firefox 命中", ua_picks_mp4("Mozilla/5.0 (iPad; CPU OS 17_0) FxiOS/120.0"))
 chk("UA: 桌面 Chrome 不命中", not ua_picks_mp4("Mozilla/5.0 (Windows NT 10.0) Chrome/120.0"))
 chk("UA: 安卓 Chrome 不命中", not ua_picks_mp4("Mozilla/5.0 (Linux; Android 14) Chrome/120.0 Mobile"))
+
+# 关键全局必须存在(防止"以为改了其实没改"——2026-10-21 踩过 _info_cache 漏声明的坑)
+for gname in ("_info_cache", "_ops_log", "_view_cache", "_lib_lock", "_queue_lock",
+               "STATUS_CODE", "COOKIE_FILE", "QUEUE_FILE", "LIB_FILE", "TASKS_FILE",
+               "BIND", "SESSION_COOKIE", "ENGINE", "COOKIE_FILE"):
+    chk(f"全局 {gname} 已定义", hasattr(server, gname), "缺失!")
+
+# 关键函数必须存在
+for fname in ("fetch_video_info", "browse_dir", "safe_dir_path", "safe_media_path",
+              "cookie_pairs", "host_of", "write_cookie_jar", "hint_for", "log_op",
+              "universal_copy", "probe_meta", "run_ffmpeg", "atomic_write", "lan_urls",
+              "find_dupes", "storage_stats", "queue_ops", "yt_dlp_path", "ffprobe_path",
+              "cookie_for_domain", "load_cookie_map", "save_cookie_map", "mask_cookie"):
+    chk(f"函数 {fname} 存在", hasattr(server, fname), "缺失!")
+
+# 定义顺序: atomic_write 必须在 load_config 之前(否则 import 就崩)
+_src = Path(server.__file__).read_text("utf-8")
+chk("atomic_write 定义在 load_config 之前",
+    _src.index("def atomic_write(") < _src.index("def load_config():"), "顺序错了, import 会 NameError")
+
+# 分P参数剥离(2026-10-21 用户实测: 带 ?p=1 的链接只解析出 1 个分P)
+u = server.strip_page_params("https://www.bilibili.com/video/BV1x/?buvid=Z&p=1&plat_id=114&share_from=ugc")
+chk("剥离 ?p= 参数", "p=1" not in u, u)
+chk("剥离分享追踪参数(buvid/mid/plat_id)", "buvid=" not in u and "plat_id=" not in u, u)
+chk("保留路径", "/video/BV1x" in u, u)
+chk("剥掉合集 sid", "sid=" not in server.strip_page_params("https://x.com/v?sid=9&p=2"), "")
+chk("无参数不动", server.strip_page_params("https://x.com/v") == "https://x.com/v")
+chk("非 ASCII 参数值不被解码破坏",
+    "%2F" in server.strip_page_params("https://x.com/v?a=x%2Fy&p=1"),
+    server.strip_page_params("https://x.com/v?a=x%2Fy&p=1"))
+
+# 凭据管理: 增/删/查
+server.save_config_value("cookies", json.dumps({}))
+m = server.load_cookie_map()
+chk("凭据表初始为空", isinstance(m, dict) and len(m) == 0, str(m))
+
+# 解析缓存真能跑(不依赖网络: 塞一条假数据验证读写)
+server._info_cache["https://example.org/x"] = (server.time.time(), {"bvid": "t", "title": "T",
+    "owner": "o", "cover": "", "pages": [{"page": 1, "part": "p", "url": "u"}]})
+chk("解析缓存可写", "https://example.org/x" in server._info_cache)
+server._info_cache.clear()
 
 # 8) HTTP 层
 t = threading.Thread(target=server.main, daemon=True)
@@ -329,6 +373,175 @@ chk("GET /api/uni 有响应", s in (200, 500), f"{s} {b[:80]}")
 if s == 200:
     d = json.loads(b)
     chk("api/uni 成功或明确报错", d.get("ok") or d.get("error"), str(d)[:120])
+
+# ── 封面链路(2026-10-21 用户实测: 有封面却显示抽帧) ──
+# 根因: 抓官方封面时 Referer 用了图片自己的域名, 防盗链要的是**来源页**域名 -> 一律 403
+#      另外老版本把抽帧图和官方封面写同一个文件名, 抽帧图会把官方封面永远顶掉
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_cover_broken = False
+try:
+    _JPG = b"\xff\xd8\xff\xe0" + b"0" * 300
+    _REF = {"v": ""}
+
+    class _ImgHost(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.headers.get("Referer", "") != _REF["v"]:
+                self.send_response(403)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(_JPG)))
+            self.end_headers()
+            self.wfile.write(_JPG)
+
+    _img = ThreadingHTTPServer(("127.0.0.1", 0), _ImgHost)
+    _IPORT = _img.server_address[1]
+    threading.Thread(target=_img.serve_forever, daemon=True).start()
+    _IURL = f"http://127.0.0.1:{_IPORT}/cover.jpg"
+    _PAGE = f"http://127.0.0.1:{_IPORT}/video.html"
+    _REF["v"] = _PAGE
+
+    _old_cover_dir = server.COVER_DIR
+    server.COVER_DIR = HOME / "covers"
+    server.COVER_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 1) Referer 用来源页 -> 官方封面下得来
+    tgt = server.COVER_DIR / "BVref.jpg"
+    tgt.unlink(missing_ok=True)
+    _ok = server.fetch_cover("BVref", _IURL, _PAGE)
+    chk("fetch_cover 带来源页 Referer 时能下到官方封面", _ok and tgt.exists(), f"ok={_ok}")
+    # 2) Referer 不对 -> 必须失败(不能拿图片域名蒙混过关)
+    tgt2 = server.COVER_DIR / "BVbad.jpg"
+    tgt2.unlink(missing_ok=True)
+    _ok2 = server.fetch_cover("BVbad", _IURL, "http://evil.example/")
+    chk("fetch_cover Referer 不对时明确失败", (not _ok2) and (not tgt2.exists()), f"ok={_ok2}")
+
+    # 3) /api/cover 走完整链路: 官方优先
+    libc = server.load_library()
+    libc["BVcover"] = {"title": "封面测试", "owner": "", "folder": "", "cover": "",
+                        "cover_url": _IURL, "source_url": _PAGE, "parts": {}, "seq": 90}
+    server.save_library(libc)
+    s, b = get("/api/cover/BVcover")
+    chk("GET /api/cover 优先返回官方封面", s == 200 and b.startswith(b"\xff\xd8"), f"{s} {b[:12]}")
+
+    # 4) 老库迁移: 老版抽帧图占着 {bvid}.jpg -> 改名让位, 官方封面重新生效
+    (server.COVER_DIR / "BVcover.jpg").write_bytes(b"\xff\xd8old-snapshot")
+    (server.COVER_DIR / "BVcover_s.jpg").unlink(missing_ok=True)
+    s, b = get("/api/cover/BVcover?v=2")
+    chk("老库迁移: 抽帧图让位给官方封面", s == 200 and b == _JPG, f"{s} {b[:12]}")
+    chk("老库迁移: 抽帧图被改名成 _s.jpg", (server.COVER_DIR / "BVcover_s.jpg").exists())
+
+    # 5) 没有来源页 -> 图片站 403 -> 自动回退(占位图/抽帧), 不能 500
+    libc2 = server.load_library()
+    libc2["BVnoref"] = {"title": "无来源页", "owner": "", "folder": "", "cover": "",
+                         "cover_url": _IURL, "source_url": "", "parts": {}, "seq": 91}
+    server.save_library(libc2)
+    s, b = get("/api/cover/BVnoref")
+    chk("Referer 不对时 /api/cover 仍能出图(回退占位/抽帧)", s == 200 and len(b) > 0, f"{s}")
+    server.COVER_DIR = _old_cover_dir
+except Exception as _e:
+    _cover_broken = True
+    chk("封面链路测试可运行", False, f"{type(_e).__name__}: {_e}")
+
+# 6) 选帧避黑屏(需要 ffmpeg, 没有就跳过)
+if server.ffmpeg_path():
+    try:
+        import subprocess as _sp
+        _vd = DL / "blackvid"
+        _vd.mkdir(parents=True, exist_ok=True)
+        _vp = _vd / "P1.mp4"
+        if not _vp.exists():
+            _sp.run([server.ffmpeg_path(), "-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:r=25:d=4",
+                     "-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=6",
+                     "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]",
+                     "-c:v", "libx264", "-pix_fmt", "yuv420p", str(_vp)],
+                    capture_output=True, timeout=180)
+        _oldcd = server.COVER_DIR
+        server.COVER_DIR = HOME / "covers2"
+        server.COVER_DIR.mkdir(parents=True, exist_ok=True)
+        _libv = server.load_library()
+        _libv["BVblk"] = {"title": "黑屏片", "owner": "", "folder": "blackvid", "cover": "",
+                          "cover_url": "", "parts": {"1": {"name": "P1", "file": "P1.mp4", "size": 1}},
+                          "seq": 92}
+        server.save_library(_libv)
+        (server.COVER_DIR / "BVblk_s.jpg").unlink(missing_ok=True)
+        _okv = server.snapshot_thumb("BVblk")
+        _out = server.COVER_DIR / "BVblk_s.jpg"
+        _bright = -1
+        if _out.exists():
+            # 量输出图的亮度: 图输入带 -ss 会吐不出帧, 所以这里不套 _probe_bright
+            _pr = _sp.run([server.ffmpeg_path(), "-v", "error", "-i", str(_out), "-frames:v", "1",
+                           "-vf", "signalstats,metadata=print:file=-", "-f", "null", "-"],
+                          capture_output=True, timeout=60)
+            for _ln in (_pr.stdout or b"").decode("utf-8", "replace").splitlines():
+                if "YAVG" in _ln and "=" in _ln:
+                    _bright = float(_ln.split("=")[-1].strip())
+                    break
+        chk("snapshot_thumb 选到不黑的帧(前 4 秒是黑场)", _okv and _bright >= 28, f"bright={_bright}")
+        server.COVER_DIR = _oldcd
+    except Exception as _e2:
+        chk("选帧测试可运行", False, f"{type(_e2).__name__}: {_e2}")
+else:
+    print("  SKIP 选帧避黑屏测试(本机没有 ffmpeg)")
+
+# ── 批量操作(媒体库多选: 删除/收藏) ──
+# 关键: 必须**服务端一次干完**。前端循环调 /api/delete 的话, 中途断网就删一半。
+if True:
+    _bd = DL / "bulkdir"
+    _bd.mkdir(parents=True, exist_ok=True)
+    (_bd / "b1.mp4").write_bytes(b"x" * 32)
+    (_bd / "b2.mp4").write_bytes(b"x" * 32)
+    _lib = server.load_library()
+    _lib["BVbulk1"] = {"title": "批量1", "owner": "", "folder": "bulkdir", "cover": "",
+                       "cover_url": "", "parts": {"1": {"name": "P1", "file": "b1.mp4", "size": 1}},
+                       "seq": 60}
+    _lib["BVbulk2"] = {"title": "批量2", "owner": "", "folder": "bulkdir", "cover": "",
+                       "cover_url": "", "parts": {"1": {"name": "P1", "file": "b2.mp4", "size": 1}},
+                       "seq": 61}
+    server.save_library(_lib)
+
+    s, b = post("/api/bulk", {"bvid": ["BVbulk1", "BVbulk2"], "op": "fav"})
+    d = json.loads(b) if s == 200 else {}
+    chk("POST /api/bulk 批量收藏", s == 200 and len(d.get("done", [])) == 2, f"{s} {b[:120]}")
+    _l2 = server.load_library()
+    chk("批量收藏写进库了", _l2.get("BVbulk1", {}).get("fav") is True
+        and _l2.get("BVbulk2", {}).get("fav") is True, str(_l2.get("BVbulk1", {}))[:100])
+
+    s, b = post("/api/bulk", {"bvid": ["BVbulk1", "BVbulk2"], "op": "del"})
+    d = json.loads(b) if s == 200 else {}
+    chk("POST /api/bulk 批量删除", s == 200 and len(d.get("done", [])) == 2, f"{s} {b[:120]}")
+    _l3 = server.load_library()
+    chk("批量删除把条目摘了", "BVbulk1" not in _l3 and "BVbulk2" not in _l3, "还在库里")
+    chk("批量删除把文件也删了", not _bd.exists(), "文件夹还在")
+
+    s, b = post("/api/bulk", {"bvid": [], "op": "del"})
+    chk("批量空选要报错(别默默成功)", s == 400, f"{s} {b[:80]}")
+    s, b = post("/api/bulk", {"bvid": ["BVx"], "op": "乱来"})
+    chk("批量不认识的操作要报错", s == 400, f"{s} {b[:80]}")
+
+# ── 清晰度上限(用户要能选清晰度省空间; 默认仍是自动最优) ──
+# 真站实测(2026-10-21): 自动 -> 1080P, 选 720 -> 720P, 选 360 -> 360P, 编码仍是 avc1+mp4a
+if True:
+    _c0 = server._cmd("https://example.com/v", False, DL, 0)
+    _c720 = server._cmd("https://example.com/v", False, DL, 720)
+    _f0 = _c0[_c0.index("-f") + 1]
+    _f720 = _c720[_c720.index("-f") + 1]
+    chk("默认(自动)不带清晰度限制", "height" not in _f0, _f0[:100])
+    chk("选 720 时格式串带 height<=720", "height<=720" in _f720, _f720[:140])
+    chk("选 720 时仍优先 avc1+mp4a(全平台兼容不破)",
+        "avc1" in _f720 and "mp4a" in _f720, _f720[:140])
+    _c360 = server._cmd("https://example.com/v", False, DL, 360)
+    chk("选 360 时格式串带 height<=360", "height<=360" in _c360[_c360.index("-f") + 1],
+        _c360[_c360.index("-f") + 1][:120])
+    _t = server.new_task("BVqual", "清晰度", [1], {"1": "P1"}, "", "", {}, 720)
+    chk("任务记住清晰度上限", _t.get("quality") == 720, str(_t.get("quality")))
+    _t2 = server.new_task("BVqual2", "清晰度", [1], {"1": "P1"}, "", "", {})
+    chk("默认任务 quality=0(自动)", _t2.get("quality") == 0, str(_t2.get("quality")))
 
 print("\n== 结果 ==")
 print("全部通过 ✅" if ok else "有失败 ❌")

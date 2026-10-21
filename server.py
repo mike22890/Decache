@@ -23,7 +23,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "6.5"          # 版本号: 显示在界面顶栏, 排查新旧用
+VERSION = "6.6"          # 版本号: 显示在界面顶栏, 排查新旧用
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.ini"
 DEFAULTS = {
@@ -38,14 +38,91 @@ DEFAULTS = {
     "bind": "127.0.0.1",     # 监听地址。改 0.0.0.0 可让手机/平板访问(仅限可信局域网!)
 }
 
+def _config_text(cfg):
+    import io
+    buf = io.StringIO()
+    cfg.write(buf)
+    return buf.getvalue()
+
+
+def atomic_write(path: Path, data: str, encoding="utf-8"):
+    """原子写: 唯一临时名 + fsync + 指数退避重试。
+    唯一临时名 → 并发写不会互相截断(固定 .tmp 名会)
+    fsync        → 断电不会留下 0 字节文件(用户的媒体库会整库丢失)
+    重试        → Windows 上目标被占用(浏览器/杀软)会 PermissionError"""
+    import tempfile
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline="") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        last = None
+        for i in range(6):
+            try:
+                os.replace(tmp, path)
+                return True
+            except PermissionError as e:
+                last = e
+                time.sleep(0.05 * (2 ** i))
+        raise OSError(f"写入 {path.name} 失败: {last}")
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def atomic_write_bytes(path: Path, data: bytes):
+    # 字节版原子写(封面/雪碧图这类二进制)。文本版 atomic_write 只吃 str,
+    # 直接 write_bytes 会在断电/并发时留下半截文件 -> 浏览器拿到坏图。
+    import tempfile
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        last = None
+        for i in range(6):
+            try:
+                os.replace(tmp, path)
+                return True
+            except PermissionError as e:
+                last = e
+                time.sleep(0.05 * (2 ** i))
+        raise OSError(f"write {path.name} failed: {last}")
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def load_config():
-    cfg = configparser.ConfigParser()
+    # interpolation=None: cookie 值里满是 %2C / %3D 这种 URL 编码,
+    # 默认的 BasicInterpolation 会把它们当插值语法 → 直接 ValueError 崩掉。
+    cfg = configparser.ConfigParser(interpolation=None)
     if CONFIG_FILE.exists():
-        cfg.read(CONFIG_FILE, "utf-8")
-    else:
+        try:
+            cfg.read(CONFIG_FILE, "utf-8")
+        except configparser.Error:
+            # 配置坏了不能让服务器起不来: 备份 + 用默认值
+            try:
+                CONFIG_FILE.replace(CONFIG_FILE.with_name(f"config.corrupt-{int(time.time())}.ini"))
+            except OSError:
+                pass
+            cfg = configparser.ConfigParser(interpolation=None)
+    if "panel" not in cfg:
         cfg["panel"] = DEFAULTS
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            cfg.write(f)
+        try:
+            atomic_write(CONFIG_FILE, _config_text(cfg))
+        except OSError:
+            pass
     return cfg["panel"] if "panel" in cfg else dict(DEFAULTS)
 
 _CONF = load_config()
@@ -62,21 +139,24 @@ EXCLUDE_DIRS = [x.strip() for x in _CONF.get("exclude_dirs", "").split(",") if x
 BIND = _CONF.get("bind", "127.0.0.1").strip() or "127.0.0.1"
 
 def save_config_value(key, value):
-    """单键写回 config.ini, 其余键原样保留 —— 网页设置入口用(cookie 免手改配置文件)。"""
-    cfg = configparser.ConfigParser()
+    """单键写回 config.ini, 其余键原样保留 —— 网页设置入口用(cookie 免手改配置文件)。
+    interpolation=None: cookie 里带 % 是常事, 默认插值语法会直接抛 ValueError。"""
+    cfg = configparser.ConfigParser(interpolation=None)
     if CONFIG_FILE.exists():
-        cfg.read(CONFIG_FILE, "utf-8")
+        try:
+            cfg.read(CONFIG_FILE, "utf-8")
+        except configparser.Error:
+            cfg = configparser.ConfigParser(interpolation=None)
     if "panel" not in cfg:
         cfg["panel"] = {}
     cfg["panel"][key] = value
     atomic_write(CONFIG_FILE, _config_text(cfg))
+    try:
+        _CONF[key] = value          # 同步内存快照: 否则同进程里读到的还是旧值
+    except Exception:
+        pass
     return True
 
-def _config_text(cfg):
-    import io
-    buf = io.StringIO()
-    cfg.write(buf)
-    return buf.getvalue()
 # ================================================
 
 HTML_FILE = BASE_DIR / "index.html"
@@ -106,29 +186,6 @@ IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
 IS_TERMUX = os.environ.get("PREFIX", "").endswith("com.termux/files/usr")
 MIN_PY = (3, 9)          # Path.is_relative_to 需要 3.9+
-
-def atomic_write(path: Path, data: str, encoding="utf-8"):
-    """原子写: 临时文件 + os.replace。Windows 上目标被占用会 PermissionError,
-    加指数退避重试(官方 issue: 唯一可行办法是带延迟重试)。"""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(data, encoding=encoding)
-    last = None
-    for i in range(6):
-        try:
-            os.replace(tmp, path)
-            return True
-        except PermissionError as e:
-            last = e
-            time.sleep(0.05 * (2 ** i))
-    try:
-        os.replace(tmp, path)      # 最后再试一次, 失败就抛
-    except PermissionError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise last
-    return True
 
 def ffmpeg_path():
     """ffmpeg 可能在 PATH 外(Windows 最常见), 挨个常见安装位置找。"""
@@ -278,6 +335,45 @@ def extract_url(text):
     m = URL_RE.search(text or "")
     return m.group(0) if m else None
 
+def strip_page_params(url):
+    """剥掉分P/合集/分享追踪参数(p / sid / mid / buvid / plat_id / spm ...)。
+    关键: **原样保留其它参数, 不做 URL 解码** ——
+    parse_qs 会把 %2F 解成 '/', 再 urlencode 回去就破坏了 URL 结构(实测踩过)。"""
+    try:
+        head, sep, query = url.partition("?")
+    except Exception:
+        return url
+    if not sep:
+        return url
+    frag = ""
+    if "#" in query:
+        query, _, frag = query.partition("#")
+    drop = {"p", "sid", "season_id", "ep_id", "t", "mid", "buvid", "buvid3",
+            "plat_id", "from_spmid", "is_story_h5", "share_from", "share_medium",
+            "share_plat", "share_session_id", "share_source", "share_tag",
+            "spmid", "unique_k", "timestamp", "vd_source"}
+    kept = []
+    for kv in query.split("&"):
+        if not kv:
+            continue
+        k = kv.split("=", 1)[0].lower()
+        if k in drop:
+            continue
+        kept.append(kv)                    # 原样保留, 不解码
+    out = head + (("?" + "&".join(kept)) if kept else "")
+    if frag:
+        out += "#" + frag
+    return out
+
+
+def bare_url(url):
+    """只剩路径的 URL(去掉 ?query 和 #frag) —— 解析多P 视频的兜底尝试。"""
+    try:
+        return url.split("?", 1)[0].split("#", 1)[0]
+    except Exception:
+        return url
+
+
 def yt_dlp_path():
     """yt-dlp 可执行文件: PATH → 常见位置。找不到返回 None。"""
     exe = shutil.which("yt-dlp")
@@ -291,6 +387,14 @@ def yt_dlp_path():
         if c and os.path.isfile(c) and os.access(c, os.X_OK if not IS_WIN else os.F_OK):
             return c
     return None
+
+def mask_cookie(cv):
+    """给 UI 看的掩码: 只露出键名和值的头尾, 不泄露完整凭据。"""
+    out = []
+    for k, v in cookie_pairs(cv).items():
+        out.append(f"{k}={v[:4]}…{v[-4:]}" if len(v) > 12 else f"{k}={v[:6]}")
+    return "; ".join(out)
+
 
 def cookie_pairs(raw):
     """把用户填的 cookie 串解析成键值对。
@@ -326,30 +430,40 @@ def write_cookie_jar(domain, pairs, path):
         lines.append(f"{domain}\tTRUE\t/\tFALSE\t0\t{k}\t{v}")
     path.write_text("\n".join(lines) + "\n", "utf-8")
 
-def fetch_video_info(url):
-    """解析视频信息 —— 全部交给外部通用下载器 yt-dlp。
-    本项目不内置任何站点解析器/接口调用(2026-10-21 去站点化:
-    原先直连某站 view 接口取标题/封面/分P, 属于"针对特定站点的接口适配",
-    正是第三方工具收到平台律师函时被逐字指控的行为之一 → 全部移除)。
-    附带好处: yt-dlp 的 info.json 自带 uploader/简介/时长/真实分P, 元数据更全。"""
-    exe = yt_dlp_path()
-    if not exe:
-        raise RuntimeError("yt-dlp not found — install it (see README)")
-    cmd = [exe, "--dump-single-json", "--no-warnings", "--no-playlist", "--flat-playlist", url]
-    kw = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if IS_WIN else {}
+def mask_cookie(cv):
+    """给 UI 看的掩码: 只露出键名和值的头尾, 不泄露完整凭据。"""
+    out = []
+    for k, v in cookie_pairs(cv).items():
+        out.append(f"{k}={v[:4]}…{v[-4:]}" if len(v) > 12 else f"{k}={v[:6]}")
+    return "; ".join(out)
+
+
+_info_cache = {}        # url → (时间, 结果); 解析一次要好几秒, 重复链接直接复用
+
+
+def _probe_info(exe, url, kw):
+    """调引擎解析一次, 返回 info dict。"""
+    cmd = [exe, "--dump-single-json", "--no-warnings", "--flat-playlist", url]
     try:
-        p = subprocess.run(cmd, capture_output=True, timeout=60, **kw)
+        p = subprocess.run(cmd, capture_output=True, timeout=90, **kw)
     except subprocess.TimeoutExpired:
-        raise RuntimeError("解析超时(60s)")
-    out = (p.stdout or b"").decode("utf-8", "replace").strip()
-    if not out:
+        raise RuntimeError("解析超时(90s) — 检查网络, 或该站需要登录 cookie")
+    raw = (p.stdout or b"").decode("utf-8", "replace").strip()
+    if not raw:
         err = (p.stderr or b"").decode("utf-8", "replace").strip()[-200:]
         raise RuntimeError(f"解析失败: {err or 'yt-dlp 无输出'}")
     try:
-        d = json.loads(out)
+        d = json.loads(raw)
     except Exception:
         raise RuntimeError("解析失败: 返回不是合法 JSON")
+    if not isinstance(d, dict):
+        err = (p.stderr or b"").decode("utf-8", "replace").strip()[-200:]
+        raise RuntimeError(f"解析失败: yt-dlp 对这个链接没返回信息{(' — ' + err) if err else ''}")
     entries = d.get("entries") or []
+    truncated = False
+    if len(entries) > 200:
+        entries = entries[:200]          # 合集链接几百上千个 → 截断, 别吃光手机内存
+        truncated = True
     pages = []
     for i, e in enumerate(entries):
         if not e:
@@ -362,26 +476,74 @@ def fetch_video_info(url):
     return {"bvid": vid, "title": d.get("title") or vid,
             "owner": d.get("uploader") or d.get("channel") or "",
             "cover": d.get("thumbnail") or "",
-            "pages": pages}
+            "url": d.get("webpage_url") or url,
+            "truncated": truncated, "pages": pages}
 
+
+def fetch_video_info(url):
+    """解析视频信息 —— 全部交给外部通用下载引擎 yt-dlp。
+    本项目不内置任何站点解析器/接口调用(2026-10-21 去站点化:
+    原先直连某站 view 接口取标题/封面/分P, 属于"针对特定站点的接口适配",
+    正是第三方工具收到平台律师函时被逐字指控的行为之一 → 全部移除)。
+
+    两段式探测(通用, 不含站点知识):
+      先用"剥掉分P/追踪参数"的 URL; 若只得到 1 个分P, 再用"只剩路径"的裸 URL 试一次,
+      取分P 多的那个 —— 带 ?p=1 的链接很多站会只提取那一P(2026-10-21 实测复现)。"""
+    hit = _info_cache.get(url)
+    if hit and time.time() - hit[0] < 300:
+        return hit[1]                     # 5 分钟内同一链接直接复用, 不再调引擎
+    exe = yt_dlp_path()
+    if not exe:
+        raise RuntimeError("yt-dlp not found — install it (see README)")
+    kw = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if IS_WIN else {}
+    u1 = strip_page_params(url)
+    out = _probe_info(exe, u1, kw)
+    if len(out.get("pages", [])) <= 1:
+        # 只拿到 1 个分P → 多半是"短链跟到的最终页自带 ?p=1"这类情况。
+        # 拿跟完的最终地址再试两种形态: 剥掉分P参数 / 只剩路径 —— 谁分P多听谁的。
+        final = out.get("url") or u1
+        for cand in (strip_page_params(final), bare_url(final)):
+            if not cand or cand == final:
+                continue
+            try:
+                alt = _probe_info(exe, cand, kw)
+                if len(alt.get("pages", [])) > len(out.get("pages", [])):
+                    # 保留第一次探测拿到的 UP主/封面(flat 模式下可能没这些字段)
+                    for k in ("owner", "cover"):
+                        if not alt.get(k) and out.get(k):
+                            alt[k] = out[k]
+                    out = alt
+            except Exception:
+                pass
+    if len(_info_cache) > 50:
+        _info_cache.clear()
+    _info_cache[url] = (time.time(), out)
+    return out
 def safe_name(t):
     return BAD_CHARS.sub("_", t).strip()[:50] or "未命名"
 
 def safe_media_path(rel):
-    """把 rel 解析成绝对路径, 只允许在 download_dir 或 scan_dirs 之内(防目录穿越)。
-    2026-10-20 修复: 旧版用字符串 startswith 判白名单, "/downloads" 会误匹配
-    "/downloads-evil" 等同前缀兄弟目录 → 改用组件级 is_relative_to(Python 3.9+)。"""
-    target = Path(os.path.expanduser(rel))
-    if not target.is_absolute():
-        target = (DOWNLOAD_DIR / rel).resolve()
-    else:
-        target = target.resolve()
+    """把 rel 解析成绝对路径, 只允许在 download_dir / scan_dirs 之内(防目录穿越)。
+    空串/目录/设备文件一律拒绝 ——
+    以前 rel="" 会变成 Path(".") 也就是下载目录本身, 白名单放行后 open() 直接报错。"""
+    rel = (rel or "").strip()
+    if not rel or "\x00" in rel:
+        return None
+    try:
+        target = Path(os.path.expanduser(rel))
+        target = (DOWNLOAD_DIR / target).resolve() if not target.is_absolute() else target.resolve()
+    except (ValueError, OSError, RuntimeError):
+        return None
     roots = [DOWNLOAD_DIR.resolve()] + [Path(os.path.expanduser(d.strip())).resolve()
                                         for d in SCAN_DIRS.split(",") if d.strip()]
-    if any(target.is_relative_to(r) for r in roots):
-        return target
-    return None
-
+    if not any(target.is_relative_to(r) for r in roots):
+        return None
+    try:
+        if not target.is_file():          # 目录/管道/设备 → 不给
+            return None
+    except OSError:
+        return None
+    return target
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".flv", ".mov", ".m4v", ".ts", ".avi", ".rmvb", ".m4a", ".mp3", ".flac"}
 
 def allowed_roots():
@@ -418,12 +580,23 @@ def rel_of(path: Path):
         return str(path)
 
 def browse_dir(path):
-    """文件夹浏览: 返回子目录 + 视频文件(不入库也能直接播)。"""
+    """文件夹浏览: 返回子目录 + 视频文件(不入库也能直接播)。
+    目录被外部删掉时自动回退到最近存在的父目录 —— 绝不让用户卡在"不是目录"出不来。"""
     target = safe_dir_path(path)
     if target is None:
         return None
-    if not target.is_dir():
-        return {"error": "不是目录", "path": str(target)}
+    # 回退: 目录不存在 → 一路上溯到还存在的父目录(且仍须在白名单内)
+    hops = 0
+    while target is not None and not target.is_dir() and hops < 40:
+        parent = target.parent
+        if parent == target:
+            break
+        target = parent
+        hops += 1
+    if target is None or not target.is_dir():
+        return {"error": "not_found", "path": str(path)}
+    if not any(target.is_relative_to(r) for r in allowed_roots()):
+        return {"error": "not_allowed", "path": str(target)}
     dirs, files = [], []
     try:
         for f in sorted(target.iterdir(), key=lambda x: x.name.lower()):
@@ -441,7 +614,7 @@ def browse_dir(path):
         return {"error": str(e)}
     parent = str(target.parent.resolve()) if target.parent != target else ""
     return {"path": str(target), "parent": parent, "dirs": dirs, "files": files,
-            "can_up": any(target.parent.resolve().is_relative_to(r) for r in allowed_roots())}
+            "moved": hops > 0, "can_up": any(target.parent.resolve().is_relative_to(r) for r in allowed_roots())}
 
 QUEUE_FILE = BASE_DIR / "playlist.json"
 _queue_lock = threading.RLock()
@@ -460,6 +633,52 @@ def save_queue(q):
     with _queue_lock:
         atomic_write(QUEUE_FILE, json.dumps(q, ensure_ascii=False))
     return q
+
+ERROR_HINTS = [
+    # (引擎输出里的关键词, 人话提示) —— 用户看到英文报错会懵, 这里翻译成能行动的话
+    ("sign in to confirm", "该站要求登录 —— 去设置页填 cookie"),
+    ("login required", "该站要求登录 —— 去设置页填 cookie"),
+    ("private video", "私密视频 —— 换个公开的链接"),
+    ("members-only", "会员/付费内容 —— 本工具不碰这类内容"),
+    ("this video is not available", "该视频不可用(可能已删除或地区限制)"),
+    ("requested format is not available", "该站没有可用的视频格式 —— 换个链接试试"),
+    ("unable to extract", "解析失败 —— 更新 yt-dlp 试试"),
+    ("nsig", "需要 JS runtime —— 装 nodejs(pkg install nodejs)"),
+    ("signature extraction failed", "需要 JS runtime —— 装 nodejs(pkg install nodejs)"),
+    ("http error 403", "被拒绝(403) —— 需要 cookie 或被限流"),
+    ("http error 404", "链接失效(404)"),
+    ("http error 429", "被限流(429) —— 等等再试, 或调大 config.ini 的 delay"),
+    ("timed out", "超时 —— 检查网络"),
+    ("no space left", "磁盘满了"),
+    ("ffprobe", "ffmpeg/ffprobe 没装 —— pkg install ffmpeg"),
+    ("ffmpeg", "ffmpeg 没装 —— pkg install ffmpeg"),
+    ("destination", "写入失败 —— 检查下载目录权限"),
+    ("permission denied", "权限不足 —— 检查目录权限"),
+    ("unsupported url", "这个链接 yt-dlp 不支持"),
+]
+
+
+def hint_for(err: str):
+    """把引擎的英文报错翻成能行动的一句话。"""
+    e = (err or "").lower()
+    for k, v in ERROR_HINTS:
+        if k in e:
+            return v
+    return ""
+
+
+_ops_log = []          # 运行日志: 最近 200 条(用户能看到"到底发生了什么")
+
+
+def log_op(msg, level="info"):
+    """记一条操作日志。用户要能看到成功/失败/原因, 不能只有一片静默。"""
+    try:
+        _ops_log.insert(0, {"time": time.time(), "level": level, "msg": str(msg)[:400]})
+        del _ops_log[200:]
+    except Exception:
+        pass
+    return msg
+
 
 def lan_urls():
     """本机在局域网里的可访问地址 —— 手机/iPad 访问服务时要用
@@ -631,6 +850,53 @@ def storage_stats():
             "count": len(items)}
 
 
+_URL_OK = re.compile(r"^https?://[^\s]+$")
+
+
+def safe_url(u):
+    """URL 白名单: 必须是 http(s) 且不含空白。挡掉 yt-dlp 的选项注入
+    (比如 --exec=cmd 被当成参数执行)。"""
+    u = (u or "").strip()
+    return u if _URL_OK.match(u) else ""
+
+
+def public_url_ok(url):
+    """SSRF 防护: 拒绝指向内网/环回/元数据地址的 URL(用户能让服务器去读内网)。"""
+    if not url.startswith(("http://", "https://")):
+        return False
+    try:
+        import ipaddress
+        host = urllib.parse.urlparse(url).hostname
+        if not host:
+            return False
+        if host.lower() in ("localhost", "metadata.google.internal"):
+            return False
+        for info in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+    except Exception:
+        return False
+    return True
+
+
+def _norm_item(it):
+    """队列项规范化: 非 dict / 没有 rel 的一律丢掉。
+    (以前直接 it.get("rel") → 传个字符串就 500)"""
+    if not isinstance(it, dict):
+        return None
+    rel = str(it.get("rel") or "").strip()
+    if not rel:
+        return None
+    try:
+        p = int(it.get("p") or 1)
+    except (TypeError, ValueError):
+        p = 1
+    return {"rel": rel, "title": str(it.get("title") or Path(rel).stem),
+            "bvid": str(it.get("bvid") or ""), "p": p,
+            "name": str(it.get("name") or Path(rel).stem)}
+
+
 def queue_ops(body):
     """队列操作: add/remove/up/down/move/clear/set。返回最新队列。"""
     with _queue_lock:
@@ -638,10 +904,9 @@ def queue_ops(body):
         items = q["items"]
         op = body.get("op", "")
         if op == "add":
-            it = body.get("item")
-            if it and it.get("rel"):
-                if not any(x.get("rel") == it["rel"] for x in items):
-                    items.append(it)
+            it = _norm_item(body.get("item"))
+            if it and not any(x.get("rel") == it["rel"] for x in items):
+                items.append(it)
         elif op == "remove":
             i = int(body.get("i", -1))
             if 0 <= i < len(items):
@@ -662,7 +927,7 @@ def queue_ops(body):
         elif op == "clear":
             items.clear()
         elif op == "set":
-            items = list(body.get("items") or [])
+            items = [x for x in (_norm_item(i) for i in (body.get("items") or [])) if x]
         q["items"] = items
         q["updated"] = time.time()
         return save_queue(q)
@@ -676,14 +941,18 @@ def excluded(path: Path) -> bool:
 
 
 def scan_videos():
-    """全盘扫描视频文件, 按文件夹归组成"部"导入媒体库(自动检测任何来源的视频)。"""
-    lib = load_library()
-    # 面板自己管的目录不重复导入(含外部绝对路径条目)
+    """全盘扫描视频文件, 按文件夹归组成"部"导入媒体库(自动检测任何来源的视频)。
+
+    关键(2026-10-21 修): 扫描本身很慢 —— 手机上全盘 rglob 可能几十秒, 期间用户
+    可能刚打了标签/收藏/删了片。老写法是 load → 慢慢扫 → save, **扫描期间用户的改动
+    全被覆盖**(lost update, 标签集体消失)。现在: 只读阶段只收集, 写阶段用
+    mutate_library() 在锁内合并 —— 并发改动不会被覆盖。"""
+    # ── 1) 只读阶段: 收集要导入的文件夹(全程不碰媒体库) ──
     panel_folders = set()
-    for e in lib.values():
+    for e in load_library().values():
         fo = Path(e.get("folder", ""))
         panel_folders.add(((DOWNLOAD_DIR / fo) if not fo.is_absolute() else fo).resolve())
-    added = 0
+    found = {}                      # folder -> [(文件名, MB)]
     for raw in SCAN_DIRS.split(","):
         root = Path(os.path.expanduser(raw.strip()))
         if not root.is_dir():
@@ -693,9 +962,20 @@ def scan_videos():
                 continue
             folder = f.parent.resolve()
             if folder in panel_folders:
-                continue                              # 面板自己的目录, 跳过
+                continue                          # 面板自己的目录, 跳过
             if excluded(folder):
-                continue                              # 黑名单目录, 跳过
+                continue                          # 黑名单目录, 跳过
+            try:
+                found.setdefault(folder, []).append((f.name, round(f.stat().st_size / 1048576, 1)))
+            except OSError:
+                continue
+
+    # ── 2) 写阶段: 锁内合并 ──
+    added = 0
+
+    def _apply(lib):
+        nonlocal added
+        for folder, files in found.items():
             key = "EXT_" + hashlib.md5(str(folder).encode()).hexdigest()[:10]
             entry = lib.setdefault(key, {"title": folder.name or "未命名", "owner": "本地导入",
                                          "folder": "", "cover": "", "cover_url": "",
@@ -704,14 +984,22 @@ def scan_videos():
                 try:
                     entry["folder"] = str(folder.relative_to(DOWNLOAD_DIR.resolve()))
                 except ValueError:
-                    entry["folder"] = str(folder)      # 面板目录之外 → 存绝对路径
+                    entry["folder"] = str(folder)  # 面板目录之外 → 存绝对路径
                 added += 1
-            if f.name not in [p.get("file") for p in entry["parts"].values()]:
+            have = [p.get("file") for p in entry["parts"].values()]
+            for name, size in files:
+                if name in have:
+                    continue
                 idx = str(len(entry["parts"]) + 1)
-                entry["parts"][idx] = {"name": f.stem, "file": f.name,
-                                       "size": round(f.stat().st_size / 1048576, 1)}
-    save_library(lib)
-    for key, e in lib.items():
+                entry["parts"][idx] = {"name": Path(name).stem, "file": name, "size": size}
+        return lib
+
+    try:
+        mutate_library(_apply)
+    except Exception as e:
+        log_op(f"扫描写库失败: {e}", "error")
+        return 0
+    for key in list(load_library().keys()):
         if key.startswith("EXT_"):
             snapshot_thumb(key)
     return added
@@ -833,19 +1121,32 @@ def mp4s_of(folder):
 _lib_lock = threading.RLock()
 
 def load_library():
+    """读媒体库。**损坏时必须报错, 不能静默返回空库** ——
+    静默返回 {} 会让下一次 save 把空库写盘, 万级媒体库瞬间清零(数据丢失炸弹)。
+    正确做法: 备份坏文件 + 抛错, 让用户看见并处理。"""
     with _lib_lock:
-        if LIB_FILE.exists():
+        if not LIB_FILE.exists():
+            return {}
+        try:
+            raw = LIB_FILE.read_text("utf-8")
+            d = json.loads(raw)
+        except Exception as e:
+            bak = LIB_FILE.with_name(f"library.corrupt-{int(time.time())}.json")
             try:
-                return json.loads(LIB_FILE.read_text("utf-8"))
-            except Exception:
-                # 损坏自愈: 先把坏文件挪走留证, 返回空库 —— 否则下一次 save 会把空库
-                # 当真库写盘, 万级媒体库瞬间清零(数据丢失炸弹)
-                try:
-                    LIB_FILE.rename(LIB_FILE.with_name(f"library.corrupt-{int(time.time())}.json"))
-                except Exception:
-                    pass
-                return {}
-        return {}
+                LIB_FILE.replace(bak)
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"媒体库文件损坏, 已备份为 {bak.name}。"
+                f"请检查该文件后放回 {LIB_FILE.name}, 或删掉它重建(已下载的视频不会丢)")
+        if not isinstance(d, dict):
+            bak = LIB_FILE.with_name(f"library.corrupt-{int(time.time())}.json")
+            try:
+                LIB_FILE.replace(bak)
+            except OSError:
+                pass
+            raise RuntimeError(f"媒体库格式错误(顶层不是对象), 已备份为 {bak.name}")
+        return d
 
 def save_library(lib):
     with _lib_lock:
@@ -864,11 +1165,55 @@ def ensure_folder(lib, bvid, title):
     (DOWNLOAD_DIR / name).mkdir(parents=True, exist_ok=True)
     return name
 
+_BRIGHT_MIN = 28.0      # 低于这个平均亮度算黑场(视频纯黑的 YAVG 是 16)
+
+def _probe_bright(src, t):
+    # 量某一时刻那一帧的平均亮度(0-255)。失败返回 -1。
+    # 用 64x36 的小图, 解一帧就够, 很快 —— 这是"这一秒是不是黑屏"的判据。
+    exe = ffmpeg_path()
+    if not exe:
+        return -1
+    kw = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if IS_WIN else {}
+    cmd = [exe, "-v", "error", "-nostdin", "-ss", f"{t:.3f}", "-i", str(src),
+           "-frames:v", "1", "-vf", "scale=64:36,signalstats,metadata=print:file=-",
+           "-f", "null", "-"]
+    try:
+        pr = subprocess.run(cmd, capture_output=True, timeout=30, **kw)
+        out = (pr.stdout or b"").decode("utf-8", "replace")
+        for line in out.splitlines():
+            if "YAVG" in line and "=" in line:
+                try:
+                    return float(line.split("=")[-1].strip())
+                except ValueError:
+                    return -1
+    except Exception:
+        return -1
+    # 兜底: 有些输入(比如单张图)带 -ss 会直接吐不出帧 -> 去掉 -ss 再试一次
+    try:
+        pr2 = subprocess.run([exe, "-v", "error", "-nostdin", "-i", str(src),
+                              "-frames:v", "1", "-vf", "scale=64:36,signalstats,metadata=print:file=-",
+                              "-f", "null", "-"], capture_output=True, timeout=30, **kw)
+        out2 = (pr2.stdout or b"").decode("utf-8", "replace")
+        for line in out2.splitlines():
+            if "YAVG" in line and "=" in line:
+                return float(line.split("=")[-1].strip())
+    except Exception:
+        pass
+    return -1
+
 def snapshot_thumb(bvid):
-    """从已下载视频的第3秒抽帧当缩略图(避开开头黑帧) —— 零网络依赖, 保证有图。"""
+    # 从已下载视频里挑一帧当封面 —— 关键是别挑黑屏。
+    # 旧做法: 死 seek 第 3 秒取第一帧 -> 片头黑场就得到一张纯黑封面。
+    # 新做法: 沿时间轴试几个点, 每次先量那一帧的亮度, 黑的就换下一个;
+    # 全都黑就取最亮的那一点。挑中的点再精确抽帧。
+    # 抽出来的图存 {bvid}_s.jpg, 和官方封面 {bvid}.jpg 分开 —— 否则抽帧图
+    # 会把官方封面永远顶掉(用户明明有封面却显示抽帧)。
     entry = load_library().get(bvid)
     if not entry:
         return False
+    target = COVER_DIR / f"{bvid}_s.jpg"
+    if target.exists() and target.stat().st_size > 100:
+        return True                                   # 已有就别重算
     folder = DOWNLOAD_DIR / entry.get("folder", "")
     parts = entry.get("parts", {})
     if not parts:
@@ -877,43 +1222,76 @@ def snapshot_thumb(bvid):
     src = folder / first
     if not src.exists():
         return False
-    target = COVER_DIR / f"{bvid}.jpg"
-    for seek in ("3", "0.5", None):          # 短视频会seek过头, 逐级回退
-        args = []
-        if seek:
-            args += ["-ss", seek]
-        args += ["-i", str(src), "-frames:v", "1", "-vf", "scale=480:-2",
-                 "-q:v", "3", str(target)]
-        ok, err = run_ffmpeg(args, timeout=60)
-        if not ok and err:
-            _cover_errors[bvid] = f"snapshot: {err}"
-            return False
-        if target.exists() and target.stat().st_size > 100:
-            _cover_errors.pop(bvid, None)
-            return True
-    _cover_errors.setdefault(bvid, "snapshot: ffmpeg 未能出图")
+    dur = 0.0
+    try:
+        dur = float((probe_meta(src) or {}).get("duration") or 0)
+    except Exception:
+        dur = 0.0
+    cands = []
+    if dur > 0:
+        for ratio in (0.12, 0.35, 0.60, 0.85):
+            cands.append(round(dur * ratio, 2))
+    cands += [5.0, 2.0, 15.0, 0.0]
+    seen, ordered = set(), []
+    for t in cands:
+        if t in seen:
+            continue
+        seen.add(t)
+        if dur > 0 and t >= dur:
+            continue                                   # 超出时长, 跳过
+        ordered.append(t)
+    best_t, best_v = None, -1.0
+    for t in ordered:
+        v = _probe_bright(src, t)
+        if v < 0:
+            continue
+        if v > best_v:
+            best_v, best_t = v, t
+        if v >= _BRIGHT_MIN:
+            best_t = t                               # 这一秒不黑, 就要它
+            break
+    if best_t is None:
+        best_t = 0.0                                 # 探不出来(ffmpeg 抽风) -> 死取第一帧
+    ok, err = run_ffmpeg(["-ss", f"{best_t:.3f}", "-i", str(src), "-frames:v", "1",
+                          "-vf", "scale=480:-2", "-q:v", "3", str(target)], timeout=90)
+    if not (ok and target.exists() and target.stat().st_size > 100):
+        # 兜底: thumbnail 滤镜自动挑最有代表性的一帧
+        ok, err = run_ffmpeg(["-ss", f"{best_t:.3f}", "-i", str(src),
+                              "-vf", "thumbnail=40,scale=480:-2", "-frames:v", "1",
+                              "-q:v", "3", str(target)], timeout=90)
+    if target.exists() and target.stat().st_size > 100:
+        _cover_errors.pop(bvid, None)
+        return True
+    _cover_errors[bvid] = f"snapshot: {err}"
     return False
 
 _cover_errors = {}      # bvid → 最近一次抓取失败原因(透出给前端诊断)
 
-def fetch_cover(bvid, url):
+def fetch_cover(bvid, url, ref=""):
+    # 抓官方封面。ref = 来源页(视频页)的 URL。
+    # 防盗链要的是来源页的域名, 不是图片自己的域名 —— 用图片域名当 Referer
+    # 一律 403, 表现就是「明明有封面, 却只能显示抽帧」。
+    if not url:
+        return False
     target = COVER_DIR / f"{bvid}.jpg"
-    if target.exists():
+    if target.exists() and target.stat().st_size > 100:
         _cover_errors.pop(bvid, None)
         return True
-    if not url:
-        _cover_errors[bvid] = "库里没存封面地址(这个条目是老版本建的)"
-        return False
-    try:
-        ref = urllib.parse.urlparse(url).scheme + "://" + urllib.parse.urlparse(url).netloc + "/"
-    except Exception:
-        ref = ""
     hdrs = {**UA}
     if ref:
-        hdrs["Referer"] = ref          # 防盗链 Referer 按封面来源域名自动带, 通用
+        hdrs["Referer"] = ref
+    else:
+        try:
+            pr = urllib.parse.urlparse(url)
+            hdrs["Referer"] = f"{pr.scheme}://{pr.netloc}/"
+        except Exception:
+            pass
     try:
         req = urllib.request.Request(url, headers=hdrs)
-        target.write_bytes(urllib.request.urlopen(req, timeout=15).read())
+        data = urllib.request.urlopen(req, timeout=15).read()
+        if len(data) < 100:
+            raise ValueError("cover too small, probably an error page")
+        atomic_write_bytes(target, data)
         _cover_errors.pop(bvid, None)
         return True
     except Exception as e:
@@ -940,6 +1318,20 @@ def library_view_cached(ftag=None, fav=False):
     _view_cache.update(etag=etag, data=data, at=now)
     return data, etag
 
+def _cover_rev(bvid):
+    # 封面版本号: 官方封面和抽帧图分开计。换源时前端 URL 变 -> 浏览器不会拿旧缓存。
+    cj = COVER_DIR / f"{bvid}.jpg"
+    cs = COVER_DIR / f"{bvid}_s.jpg"
+    try:
+        if cj.exists():
+            return int(cj.stat().st_mtime) * 2
+        if cs.exists():
+            return int(cs.stat().st_mtime) * 2 + 1
+    except OSError:
+        pass
+    return 0
+
+
 def library_view(tag=None, fav=False):
     """前端媒体库数据源: 视频卡片(含分P明细) + 未分组散文件。
     tag/fav: 服务端筛选(万级库时别全量传给前端)。"""
@@ -954,7 +1346,8 @@ def library_view(tag=None, fav=False):
             f = folder / d.get("file", "")
             if d.get("file") and f.exists():
                 parts.append({"p": int(p), "name": d.get("name", f"P{p}"),
-                              "file": d["file"], "size": d.get("size", 0)})
+                              "file": d["file"], "size": d.get("size", 0),
+                              "h": int(d.get("h", 0) or 0)})
         tags = e.get("tags") or []
         if tag and tag not in tags:
             continue
@@ -963,7 +1356,8 @@ def library_view(tag=None, fav=False):
         total = round(sum(x["size"] for x in parts), 1)
         mt = max((folder / x["file"]).stat().st_mtime for x in parts) if parts else folder.stat().st_mtime
         videos.append({"bvid": bvid, "title": e["title"], "folder": e["folder"],
-                       "cover": bool(e.get("cover")), "owner": e.get("owner", ""),
+                       "cover": bool(e.get("cover")), "cover_rev": _cover_rev(bvid),
+                       "owner": e.get("owner", ""),
                        "seq": e.get("seq", 0), "tags": tags, "fav": bool(e.get("fav")),
                        "marks": e.get("marks") or [],
                        "parts": sorted(parts, key=lambda x: x["p"]),
@@ -987,30 +1381,75 @@ def tag_stats():
             fav += 1
     return {"tags": counts, "fav": fav}
 
-def toggle_tag(bvid, tag):
+def mutate_library(fn):
+    """媒体库的唯一写入口: 整个 读-改-写 都在 _lib_lock 内。
+    杜绝 lost update —— 以前 load→改→save 三步不在同一把锁里,
+    两个并发操作(比如打标签 + 扫描)会互相覆盖, 用户的标签/收藏被静默清零。"""
+    with _lib_lock:
+        lib = load_library()
+        out = fn(lib)
+        atomic_write(LIB_FILE, json.dumps(lib, ensure_ascii=False))
+    _bump_view()
+    return out
+
+
+def delete_video(bvid):
+    """删掉一个视频(整个): 取消进行中的下载 + 删文件夹 + 摘库 + 删封面。
+    单个删除和批量删除共用这一份逻辑 —— 批量时前端循环调 /api/delete,
+    中途断网就会删一半, 用户看到"删了一半"的烂摊子, 所以批量必须服务端一次干完。"""
+    with _task_lock:
+        for tt in tasks:
+            if tt["bvid"] == bvid and tt["status"] in ("排队中", "下载中"):
+                tt["status"] = "已取消"
+                if tt.get("proc"):
+                    try:
+                        tt["proc"].terminate()
+                    except Exception:
+                        pass
+    save_tasks()
     lib = load_library()
-    e = lib.get(bvid)
-    if not e:
-        return None
-    tags = e.get("tags") or []
-    if tag in tags:
-        tags.remove(tag)
-    else:
-        tags.append(tag)
-        if len(tags) > 8:
-            tags = tags[:8]
-    e["tags"] = tags
+    entry = lib.pop(bvid, None)
+    if not entry:
+        return False
+    try:
+        shutil.rmtree(DOWNLOAD_DIR / entry["folder"], ignore_errors=True)
+    except Exception:
+        pass
+    for suffix in (".jpg", "_s.jpg"):
+        try:
+            (COVER_DIR / f"{bvid}{suffix}").unlink(missing_ok=True)
+        except OSError:
+            pass
     save_library(lib)
-    return tags
+    log_op(f"已删除: {entry.get('title', bvid)[:50]}")
+    return True
+
+
+def toggle_tag(bvid, tag):
+    def _apply(lib):
+        e = lib.get(bvid)
+        if not e:
+            return None
+        tags = e.get("tags") or []
+        if tag in tags:
+            tags.remove(tag)
+        else:
+            tags.append(tag)
+            if len(tags) > 8:
+                tags = tags[:8]
+        e["tags"] = tags
+        return tags
+    return mutate_library(_apply)
+
 
 def toggle_fav(bvid):
-    lib = load_library()
-    e = lib.get(bvid)
-    if not e:
-        return None
-    e["fav"] = not e.get("fav")
-    save_library(lib)
-    return e["fav"]
+    def _apply(lib):
+        e = lib.get(bvid)
+        if not e:
+            return None
+        e["fav"] = not e.get("fav")
+        return e["fav"]
+    return mutate_library(_apply)
 
 def placeholder_svg(title):
     """无封面时生成的渐变占位图, 永远有东西可显示。"""
@@ -1024,7 +1463,8 @@ def placeholder_svg(title):
 
 # ---------------- 任务队列 ----------------
 tasks = []
-_task_lock = threading.Lock()
+# RLock 而不是 Lock: cancel_task 持锁时会再拿同一把锁 → 普通 Lock 自死锁(用户点"取消"永久转圈)
+_task_lock = threading.RLock()
 _next_id = [0]
 TASKS_FILE = BASE_DIR / "tasks.json"
 
@@ -1038,7 +1478,7 @@ def save_tasks():
     with _task_lock:
         undone = [{k: t.get(k) for k in ("id", "bvid", "title", "parts", "part_names",
                                           "cover", "audio_only", "failed", "created",
-                                          "url", "part_urls")}
+                                          "url", "part_urls", "quality")}
                   for t in tasks if t["status"] in ("排队中", "下载中")]
     try:
         atomic_write(TASKS_FILE, json.dumps(undone, ensure_ascii=False))
@@ -1062,6 +1502,7 @@ def restore_tasks():
                           "parts": d["parts"], "part_names": d.get("part_names", {}),
                           "cover": d.get("cover", ""), "audio_only": d.get("audio_only", False),
                           "url": d.get("url", ""), "part_urls": d.get("part_urls", {}),
+                          "quality": int(d.get("quality", 0) or 0),
                           "status": "排队中", "line": "⚡ restored, resuming",
                           "failed": d.get("failed", []), "proc": None,
                           "created": d.get("created", time.time())})
@@ -1071,27 +1512,70 @@ def restore_tasks():
 def next_seq(lib):
     return max([e.get("seq", 0) for e in lib.values()] + [0]) + 1
 
-def new_task(bvid, title, parts, part_names, cover, url="", part_urls=None):
+def new_task(bvid, title, parts, part_names, cover, url="", part_urls=None, quality=0):
     with _task_lock:
         _next_id[0] += 1
         t = {"id": _next_id[0], "bvid": bvid, "title": title, "parts": parts,
              "part_names": part_names, "cover": cover, "status": "排队中",
-             "url": url, "part_urls": part_urls or {},
+             "url": url, "part_urls": part_urls or {}, "quality": int(quality or 0),
              "line": "waiting", "failed": [], "proc": None, "created": time.time()}
         tasks.append(t)
     save_tasks()
     return t
 
-COOKIE_FILE = BASE_DIR / "cookies.txt"
+COOKIE_DIR = BASE_DIR / "cookies"
+try:
+    COOKIE_DIR.mkdir(exist_ok=True)
+except OSError:
+    pass
+COOKIE_FILE = COOKIE_DIR / "default.txt"
 
-def _cmd(url, audio_only, folder):
-    # cookie 域从链接自动推断(通用) —— 写盘前先删旧的, 避免域名切换后串味
-    if SESSION_COOKIE:
+
+def cookie_jar_path(domain):
+    """每个域名一个 cookie jar 文件 —— 免得多站点的 cookie 互相覆盖。"""
+    h = hashlib.md5((domain or "default").encode()).hexdigest()[:12]
+    return COOKIE_DIR / f"{h}.txt"
+
+
+def load_cookie_map():
+    """config.ini 的 cookies 键: {"域名": "K=V; K2=V2"}"""
+    raw = _CONF.get("cookies", "")
+    try:
+        d = json.loads(raw) if raw else {}
+    except Exception:
+        d = {}
+    return d if isinstance(d, dict) else {}
+
+
+def save_cookie_map(d):
+    save_config_value("cookies", json.dumps(d, ensure_ascii=False))
+    return d
+
+
+def cookie_for_domain(url):
+    """按链接的域名挑最合适的凭据: 精确匹配 → 后缀匹配 → 通用凭据(域名留空的)。"""
+    dom = host_of(url).lstrip(".").lower()
+    m = load_cookie_map()
+    if dom:
+        if dom in m:
+            return m[dom]
+        for k, v in m.items():
+            kk = k.lstrip(".").lower()
+            if kk and dom.endswith(kk):
+                return v
+    return _CONF.get("cookie", "") or m.get("", "") or ""
+
+def _cmd(url, audio_only, folder, quality=0):
+    # cookie: 按链接域名挑对应凭据, 每个域名一个 jar 文件(多站点不打架)
+    cv = cookie_for_domain(url)
+    jar = None
+    if cv:
         dom = host_of(url) or ".invalid"
+        jar = cookie_jar_path(dom)
         try:
-            write_cookie_jar(dom, cookie_pairs(SESSION_COOKIE), COOKIE_FILE)
+            write_cookie_jar(dom, cookie_pairs(cv), jar)
         except OSError:
-            pass
+            jar = None
     if ENGINE == "yt-dlp":
         # ── 全平台通用格式(2026-10-21, 按 yt-dlp 2026 官方做法) ──
         # 唯一全平台通吃的组合: MP4 容器 + H.264(avc1) + AAC(mp4a)
@@ -1101,10 +1585,15 @@ def _cmd(url, audio_only, folder):
         #      → 必须配 --remux-video mp4(否则可能下到 webm/mkv)
         #   2) 别写 hdr:dv —— yt-dlp 默认就排除 Dolby Vision(大多数设备不认)
         #   3) -S 的 vcodec:h264 是"软偏好"不排除, 硬约束要靠 -f
-        FMT = ("bv*[vcodec^=avc1]+ba[acodec^=mp4a]/"
-               "bv*[vcodec^=h264]+ba[acodec^=aac]/"
-               "b[ext=mp4]/"
-               "bv*+ba/b")
+        # 清晰度上限: quality=0 = 自动(最优, 老行为); 720 = 只要 720 及以下
+        # (yt-dlp 的 height<= 是"上限", 站点只有 360P 时会给你 360P, 省空间)
+        cap = int(quality or 0)
+        h = f"[height<={cap}]" if cap > 0 else ""
+        # cap=0 时这段必须和以前**逐字一致**(selftest 有断言), cap>0 时才加过滤
+        FMT = (f"bv*{h}[vcodec^=avc1]+ba[acodec^=mp4a]/"
+               f"bv*{h}[vcodec^=h264]+ba[acodec^=aac]/"
+               f"b{h}[ext=mp4]/"
+               f"bv*{h}+ba/b")
         m = re.search(r"[?&]p=(\d+)", url)
         name = f"P{m.group(1)}" if m else "video"      # 按P命名, 防互相覆盖
         cmd = ["yt-dlp", "--no-playlist", "--no-warnings", "--newline",
@@ -1112,12 +1601,12 @@ def _cmd(url, audio_only, folder):
                "-S", "res,fps,hdr:12,acodec:aac",        # 同编码内取最高画质
                "--merge-output-format", "mp4",
                "--remux-video", "mp4",                   # ← 单文件也强制换壳
-               "--write-info-json", "--no-cleanup",
+               "--write-info-json",
                "--continue", "--part", "--retries", "10", "--fragment-retries", "10",
                "--no-overwrites",
                "-o", str(folder / f"{name}.%(ext)s")]
-        if SESSION_COOKIE:
-            cmd += ["--cookies", str(COOKIE_FILE)]
+        if jar:
+            cmd += ["--cookies", str(jar)]
         if audio_only:
             cmd += ["-x", "--audio-format", "m4a"]
         return cmd + [url]
@@ -1125,12 +1614,12 @@ def _cmd(url, audio_only, folder):
         m = re.search(r"[?&]p=(\d+)", url)
         name = f"P{m.group(1)}" if m else "video"
         cmd = ["you-get", "-o", str(folder), "-O", name]
-        if SESSION_COOKIE:
-            cmd += ["--cookies", str(COOKIE_FILE)]
+        if jar:
+            cmd += ["--cookies", str(jar)]
         return cmd + [url]
     cmd = [YUTTO, "-d", str(folder)]
-    if SESSION_COOKIE:
-        cmd += ["-c", SESSION_COOKIE]
+    if cv:
+        cmd += ["-c", cv]
     if audio_only:
         cmd += ["--audio-only"]
     return cmd + [url]
@@ -1158,12 +1647,15 @@ def absorb_meta(bvid, folder, p):
         "desc": (info.get("description") or "")[:2000],
         "duration": info.get("duration") or 0,
         "thumb": info.get("thumbnail") or "",
+        "height": int(info.get("height") or 0),
         "webpage": info.get("webpage_url") or "",
         "upload_date": info.get("upload_date") or "",
     }
     e["meta"] = meta
     if meta["thumb"] and not e.get("cover_url"):
         e["cover_url"] = meta["thumb"]
+    if meta["webpage"] and not e.get("source_url"):
+        e["source_url"] = meta["webpage"]
     if meta["uploader"] and not e.get("owner"):
         e["owner"] = meta["uploader"]
     if meta["desc"] and not e.get("desc"):
@@ -1175,25 +1667,38 @@ _EXISTS = object()      # 哨兵: 下载成功但文件本来就在(重下场景
 
 def _run_part(task, p, folder):
     """下单个P(重试1次)。返回值三态: Path=新下好的文件 / _EXISTS=已有 / False=真失败"""
-    url = task.get("part_urls", {}).get(str(p)) or task.get("part_urls", {}).get(p)
+    # part_urls 可能是 null(旧数据/手改过的库) → 不能直接 .get
+    purls = task.get("part_urls") or {}
+    url = purls.get(str(p)) or purls.get(p)
     if not url:
         base = task.get("url") or ""
         sep = "&" if "?" in base else "?"
         url = f"{base}{sep}p={p}" if base else ""
+
     for attempt in (1, 2):
         if task["status"] == "已取消":
             return False
         task["line"] = f"P{p} starting (attempt {attempt})..."
         try:
-            proc = subprocess.Popen(_cmd(url, task.get("audio_only", False), folder),
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            # 独立进程组: 取消任务时要能杀掉整棵进程树(yt-dlp 会 spawn ffmpeg,
+            # 只杀父进程会留下 ffmpeg 孤儿继续下载, 白耗流量和电量)
+            pk = {}
+            if IS_WIN:
+                pk["creationflags"] = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                                        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+            else:
+                pk["start_new_session"] = True
+            proc = subprocess.Popen(_cmd(url, task.get("audio_only", False), folder, task.get("quality", 0)),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **pk)
         except Exception as e:
             task["line"] = f"P{p} failed to start: {e}"
+            task["error"] = f"启动下载进程失败: {e}"
             return False
         task["proc"] = proc
         # 心跳监控: 引擎卡死(长时间无输出)时自动终止, 防任务永久悬挂
         fd = proc.stdout.fileno()
         buf, idle = b"", 0
+        tail = []                             # 引擎输出的最后几行(失败时给真原因)
         while True:
             ready, _, _ = select.select([fd], [], [], 5)
             if not ready:
@@ -1214,6 +1719,10 @@ def _run_part(task, p, folder):
             while b"\n" in buf:
                 raw, buf = buf.split(b"\n", 1)
                 line = raw.decode("utf-8", "ignore").strip()
+                if line:
+                    tail.append(line)          # 留最后几行 → 失败时给用户看真原因
+                    if len(tail) > 12:
+                        tail.pop(0)
                 m = PERCENT_RE.search(line)
                 task["line"] = f"P{p} {m.group(1)}%" if m else f"P{p} {line[:80]}"
         proc.wait()
@@ -1221,92 +1730,211 @@ def _run_part(task, p, folder):
         if proc.returncode == 0:
             new = sorted(mp4s_of(folder) - task["_before"], key=lambda x: x.stat().st_mtime)
             return new[-1] if new else _EXISTS
-    return False
+        # 失败: 把引擎说的原话留下来(用户要看到"为什么失败", 不是"P1 失败")
+        reason = " | ".join(tail[-4:]).strip()[:400]
+        task["error"] = reason or f"exit={proc.returncode}"
+        return False
 
 def worker():
+    """下载队列主循环。**必须有 try/except** ——
+    以前任何异常(库条目被删 / part_urls 是 null / 文件名是 Windows 保留名)
+    都会永久杀死这个循环, 之后所有任务永远卡在"下载中", 用户完全不知道发生了什么。"""
     while True:
         time.sleep(0.3)
-        with _task_lock:
-            task = next((t for t in tasks if t["status"] == "排队中"), None)
-        if task is None:
-            continue
-        task["status"] = "下载中"
-        lib = load_library()
-        entry = lib.setdefault(task["bvid"], {"title": task["title"], "owner": "",
-                               "folder": "", "cover": "", "cover_url": "", "parts": {}})
-        entry["cover_url"] = entry["cover_url"] or task.get("cover", "")
-        entry["title"] = task["title"] or entry["title"]
-        if "seq" not in entry:
-            entry["seq"] = next_seq(lib)
-        if not entry["folder"]:
-            entry["folder"] = ensure_folder(lib, task["bvid"], task["title"])
-        if not entry["cover"] and fetch_cover(task["bvid"], task.get("cover")):
-            entry["cover"] = f"{task['bvid']}.jpg"
-        save_library(lib)
-        folder = DOWNLOAD_DIR / entry["folder"]
+        try:
+            _worker_once()
+        except Exception as e:
+            log_op(f"下载线程异常(已恢复): {type(e).__name__}: {e}", "error")
+            time.sleep(1)
 
-        for pi, p in enumerate(task["parts"]):
-            if task["status"] == "已取消":
-                break
-            if pi > 0:                          # 分P之间歇口气, 防限速(可打断)
-                task["line"] = f"P{p} waiting {DELAY_BETWEEN_PARTS}s (rate limit)..."
-                for _ in range(DELAY_BETWEEN_PARTS * 4):
-                    if task["status"] == "已取消":
-                        break
-                    time.sleep(0.25)
-            task["_before"] = mp4s_of(folder)
-            got = _run_part(task, p, folder)
-            if task["status"] == "已取消":
-                break
-            lib = load_library()
-            entry = lib[task["bvid"]]
-            if isinstance(got, Path):
-                if task.get("audio_only") and ENGINE == "you-get":
-                    # you-get 没有纯音频开关: 下完视频后 ffmpeg 流复制抽音轨(不重编码, 秒级)
-                    task["line"] = f"P{p} extracting audio..."
-                    m4a = got.with_suffix(".m4a")
-                    ok, _e = run_ffmpeg(["-i", str(got), "-vn", "-c:a", "copy", str(m4a)], timeout=600)
-                    if ok and m4a.exists() and m4a.stat().st_size > 1024:
-                        got.unlink(missing_ok=True)
-                        got = m4a
-                st = got.stat()
-                entry["parts"][str(p)] = {"name": task["part_names"].get(str(p), f"P{p}"),
-                                          "file": str(got.relative_to(folder)),
-                                          "size": round(st.st_size / 1048576, 1)}
-                task["line"] = f"P{p} done ✓"
-                # 下载那一刻就把元数据抓住(yt-dlp 的 info.json): UP主/简介/时长/封面
+
+def _worker_once():
+    """处理一个队列任务(取不到就立刻返回)。**不能有 continue** ——
+    这里没有循环, continue 会是语法错误。"""
+    with _task_lock:
+        task = next((t for t in tasks if t["status"] == "排队中"), None)
+    if task is None:
+        return
+    task["status"] = "下载中"
+    lib = load_library()
+    entry = lib.setdefault(task["bvid"], {"title": task["title"], "owner": "",
+                           "folder": "", "cover": "", "cover_url": "", "parts": {}})
+    entry["cover_url"] = entry["cover_url"] or task.get("cover", "")
+    entry["source_url"] = entry.get("source_url") or task.get("url", "")   # 来源页: 抓封面的 Referer 用它
+    entry["title"] = task["title"] or entry["title"]
+    if "seq" not in entry:
+        entry["seq"] = next_seq(lib)
+    if not entry["folder"]:
+        entry["folder"] = ensure_folder(lib, task["bvid"], task["title"])
+    if not entry["cover"] and fetch_cover(task["bvid"], task.get("cover"), task.get("url", "")):
+        entry["cover"] = f"{task['bvid']}.jpg"
+    save_library(lib)
+    folder = DOWNLOAD_DIR / entry["folder"]
+
+    for pi, p in enumerate(task["parts"]):
+        if task["status"] == "已取消":
+            break
+        if pi > 0:                          # 分P之间歇口气, 防限速(可打断)
+            task["line"] = f"P{p} waiting {DELAY_BETWEEN_PARTS}s (rate limit)..."
+            for _ in range(DELAY_BETWEEN_PARTS * 4):
+                if task["status"] == "已取消":
+                    break
+                time.sleep(0.25)
+        task["_before"] = mp4s_of(folder)
+        got = _run_part(task, p, folder)
+        if task["status"] == "已取消":
+            break
+        lib = load_library()
+        entry = lib.get(task["bvid"])
+        if not entry:
+            # 用户在下载途中把这个视频删了 → 跳过这个分P, 别让整个 worker 崩
+            task["line"] = f"P{p} skipped (已被删除)"
+            break
+        if isinstance(got, Path):
+            if task.get("audio_only") and ENGINE == "you-get":
+                # you-get 没有纯音频开关: 下完视频后 ffmpeg 流复制抽音轨(不重编码, 秒级)
+                task["line"] = f"P{p} extracting audio..."
+                m4a = got.with_suffix(".m4a")
+                ok, _e = run_ffmpeg(["-i", str(got), "-vn", "-c:a", "copy", str(m4a)], timeout=600)
+                if ok and m4a.exists() and m4a.stat().st_size > 1024:
+                    got.unlink(missing_ok=True)
+                    got = m4a
+            st = got.stat()
+            entry["parts"][str(p)] = {"name": task["part_names"].get(str(p), f"P{p}"),
+                                      "file": str(got.relative_to(folder)),
+                                      "size": round(st.st_size / 1048576, 1)}
+            task["line"] = f"P{p} done ✓"
+            # 下载那一刻就把元数据抓住(yt-dlp 的 info.json): UP主/简介/时长/封面
+            try:
+                m = absorb_meta(task["bvid"], folder, p)
+                if m and m.get("uploader"):
+                    task["line"] = f"P{p} done ✓ · {m['uploader']}"
+                if m and m.get("height"):
+                    try:
+                        entry["parts"][str(p)]["h"] = int(m["height"])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        elif got is _EXISTS:
+            task["line"] = f"P{p} already exists, skipped"
+            # 文件已存在也要写进库, 否则"补下"的片在 UI 里永远看不见
+            cand = None
+            for ext in (".mp4", ".mkv", ".webm", ".m4a"):
+                c2 = folder / f"P{p}{ext}"
+                if c2.is_file():
+                    cand = c2
+                    break
+            if cand is not None:
                 try:
-                    m = absorb_meta(task["bvid"], folder, p)
-                    if m and m.get("uploader"):
-                        task["line"] = f"P{p} done ✓ · {m['uploader']}"
-                except Exception:
+                    entry["parts"][str(p)] = {
+                        "name": task["part_names"].get(str(p), f"P{p}"),
+                        "file": cand.name,
+                        "size": round(cand.stat().st_size / 1048576, 1)}
+                except OSError:
                     pass
-            elif got is _EXISTS:
-                task["line"] = f"P{p} already exists, skipped"
-            else:
-                task["failed"].append(p)
-            save_library(lib)
-        task.pop("_before", None)
-        save_tasks()                                  # 队列有变动就落盘
-        snapshot_thumb(task["bvid"])               # 下载完顺手抽帧, 媒体库立刻有脸
-        if task["status"] == "下载中":
-            task["status"] = "完成" if not task["failed"] else "部分失败"
-            task["line"] = ("all done ✓" if not task["failed"]
-                            else f"P{','.join(map(str, task['failed']))} 失败, 点下方补下按钮")
+        else:
+            task["failed"].append(p)
+            # 失败原因在 _run_part 里已存(引擎原话); 这里兜底
+            task["error"] = task.get("error") or f"P{p} failed"
+        save_library(lib)
+    task.pop("_before", None)
+    save_tasks()                                  # 队列有变动就落盘
+    if snapshot_thumb(task["bvid"]):           # 下载完顺手抽帧, 媒体库立刻有脸
+        lib2 = load_library()
+        e2 = lib2.get(task["bvid"])
+        if e2 is not None and not e2.get("cover"):
+            e2["cover"] = f"{task['bvid']}_s.jpg"
+            save_library(lib2)
+    if task["status"] == "下载中":
+        task["status"] = "完成" if not task["failed"] else "部分失败"
+        task["line"] = ("all done ✓" if not task["failed"]
+                        else f"P{','.join(map(str, task['failed']))} 失败, 点下方补下按钮")
+        if task["failed"]:
+            log_op(f"下载部分失败: {task['title'][:40]} — {task.get('error', '')[:120]}", "error")
+        else:
+            log_op(f"下载完成: {task['title'][:40]}")
+        # 重下事务: 成功才用新文件, 失败就还原备份(绝不丢原文件)
+        bak = task.get("_replace_bak")
+        orig = task.get("_replace_orig")
+        if bak:
+            try:
+                bp = Path(bak)
+                if bp.exists():
+                    if task.get("failed"):
+                        op = Path(orig) if orig else None
+                        if op and op.exists():
+                            op.unlink(missing_ok=True)
+                        bp.replace(orig)          # 失败 → 还原原文件
+                    else:
+                        bp.unlink(missing_ok=True)  # 成功 → 删备份
+            except OSError as ex:
+                log_op(f"重下收尾失败: {ex}", "error")
+
+def kill_tree(proc):
+    """杀掉进程整棵树(yt-dlp + 它 spawn 的 ffmpeg)。只杀父进程会留下孤儿继续下载。"""
+    if not proc:
+        return
+    try:
+        if IS_WIN:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           capture_output=True, timeout=10)
+        else:
+            import signal
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
 
 def cancel_task(tid):
+    hit = None
     with _task_lock:
         for t in tasks:
             if t["id"] == tid and t["status"] in ("排队中", "下载中"):
                 t["status"] = "已取消"
                 if t.get("proc"):
-                    t["proc"].terminate()
-                save_tasks()
+                    kill_tree(t["proc"])          # 杀整棵树, 不留 ffmpeg 孤儿
+                hit = t
+    if hit:                       # 落盘挪到锁外: 避免持锁时做 IO
+        log_op(f"已取消任务 #{tid}")
+        save_tasks()
+    return bool(hit)
 
 # ---------------- HTTP ----------------
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
+    # ── 入口: 任何未捕获异常都要变成可读 JSON, 绝不能让浏览器看到"连接重置" ──
+    def _fail(self, e):
+        try:
+            log_op(f"{getattr(self, 'path', '?')[:80]} → {type(e).__name__}: {e}", "error")
+        except Exception:
+            pass
+        try:
+            self._json({"error": f"服务器出错: {type(e).__name__}: {e}"}, 500)
+        except Exception:
+            pass
+
+    def do_GET(self):
+        try:
+            self._do_GET()
+        except (BrokenPipeError, ConnectionResetError):
+            pass                      # 用户关了页面, 不是错误
+        except Exception as e:
+            self._fail(e)
+
+    def do_POST(self):
+        try:
+            self._do_POST()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            self._fail(e)
+
 
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -1316,7 +1944,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self):
+    def _do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         if u.path == "/":
@@ -1332,8 +1960,11 @@ class Handler(BaseHTTPRequestHandler):
             if not url:
                 return self._json({"error": "没找到链接, 试试粘贴完整 URL"}, 400)
             try:
-                return self._json(fetch_video_info(url))
+                info = fetch_video_info(url)
+                log_op(f"解析成功: {info['title'][:60]}")
+                return self._json(info)
             except Exception as e:
+                log_op(f"解析失败: {e}", "error")
                 return self._json({"error": str(e)}, 502)
         if u.path == "/api/tasks":
             with _task_lock:
@@ -1344,6 +1975,8 @@ class Handler(BaseHTTPRequestHandler):
                     if x["status"] == "排队中":
                         d["line"] = f"queued (#{queued.index(x) + 1})"
                     d["status_code"] = STATUS_CODE.get(x["status"], x["status"])
+                    if x.get("error"):
+                        d["error_hint"] = hint_for(x["error"])
                     out.append(d)
                 return self._json(out)
         if u.path == "/api/browse":                    # 文件夹浏览(不入库也能直接播)
@@ -1385,6 +2018,78 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(universal_copy(bvid, p))
             except Exception as e:
                 return self._json({"error": str(e)}, 500)
+        if u.path == "/api/thumb":                      # 远程封面代理(带防盗链 Referer)
+            url = q.get("url", [""])[0]
+            if not url.startswith(("http://", "https://")):
+                return self._json({"error": "bad url"}, 400)
+            try:
+                key = hashlib.md5(url.encode()).hexdigest()[:16]
+            except Exception:
+                return self._json({"error": "bad url"}, 400)
+            cached = COVER_DIR / f"r_{key}.jpg"
+            if not cached.exists():
+                try:
+                    pr = urllib.parse.urlparse(url)
+                    ref = f"{pr.scheme}://{pr.netloc}/"
+                except Exception:
+                    ref = ""
+                hdrs = {**UA}
+                if ref:
+                    hdrs["Referer"] = ref          # 防盗链: 必须带来源站 Referer
+                try:
+                    req = urllib.request.Request(url, headers=hdrs)
+                    data = urllib.request.urlopen(req, timeout=15).read()
+                    if len(data) > 8:
+                        cached.write_bytes(data)
+                except Exception:
+                    return self._json({"error": "封面取不到(防盗链或网络)"}, 502)
+            if not cached.exists():
+                return self._json({"error": "封面取不到"}, 502)
+            body = cached.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
+        if u.path == "/api/log":                       # 运行日志(用户排查用)
+            return self._json({"items": _ops_log})
+        if u.path == "/api/redownload":                 # 重下: 先下到临时名, 成功才替换(失败不丢原文件)
+            bvid = str(body.get("bvid", ""))
+            p = str(body.get("p", ""))
+            rel = str(body.get("rel", ""))
+            if not bvid or not p:
+                return self._json({"error": "缺 bvid 或 p"}, 400)
+            lib = load_library()
+            e = lib.get(bvid)
+            if not e:
+                return self._json({"error": "库里没这个视频"}, 404)
+            d = (e.get("parts") or {}).get(str(p))
+            folder = DOWNLOAD_DIR / e.get("folder", "")
+            old = folder / (d or {}).get("file", rel.split("/")[-1] if rel else "")
+            # 备份原文件, 下载成功再换, 失败就还原
+            bak = None
+            try:
+                if old.is_file():
+                    bak = old.with_suffix(old.suffix + ".old")
+                    old.replace(bak)
+            except OSError:
+                bak = None
+            t = new_task(bvid, e.get("title", ""), [int(p)],
+                         {str(p): (d or {}).get("name", f"P{p}")}, "",
+                         "", {}, int(body.get("quality", 0) or 0))
+            t["_replace_bak"] = str(bak) if bak else ""
+            t["_replace_orig"] = str(old)
+            log_op(f"重新下载: {e.get('title', '')[:40]} P{p}")
+            return self._json({"id": t["id"]})
+        if u.path == "/api/credentials":               # 凭据列表
+            m = load_cookie_map()
+            out = []
+            for dom, cv in m.items():
+                keys = list(cookie_pairs(cv).keys())
+                out.append({"domain": dom, "keys": keys,
+                            "masked": mask_cookie(cv), "n": len(keys)})
+            return self._json({"items": out})
         if u.path == "/api/dupes":                      # 重复文件检测
             return self._json(find_dupes())
         if u.path == "/api/storage":                    # 磁盘占用一览
@@ -1421,8 +2126,10 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/scan":
             try:
                 n = scan_videos()
+                log_op(f"扫描完成, 导入 {n} 个文件夹")
                 return self._json({"ok": True, "added": n})
             except Exception as e:
+                log_op(f"扫描失败: {e}", "error")
                 return self._json({"error": str(e)}, 500)
         if u.path == "/api/export":
             try:
@@ -1435,20 +2142,27 @@ class Handler(BaseHTTPRequestHandler):
             bvid = u.path.rsplit("/", 1)[-1]
             if not re.fullmatch(r"[A-Za-z0-9_.\-]{1,120}", bvid):
                 return self._json({"error": "bad id"}, 400)
-            jpg = COVER_DIR / f"{bvid}.jpg"
-            if not jpg.exists():                       # 懒加载: 老条目没存地址就回源取
-                url = load_library().get(bvid, {}).get("cover_url", "")
-                if not url:
-                    try:
-                        url = fetch_video_info(bvid)["cover"]
-                    except Exception:
-                        url = ""
-                if url:
-                    fetch_cover(bvid, url)
-            if not jpg.exists():                   # 网络封面挂了 → 从视频抽帧, 必有图
-                snapshot_thumb(bvid)
-            if jpg.exists():
-                body = jpg.read_bytes()
+            jpg = COVER_DIR / f"{bvid}.jpg"        # 官方封面
+            snap = COVER_DIR / f"{bvid}_s.jpg"     # 视频抽帧(兜底)
+            ent = load_library().get(bvid, {})
+            url = ent.get("cover_url", "")
+            ref = ent.get("source_url", "") or (ent.get("meta") or {}).get("webpage", "")
+            # 老版本把抽帧图和官方封面写同一个文件名 -> 官方封面再也下不来。
+            # 迁移: 有封面地址时, 老图先改名为 _s.jpg, 让官方封面重新有机会。
+            if jpg.exists() and not snap.exists() and url:
+                try:
+                    os.replace(jpg, snap)
+                except OSError:
+                    pass
+            if not jpg.exists() and url:
+                # 注意: 不要用 bvid 去调 fetch_video_info —— 那个函数现在只吃 URL,
+                # 传 bvid 会白跑一次 yt-dlp(90秒超时), 表现为"点一下封面就卡住"。
+                fetch_cover(bvid, url, ref)
+            if not jpg.exists() and not snap.exists():
+                snapshot_thumb(bvid)              # 网络封面挂了 -> 抽帧, 必有图
+            path = jpg if jpg.exists() else (snap if snap.exists() else None)
+            if path is not None:
+                body = path.read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "image/jpeg")
                 self.send_header("Cache-Control", "max-age=86400")
@@ -1615,19 +2329,52 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(diagnostics())
         self._json({"error": "not found"}, 404)
 
-    def do_POST(self):
+    def _do_POST(self):
         global SESSION_COOKIE
         u = urllib.parse.urlparse(self.path)
         length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length) or b"{}")
+        raw_body = self.rfile.read(length) or b"{}"
+        try:
+            body = json.loads(raw_body)
+            if not isinstance(body, dict):
+                body = {}
+        except Exception:
+            return self._json({"error": "请求格式不对(不是合法 JSON)"}, 400)
+        if u.path == "/api/credentials":               # 凭据: 增/删/改(POST)
+            dom = str(body.get("domain", "")).strip().lower()
+            cv = str(body.get("cookie", "")).strip()
+            op = body.get("op", "set")
+            m = load_cookie_map()
+            if op == "del":
+                m.pop(dom, None)
+            elif op == "set":
+                if not cv:
+                    return self._json({"error": "cookie 不能为空"}, 400)
+                pairs = cookie_pairs(cv)
+                if not pairs:
+                    return self._json({"error": "cookie 格式不对 —— 应为 KEY=VALUE 或 KEY=VALUE; KEY2=VALUE2"}, 400)
+                m[dom] = cv
+                try:
+                    cookie_jar_path(dom).unlink(missing_ok=True)   # 旧 jar 作废, 下次重写
+                except OSError:
+                    pass
+            else:
+                return self._json({"error": "未知操作"}, 400)
+            save_cookie_map(m)
+            log_op(f"凭据已保存: {dom or '(通用)'} · {', '.join(list(cookie_pairs(m.get(dom,'')).keys())[:5])}")
+            return self._json({"ok": True, "count": len(m)})
         if u.path == "/api/config":
             sd = str(body.get("cookie", "")).strip()
             if not sd:
                 return self._json({"error": "cookie 不能为空"}, 400)
+            pairs = cookie_pairs(sd)
+            if not pairs:
+                return self._json({"error": "cookie 格式不对 —— 应该是 KEY=VALUE 或 KEY=VALUE; KEY2=VALUE2"}, 400)
             save_config_value("cookie", sd)
             SESSION_COOKIE = sd                              # 热生效, 无需重启
             COOKIE_FILE.unlink(missing_ok=True)        # 旧 cookies 缓存作废
-            return self._json({"ok": True})
+            log_op(f"已保存 cookie ({len(pairs)} 项: {', '.join(list(pairs.keys())[:6])})")
+            return self._json({"ok": True, "keys": list(pairs.keys())[:8]})
         if u.path == "/api/tag":
             bvid = str(body.get("bvid", ""))
             tag = str(body.get("tag", ""))[:16]
@@ -1645,6 +2392,41 @@ class Handler(BaseHTTPRequestHandler):
             if fav is None:
                 return self._json({"error": "库里没这个视频"}, 404)
             return self._json({"ok": True, "fav": fav})
+        if u.path == "/api/bulk":                       # 批量操作(媒体库多选: 删除/收藏)
+            op = str(body.get("op", ""))
+            ids = [str(x) for x in (body.get("bvid") or [])][:500]
+            if not ids:
+                return self._json({"error": "没选东西"}, 400)
+            done, failed = [], []
+            if op == "del":
+                for b in ids:
+                    try:
+                        if delete_video(b):
+                            done.append(b)
+                        else:
+                            failed.append(b)
+                    except Exception as e:
+                        log_op(f"批量删除 {b} 失败: {e}", "error")
+                        failed.append(b)
+            elif op in ("fav", "unfav"):
+                want = (op == "fav")
+
+                def _setfav(lib):
+                    for b in ids:
+                        ent = lib.get(b)
+                        if ent is not None:
+                            ent["fav"] = want
+                    return lib
+                try:
+                    mutate_library(_setfav)
+                    done = list(ids)
+                except Exception as e:
+                    log_op(f"批量收藏失败: {e}", "error")
+                    failed = list(ids)
+            else:
+                return self._json({"error": "不认识的操作"}, 400)
+            _bump_view()
+            return self._json({"ok": True, "done": done, "failed": failed})
         if u.path == "/api/queue":
             try:
                 return self._json(queue_ops(body))
@@ -1698,8 +2480,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "至少选 1 个 P"}, 400)
             t = new_task(body["bvid"], body.get("title", ""), parts,
                          body.get("part_names", {}), body.get("cover", ""),
-                         body.get("url", ""), body.get("part_urls", {}))
+                         body.get("url", ""), body.get("part_urls", {}),
+                         int(body.get("quality", 0) or 0))
             t["audio_only"] = bool(body.get("audio_only"))
+            log_op(f"加入队列: {body.get('title', '')[:50]} ({len(parts)} 个分P)")
             return self._json({"id": t["id"]})
         if u.path == "/api/cancel":
             cancel_task(int(body.get("id", 0)))
@@ -1707,24 +2491,33 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/delete":
             bvid = body.get("bvid")
             if bvid:                                   # 删整个视频(文件夹+记录+封面)
-                with _task_lock:                       # 联动取消: 删片 = 停下载
-                    for tt in tasks:
-                        if tt["bvid"] == bvid and tt["status"] in ("排队中", "下载中"):
-                            tt["status"] = "已取消"
-                            if tt.get("proc"):
-                                tt["proc"].terminate()
-                save_tasks()
-                lib = load_library()
-                entry = lib.pop(bvid, None)
-                if entry:
-                    shutil.rmtree(DOWNLOAD_DIR / entry["folder"], ignore_errors=True)
-                    (COVER_DIR / f"{bvid}.jpg").unlink(missing_ok=True)
-                    save_library(lib)
-                return self._json({"ok": True})
+                ok = delete_video(bvid)
+                return self._json({"ok": True, "deleted": ok})
             target = safe_media_path(body.get("rel", ""))
             if target is None:
                 return self._json({"error": "路径不合法"}, 403)
-            target.unlink(missing_ok=True)
+            # 删文件 + 同步把库里的这个分P 摘掉(否则界面显示 0P 但文件已经没了)
+            name = target.name
+            try:
+                target.unlink(missing_ok=True)
+            except OSError as e:
+                return self._json({"error": f"删不掉: {e}"}, 500)
+
+            def _drop(lib):
+                hit = False
+                for bvid, e in lib.items():
+                    parts = e.get("parts") or {}
+                    for pk in list(parts.keys()):
+                        if parts[pk].get("file") == name:
+                            parts.pop(pk)
+                            hit = True
+                    if hit:
+                        e["parts"] = parts
+                return hit
+            try:
+                mutate_library(_drop)
+            except Exception as ex:
+                log_op(f"删文件后清库失败: {ex}", "error")
             _bump_view()
             return self._json({"ok": True})
         self._json({"error": "not found"}, 404)

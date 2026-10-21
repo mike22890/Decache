@@ -8,7 +8,7 @@
  *   node sync_install.mjs
  * 顺序: server.py → index.html → start.sh → start.bat → HANDOVER.md
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -27,6 +27,16 @@ const files = [
   ['sw.js',       'SWEOF'],
 ];
 
+/* 图标是二进制, heredoc 装不进去 → base64 内嵌, 安装时解码写出 */
+const iconDir = join(base, 'icons');
+const icons = ['icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'apple-touch-icon.png']
+  .filter(f => existsSync(join(iconDir, f)))
+  .map(f => ({
+    name: f,
+    b64: readFileSync(join(iconDir, f)).toString('base64').replace(/(.{76})/g, '$1\n'),
+  }));
+if (!icons.length) console.warn('⚠ icons/ 是空的, PWA 图标将缺失(跑 node tools/make-icons.mjs 生成)');
+
 for (const [name, eof] of files) {
   const body = read(name);
   if (body.includes(`\n${eof}\n`) || body.startsWith(`${eof}\n`))
@@ -42,6 +52,8 @@ OLD=~/decache
 echo "════ 1/4 依赖 ════"
 pkg update -y >/dev/null 2>&1 || pkg update -y
 pkg install -y python ffmpeg termux-api
+# nodejs: yt-dlp 解析部分站点(尤其 YouTube)需要 JS runtime, 缺了会报解析失败
+command -v node >/dev/null 2>&1 || pkg install -y nodejs || echo "  ⚠ nodejs 没装上(某些站点解析可能失败)"
 echo "════ 2/4 引擎 ════"
 pkg install -y yt-dlp 2>/dev/null || pip install -q --upgrade yt-dlp || true
 pip install -q --upgrade you-get || true
@@ -83,6 +95,12 @@ echo "自启:   Termux:Boot + Termux:Widget(F-Droid) → 重跑一次 install.sh
 const out = [head];
 for (const [name, eof] of files) {
   out.push(`cat > "$APP"/${name} <<'${eof}'\n${read(name)}${eof}\n`);
+}
+if (icons.length) {
+  out.push(`mkdir -p "$APP/icons"`);
+  for (const ic of icons) {
+    out.push(`cat > "$APP/icons/${ic.name}.b64" <<'I${ic.name}B64'\n${ic.b64}I${ic.name}B64\nbase64 -d "$APP/icons/${ic.name}.b64" > "$APP/icons/${ic.name}" 2>/dev/null && rm -f "$APP/icons/${ic.name}.b64"`);
+  }
 }
 out.push(tail);
 

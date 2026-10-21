@@ -69,6 +69,9 @@ createServer((req, res) => {
     ffmpeg:'/usr/bin/ffmpeg', ffmpeg_ok:true, min_python:'3.9',
     hints:['Termux: Android 12+ 需授予 wakelock, 否则系统会杀掉 ffmpeg 子进程']});
   if (u.pathname === '/api/config') return j({engine:'yt-dlp', port:8765, download_dir:'/fake/path', sessdata_set:false});
+  if (u.pathname === '/api/credentials') return j({items:[
+    {domain:'bilibili.com', keys:['SESSDATA','buvid3'], masked:'SESSDATA=abcd…wxyz; buvid3=1234…5678', n:2},
+    {domain:'', keys:['session'], masked:'session=qqqq…wwww', n:1}]});
   if (u.pathname === '/api/dupes') return j({waste_mb: 1234.5, groups:[
     {hash:'abc', size_mb: 842.0, waste_mb: 842.0, files:[
       {bvid:'BV1mock001', p:1, name:'深夜城市漫游 P1.mp4', rel:'a/P1.mp4', title:'【4K60帧】深夜城市漫游', path:'/x'},
@@ -102,6 +105,16 @@ createServer((req, res) => {
     const c = covers[bvid] || ['▶','#232a52','#0f3145'];
     res.writeHead(200, {'Content-Type':'image/svg+xml','Cache-Control':'no-store'});
     return res.end(svgCover(...c));
+  }
+  if (req.method === 'POST') {                    // 批量删除/收藏等写操作(假实现)
+    let raw = '';
+    req.on('data', c => raw += c);
+    req.on('end', () => {
+      let b = {};
+      try { b = JSON.parse(raw || '{}'); } catch {}
+      return j({ok: true, done: b.bvid || [], failed: [], tags: [], fav: true});
+    });
+    return;
   }
   res.writeHead(404); res.end('{}');
 }).listen(8790, '127.0.0.1', () => console.log('preview at http://127.0.0.1:8790'));

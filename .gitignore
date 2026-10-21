@@ -1,6 +1,7 @@
-# 本地数据与凭据 —— 绝不进版本库
+# 本地数据与凭据——绝不进版本库
 config.ini
 cookies.txt
+cookies/
 library.json
 library.corrupt-*.json
 playlist.json
@@ -10,6 +11,7 @@ thumbs/
 library.json.tmp
 playlist.json.tmp
 *.tmp
+.frontcheck.tmp.js
 
 # 媒体文件
 *.mp4
