@@ -40,20 +40,16 @@
 
 ## 截图
 
-All screenshots are taken from the actual app (preview mode with mock data).
+Real screenshots from an Android phone (Termux), unmodified.
 
 <table>
 <tr>
-<td align="center" width="50%"><img src="docs/screenshots/library.png" width="240"><br><sub>媒体库 · tag chip + cover</sub></td>
-<td align="center" width="50%"><img src="docs/screenshots/player.png" width="240"><br><sub>播放器 · 2-row header / pink progress bar</sub></td>
+<td align="center" width="50%"><img src="docs/screenshots/library.jpg" width="240"><br><sub>媒体库 · 封面 + 分辨率角标 + 标签</sub></td>
+<td align="center" width="50%"><img src="docs/screenshots/download.jpg" width="240"><br><sub>下载页 · 解析 / 清晰度 / 设置</sub></td>
 </tr>
 <tr>
-<td align="center" width="50%"><img src="docs/screenshots/chapters.png" width="240"><br><sub>章节面板 · thumbnail fallback chain</sub></td>
-<td align="center" width="50%"><img src="docs/screenshots/playlist.png" width="240"><br><sub>播放列表 · thumbnail + name, click to switch</sub></td>
-</tr>
-<tr>
-<td align="center" width="50%"><img src="docs/screenshots/multiselect.png" width="240"><br><sub>多选模式 · batch delete / favorite</sub></td>
-<td align="center" width="50%"><img src="docs/screenshots/download.png" width="240"><br><sub>下载页 · quality cap + audio-only</sub></td>
+<td align="center" width="50%"><img src="docs/screenshots/tasks.jpg" width="240"><br><sub>任务页 · 实时进度</sub></td>
+<td align="center" width="50%"><img src="docs/screenshots/folders.jpg" width="240"><br><sub>文件夹 · 直接浏览目录</sub></td>
 </tr>
 </table>
 
