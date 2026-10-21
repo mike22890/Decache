@@ -138,11 +138,6 @@ bash ~/decache/start.sh
 | 找不到下载的视频 | 手机上要去 `termux-setup-storage` 授权过；下载目录是 `~/storage/downloads/decache` |
 | 提示要登录 | 有些站要 cookie，在设置页填一下（格式 `KEY=VALUE; ...`）|
 
-### 手机访问电脑上的视频库
-
-把 config.ini 里的 `bind = 127.0.0.1` 改成 `bind = 0.0.0.0`，重启。
-手机和电脑在同一 WiFi 下，手机浏览器打开 `http://电脑的IP:8765`。
-
 ## 怎么用
 
 ### 下载一个视频
