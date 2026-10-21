@@ -1114,7 +1114,16 @@ def to_vtt(data: bytes) -> bytes:
 _sub_cache = {}      # 路径 → (mtime, bytes) 字幕转换结果缓存
 
 def mp4s_of(folder):
-    return {p for p in folder.rglob("*.mp4")} if folder.is_dir() else set()
+    """这个目录里已有的媒体文件(视频 + 音频)。
+    **必须包含音频**: 仅音频下载产出的是 .m4a/.mp3, 以前这里只认 *.mp4 →
+    "下载完检测不到新文件" → 分P 不入库 → 用户下完了界面上啥也看不见。"""
+    if not folder.is_dir():
+        return set()
+    out = set()
+    for ext in (".mp4", ".m4v", ".webm", ".mkv", ".mov", ".flv", ".ts", ".avi",
+                ".m4a", ".mp3", ".flac", ".opus", ".aac", ".ogg", ".wav"):
+        out.update(folder.rglob("*" + ext))
+    return out
 
 # ---------------- 媒体库 (library.json) ----------------
 # v6: 库文件加锁(RLock) + 原子写 + 损坏自愈 —— 万级条目/多线程/断电折腾都不许坏
@@ -1606,19 +1615,23 @@ def _cmd(url, audio_only, folder, quality=0):
                    "b[ext=mp4]/bv*+ba/b")
         m = re.search(r"[?&]p=(\d+)", url)
         name = f"P{m.group(1)}" if m else "video"      # 按P命名, 防互相覆盖
-        cmd = ["yt-dlp", "--no-playlist", "--no-warnings", "--newline",
-               "-f", FMT,
-               "-S", "res,fps,hdr:12,acodec:aac",        # 同编码内取最高画质
-               "--merge-output-format", "mp4",
-               "--remux-video", "mp4",                   # ← 单文件也强制换壳
-               "--write-info-json",
-               "--continue", "--part", "--retries", "10", "--fragment-retries", "10",
-               "--no-overwrites",
-               "-o", str(folder / f"{name}.%(ext)s")]
+        cmd = ["yt-dlp", "--no-playlist", "--no-warnings", "--newline"]
+        if audio_only:
+            # 仅音频: **绝对不要**带视频格式串。
+            # 带 -f 时 yt-dlp 会先把整个视频(长片子几个 G)下下来再抽音轨 —— 白耗流量。
+            # 不带 -f 时它只下音轨: 实测 0.5MB 音轨 vs 先下 4.7MB 视频再抽。
+            cmd += ["-x", "--audio-format", "m4a"]
+        else:
+            cmd += ["-f", FMT,
+                    "-S", "res,fps,hdr:12,acodec:aac",    # 同编码内取最高画质
+                    "--merge-output-format", "mp4",
+                    "--remux-video", "mp4",               # ← 单文件也强制换壳
+                    "--write-info-json"]
+        cmd += ["--continue", "--part", "--retries", "10", "--fragment-retries", "10",
+                "--no-overwrites",
+                "-o", str(folder / f"{name}.%(ext)s")]
         if jar:
             cmd += ["--cookies", str(jar)]
-        if audio_only:
-            cmd += ["-x", "--audio-format", "m4a"]
         return cmd + [url]
     if ENGINE == "you-get":
         m = re.search(r"[?&]p=(\d+)", url)
@@ -1703,6 +1716,13 @@ def friendly_err(reason):
     return ""
 
 
+def _is_format_err(reason):
+    """判断失败是不是"格式选不出来"(而不是网络/权限问题)。"""
+    low = (reason or "").lower()
+    return ("requested format" in low or "format is not available" in low
+            or "no video formats found" in low or "no formats found" in low)
+
+
 def _run_part(task, p, folder):
     """下单个P(重试1次)。返回值三态: Path=新下好的文件 / _EXISTS=已有 / False=真失败"""
     # part_urls 可能是 null(旧数据/手改过的库) → 不能直接 .get
@@ -1713,6 +1733,7 @@ def _run_part(task, p, folder):
         sep = "&" if "?" in base else "?"
         url = f"{base}{sep}p={p}" if base else ""
 
+    q = int(task.get("quality", 0) or 0)
     for attempt in (1, 2):
         if task["status"] == "已取消":
             return False
@@ -1726,20 +1747,35 @@ def _run_part(task, p, folder):
                                         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
             else:
                 pk["start_new_session"] = True
-            proc = subprocess.Popen(_cmd(url, task.get("audio_only", False), folder, task.get("quality", 0)),
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **pk)
+            proc = subprocess.Popen(_cmd(url, task.get("audio_only", False), folder, q),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                    encoding="utf-8", errors="replace", **pk)
         except Exception as e:
             task["line"] = f"P{p} failed to start: {e}"
             task["error"] = f"启动下载进程失败: {e}"
             return False
         task["proc"] = proc
-        # 心跳监控: 引擎卡死(长时间无输出)时自动终止, 防任务永久悬挂
-        fd = proc.stdout.fileno()
-        buf, idle = b"", 0
+        # 心跳监控: 引擎卡死(长时间无输出)时自动终止, 防任务永久悬挂。
+        # **用线程读, 不用 select.select** —— Windows 的 select 只支持 socket,
+        # 对管道直接抛 OSError 10038 → Windows 上整个下载功能是坏的(2026-10-21 抓到)。
+        import queue as _queue
+        _q = _queue.Queue()
+
+        def _reader():
+            try:
+                for _ln in proc.stdout:
+                    _q.put(_ln)
+            except Exception:
+                pass
+            _q.put(None)
+
+        threading.Thread(target=_reader, daemon=True).start()
+        idle = 0
         tail = []                             # 引擎输出的最后几行(失败时给真原因)
         while True:
-            ready, _, _ = select.select([fd], [], [], 5)
-            if not ready:
+            try:
+                raw = _q.get(timeout=5)
+            except _queue.Empty:
                 if proc.poll() is not None:      # 进程已退出
                     break
                 idle += 5
@@ -1749,18 +1785,14 @@ def _run_part(task, p, folder):
                     task["line"] = f"P{p} stalled ({HANG_TIMEOUT}s no data), killed"
                     break
                 continue
-            idle = 0
-            chunk = os.read(fd, 4096)
-            if not chunk:
+            if raw is None:
                 break
-            buf += chunk
-            while b"\n" in buf:
-                raw, buf = buf.split(b"\n", 1)
-                line = raw.decode("utf-8", "ignore").strip()
-                if line:
-                    tail.append(line)          # 留最后几行 → 失败时给用户看真原因
-                    if len(tail) > 12:
-                        tail.pop(0)
+            idle = 0
+            line = (raw or "").strip()
+            if line:
+                tail.append(line)              # 留最后几行 → 失败时给用户看真原因
+                if len(tail) > 12:
+                    tail.pop(0)
                 m = PERCENT_RE.search(line)
                 task["line"] = f"P{p} {m.group(1)}%" if m else f"P{p} {line[:80]}"
         proc.wait()
@@ -1768,8 +1800,23 @@ def _run_part(task, p, folder):
         if proc.returncode == 0:
             new = sorted(mp4s_of(folder) - task["_before"], key=lambda x: x.stat().st_mtime)
             return new[-1] if new else _EXISTS
-        # 失败: 把引擎说的原话留下来(用户要看到"为什么失败", 不是"P1 失败")
-        reason = " | ".join(tail[-4:]).strip()[:400]
+        # 掐头留尾: 错误行在**最后面**, 以前 reason[:400] 从头截 → 正好把错误截没了
+        # (用户看到的就是"Downloading webpage | ..."这种没用的开头, 真因丢了)
+        full = " | ".join(tail).strip()
+        reason = full if len(full) <= 400 else ("…" + full[-400:])
+        # 第一次失败: 换个策略再试一次
+        # (以前这里是直接 return False —— 文档写着"重试1次", 实际**从来没重试过**)
+        if attempt == 1:
+            if q and _is_format_err(full):
+                # 这个清晰度选不出格式 -> 改用"自动(最优)"再试。
+                # 用户选清晰度是**偏好**, 不是"必须失败"的理由。
+                q = 0
+                task["quality"] = 0
+                task["line"] = f"P{p} 该清晰度没有可用格式, 改用自动(最优)重试..."
+                continue
+            task["line"] = f"P{p} 失败, 重试一次..."
+            continue
+        # 两次都失败: 把引擎说的原话留下来(用户要看到"为什么失败", 不是"P1 失败")
         hint = friendly_err(reason)
         task["error"] = (hint + " || " + reason) if hint else (reason or f"exit={proc.returncode}")
         return False

@@ -583,6 +583,29 @@ if True:
         server.friendly_err("ERROR: something weird happened") == "",
         server.friendly_err("ERROR: something weird happened"))
 
+# ── 仅音频 / 重试 / 新文件检测(2026-10-21 用户实测后加固) ──
+if True:
+    # 1) 仅音频: 命令里**不能**有视频格式串(否则先把整个视频下完再抽音轨)
+    _ca = server._cmd("https://videos.example.org/w/xyz?p=2", True, DL)
+    chk("仅音频用 -x 抽音轨", "-x" in _ca and "m4a" in _ca, str(_ca))
+    chk("仅音频**不带**视频格式串(否则白下整个视频)", "-f" not in _ca, str(_ca))
+    chk("仅音频仍然带 cookie", "--cookies" in _ca, str(_ca))
+    # 2) 新文件检测必须认音频, 否则音频下完不入库(用户界面上啥也看不见)
+    _af = DL / "audiotest"
+    _af.mkdir(parents=True, exist_ok=True)
+    (_af / "P1.m4a").write_bytes(b"x" * 16)
+    (_af / "P2.mp4").write_bytes(b"x" * 16)
+    _seen = {p.name for p in server.mp4s_of(_af)}
+    chk("mp4s_of 认得 .m4a(音频下载能入库)", "P1.m4a" in _seen, str(_seen))
+    chk("mp4s_of 认得 .mp4", "P2.mp4" in _seen, str(_seen))
+    # 3) 格式错的识别(触发"清晰度选不出就降级到自动"重试)
+    chk("认得出 Requested format is not available",
+        server._is_format_err("ERROR: [BiliBili] BV1x: Requested format is not available."),
+        "没认出来")
+    chk("网络错不会被当成格式错",
+        not server._is_format_err("ERROR: unable to download: HTTP Error 503"),
+        "误判了")
+
 print("\n== 结果 ==")
 print("全部通过 ✅" if ok else "有失败 ❌")
 sys.exit(0 if ok else 1)
