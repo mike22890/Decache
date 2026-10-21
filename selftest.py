@@ -606,6 +606,83 @@ if True:
         not server._is_format_err("ERROR: unable to download: HTTP Error 503"),
         "误判了")
 
+# ── 数据安全(2026-10-21 三路审计发现) ──
+if True:
+    # 1) 删视频的路径校验: folder="." 或越界目录必须拒绝
+    _lib = server.load_library()
+    _outside = Path(str(server.DOWNLOAD_DIR).rstrip("/\\")) / ".." / "outside_dir"
+    try:
+        _outside.mkdir(parents=True, exist_ok=True)
+        (_outside / "keep.mp4").write_bytes(b"x" * 8)
+    except OSError:
+        _outside = None
+    _lib["BVsafe1"] = {"title": "越界目录", "owner": "", "folder": str(_outside) if _outside else "",
+                       "cover": "", "cover_url": "", "parts": {}, "seq": 70}
+    _lib["BVsafe2"] = {"title": "下载目录本身", "owner": "", "folder": ".", "cover": "",
+                       "cover_url": "", "parts": {}, "seq": 71}
+    server.save_library(_lib)
+    _ok1, _err1 = server.delete_video("BVsafe2")
+    chk("拒绝删除下载目录本身(以前会把整个下载目录 rmtree 掉)", (not _ok1) and "下载目录本身" in _err1, _err1[:90])
+    chk("下载目录还在", server.DOWNLOAD_DIR.is_dir(), "目录没了")
+    if _outside is not None:
+        _ok2, _err2 = server.delete_video("BVsafe1")
+        chk("外部绝对路径条目: 不删整个用户目录", _outside.is_dir(), "外部目录被删了")
+        chk("外部目录里的文件没被动", (_outside / "keep.mp4").exists(), "文件被删了")
+    # 2) 删不掉的目录 -> 库条目保留
+    _lib2 = server.load_library()
+    _lib2["BVsafe3"] = {"title": "锁住的", "owner": "", "folder": "locked", "cover": "",
+                         "cover_url": "", "parts": {}, "seq": 72}
+    server.save_library(_lib2)
+    _ld = server.DOWNLOAD_DIR / "locked"
+    _ld.mkdir(parents=True, exist_ok=True)
+    _ok3, _err3 = server.delete_video("BVsafe3")
+    chk("正常删除成功", _ok3, _err3[:80])
+    chk("删除后库条目没了", "BVsafe3" not in server.load_library(), "还在")
+
+    # 3) 坏库只复制不搬走(以前搬走 -> 下次读当空库 -> 一次写盘就固化空库)
+    _bak_dir = HOME / "baktest"
+    _bak_dir.mkdir(parents=True, exist_ok=True)
+    _old_lib = server.LIB_FILE
+    server.LIB_FILE = _bak_dir / "library.json"
+    server.LIB_FILE.write_text("{坏", encoding="utf-8")
+    try:
+        server.load_library()
+    except RuntimeError:
+        pass
+    chk("坏库: 原文件还在(没被搬走)", server.LIB_FILE.exists(), "被搬走了")
+    chk("坏库: 留了备份", len(list(_bak_dir.glob("library.corrupt-*.json"))) >= 1, str(list(_bak_dir.glob("*"))))
+    server.LIB_FILE = _old_lib
+    for _b in _bak_dir.glob("library.corrupt-*.json"):
+        _b.unlink(missing_ok=True)
+
+    # 4) tasks.json 形状不对不能让服务起不来
+    _old_t = server.TASKS_FILE
+    server.TASKS_FILE = HOME / "bad_tasks.json"
+    server.TASKS_FILE.write_text('{"a":1}', encoding="utf-8")
+    chk("坏 tasks.json 不炸", isinstance(server.restore_tasks(), int), "崩了")
+    server.TASKS_FILE.write_text('[{"bvid":"x"}]', encoding="utf-8")     # 缺 id
+    chk("缺字段的任务条目被跳过", isinstance(server.restore_tasks(), int), "崩了")
+    server.TASKS_FILE = _old_t
+
+    # 5) /api/delete 只许删媒体文件
+    _txt = server.DOWNLOAD_DIR / "note.txt"
+    _txt.write_text("hi", encoding="utf-8")
+    _s, _b = post("/api/delete", {"rel": "note.txt"})
+    chk("不能删非媒体文件", _s in (403, 400, 409), f"{_s} {_b[:80]}")
+    chk("非媒体文件还在", _txt.exists(), "被删了")
+
+    # 6) 平台默认路径: 桌面平台不该用 Termux 的 ~/storage
+    chk("下载目录默认值不是 Termux 专用(桌面会用 ~/Downloads 或 ~/Movies)",
+        "storage" not in str(server.DEFAULTS.get("download_dir", "")) or server.IS_TERMUX,
+        str(server.DEFAULTS.get("download_dir")))
+
+    # 7) /api/redownload 必须在 POST 里(以前写在 GET → 前端 POST 一直 404, 功能 100% 失效)
+    _src = Path(server.__file__).read_text("utf-8")
+    _get_i = _src.index("def _do_GET")
+    _post_i = _src.index("def _do_POST")
+    _rd = _src.index('"/api/redownload"')
+    chk("/api/redownload 在 POST 段(前端用的就是 POST)", _rd > _post_i > _get_i, "还在 GET 里")
+
 print("\n== 结果 ==")
 print("全部通过 ✅" if ok else "有失败 ❌")
 sys.exit(0 if ok else 1)

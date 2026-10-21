@@ -1,4 +1,5 @@
-// make-icons.mjs — 生成 PWA 图标(纯 Node, 无依赖): 深底 + 取景框 + 播放三角
+// make-icons.mjs — 生成 PWA 图标(纯 Node, 无依赖): 深底 + 缓存槽 + 播放键
+// (和顶栏 logo 同一个图形: U 形槽里躺一个粉色播放三角 = 媒体存在本地)
 // 用法: node tools/make-icons.mjs
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
@@ -60,7 +61,7 @@ function drawIcon(size, { maskable = false } = {}) {
   const S = size;
   const pad = maskable ? S * 0.18 : 0;          // maskable 需要安全区
   const radius = maskable ? 0 : S * 0.22;        // 圆角
-  const bg = [9, 9, 11];
+  const bg = [13, 13, 16];
   const fg = [251, 114, 153];                     // 品牌粉
   // 背景(圆角矩形)
   for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
@@ -73,21 +74,21 @@ function drawIcon(size, { maskable = false } = {}) {
     }
     if (inside) put(x, y, bg[0], bg[1], bg[2], 255);
   }
-  // 取景框四角(视频感)
-  const fw = Math.max(2, Math.round(S * 0.035));
-  const bx = pad + S * 0.16, by = pad + S * 0.20;
-  const bw = S - 2 * bx, bh = S - 2 * by;
-  const arm = bw * 0.24;
-  const rect = (x0, y0, x1, y1) => {           // 坐标取整: put() 要整数索引
+  const rect = (x0, y0, x1, y1, c) => {       // 坐标取整: put() 要整数索引
     for (let y = Math.floor(y0); y < Math.ceil(y1); y++)
-      for (let x = Math.floor(x0); x < Math.ceil(x1); x++) put(x, y, fg[0], fg[1], fg[2], 255);
+      for (let x = Math.floor(x0); x < Math.ceil(x1); x++) put(x, y, c[0], c[1], c[2], 255);
   };
-  rect(bx, by, bx + arm, by + fw); rect(bx, by, bx + fw, by + arm);
-  rect(bx + bw - arm, by, bx + bw, by + fw); rect(bx + bw - fw, by, bx + bw, by + arm);
-  rect(bx, by + bh - fw, bx + arm, by + bh); rect(bx, by + bh - arm, bx + fw, by + bh);
-  rect(bx + bw - arm, by + bh - fw, bx + bw, by + bh); rect(bx + bw - fw, by + bh - arm, bx + bw, by + bh);
-  // 播放三角(居中)
-  const triL = S * 0.36, triR = S * 0.60, triT = S * 0.36, triB = S * 0.64;
+  // ── 缓存槽(U 形): 左右两壁 + 底 ──
+  const w = Math.max(2, Math.round(S * 0.075));           // 线宽
+  const ux0 = pad + S * 0.20, ux1 = S - pad - S * 0.20;  // 槽左右
+  const uTop = pad + S * 0.355, uBot = pad + S * 0.735;  // 槽开口/底
+  const white = [250, 250, 250];
+  rect(ux0, uTop, ux0 + w, uBot - w * 0.6, white);       // 左壁
+  rect(ux1 - w, uTop, ux1, uBot - w * 0.6, white);       // 右壁
+  rect(ux0 + w * 0.4, uBot - w, ux1 - w * 0.4, uBot, white);  // 底
+  // ── 播放键(粉色三角, 躺在槽里) ──
+  const triL = pad + S * 0.375, triR = pad + S * 0.625;
+  const triT = uTop + S * 0.055, triB = uBot - S * 0.095;
   for (let y = Math.floor(triT); y < triB; y++) {
     const t = (y - triT) / (triB - triT);
     const xEnd = triL + (triR - triL) * t;

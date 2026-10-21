@@ -44,7 +44,7 @@ createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   const j = o => { res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify(o)); };
   if (u.pathname === '/') { res.writeHead(200, {'Content-Type':'text/html; charset=utf-8'}); return res.end(html); }
-  if (u.pathname === '/api/version') return j({v:'6.4'});
+  if (u.pathname === '/api/version') return j({v:'6.13'});
   if (u.pathname === '/api/tasks') return j(TASKS);
   if (u.pathname === '/api/library') return j(LIB);
   if (u.pathname === '/api/tags') return j({tags:{red:2, green:1}, fav:3});

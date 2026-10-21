@@ -8,6 +8,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Decache">
 <link rel="manifest" href="/manifest.json">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="icon" type="image/png" href="/icons/icon-192.png">
 <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
 <title>Decache</title>
@@ -44,7 +45,7 @@
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html{-webkit-text-size-adjust:100%;background:var(--bg)}
 body{color:var(--tx);font:15px/1.55 -apple-system,"MiSans","Noto Sans CJK SC",system-ui,sans-serif;
-  max-width:600px;margin:0 auto;min-height:100vh;transition:background .25s,color .25s;
+  max-width:600px;margin:0 auto;min-height:100vh;min-height:100dvh;transition:background .25s,color .25s;
   overflow-x:hidden}
 /* ── 响应式: 手机单/双列 → 平板三列 → 桌面五列, 不留空白也不破版 ── */
 @media (min-width:640px){
@@ -90,22 +91,26 @@ button{font:inherit;color:inherit}
 .vcard .cov img{width:100%;aspect-ratio:16/10;object-fit:cover;display:block;background:var(--srf2)}
 @supports not (aspect-ratio: 16/10){
   .vcard .cov{height:0;padding-top:62.5%}
-  .vcard .cov img{position:absolute;inset:0;height:100%}
+  /* 注意: 这里**不能**用 inset 简写 —— inset 要 Chrome 87+/Safari 14.1+,
+     比 aspect-ratio(88/15) 还晚一代, 正好把兜底的老浏览器又坑一次(封面全白)。
+     用四条边的老写法, CSS2 级别, 全平台通吃。 */
+  .vcard .cov img{position:absolute;top:0;left:0;right:0;bottom:0;height:100%;width:100%}
   .vcard .cov{position:relative}
   .pv img{height:auto;min-height:86px}
 }
 /* 2) 底栏/播放器: color-mix 不支持时用纯色 */
 @supports not (color: color-mix(in srgb, red, blue)){
-  .appbar{background:rgba(9,9,11,.92)}
-  .tabbar{background:rgba(17,17,19,.95)}
+  /* 兜底也要跟主题走 —— 写死深色的话, 亮色主题下顶栏变成黑底黑字, 字直接看不见 */
+  .appbar{background:var(--bg)}
+  .tabbar{background:var(--srf)}
 }
 /* 3) backdrop-filter: Safari 的 -webkit- 版不能用 CSS 变量 → 变量版本单独关掉 */
 .backdrop{backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
 @supports not ((backdrop-filter: blur(4px)) or (-webkit-backdrop-filter: blur(4px))){
-  .appbar{background:rgba(9,9,11,.96)}
-  .tabbar{background:rgba(17,17,19,.97)}
-  #pnext{background:rgba(16,16,20,.99)}
-  #qpanel{background:rgba(16,16,20,.99)}
+  .appbar{background:var(--bg)}
+  .tabbar{background:var(--srf)}
+  #pnext{background:var(--srf)}
+  #qpanel{background:var(--srf)}
 }
 /* 4) 安全区: env() 在非刘海屏恒为 0 → 永远保底 12px */
 .safeb{padding-bottom:max(12px, env(safe-area-inset-bottom))}
@@ -115,9 +120,9 @@ button{font:inherit;color:inherit}
 .appbar{position:relative;z-index:20;display:flex;align-items:baseline;gap:10px;
   padding:20px 20px 14px;background:color-mix(in srgb, var(--bg) 88%, transparent);
   backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
-.logo{font-size:21px;font-weight:800;letter-spacing:-.4px;display:flex;align-items:center;gap:7px}
+.logo{font-size:21px;font-weight:800;letter-spacing:-.5px;display:flex;align-items:center;gap:8px}
 .logo b{color:var(--pink);font-weight:800}
-.logo .lic{width:22px;height:22px;color:var(--tx);flex:none}
+.logo .lic{width:24px;height:24px;color:var(--tx);flex:none;overflow:visible}
 .ver{font-size:11px;color:var(--tx3);font-variant-numeric:tabular-nums}
 .langbtn{margin-left:auto;background:none;border:1px solid var(--line2);color:var(--tx2);
   border-radius:999px;padding:6px 12px;font-size:12px;cursor:pointer;transition:all var(--dur);
@@ -150,7 +155,7 @@ h2{font-size:11px;color:var(--tx3);font-weight:600;margin:22px 0 10px;letter-spa
 }
 
 /* ── 播放列表面板(缩略图+名称, 点一下就切) ── */
-#listPanel{position:fixed;right:12px;top:60px;bottom:calc(96px + env(safe-area-inset-bottom));
+#listPanel{position:fixed;right:12px;top:calc(var(--pTop,118px) + env(safe-area-inset-top));bottom:calc(96px + env(safe-area-inset-bottom));
   z-index:150;width:min(340px,calc(100% - 24px));display:none;flex-direction:column;
   background:rgba(16,16,20,.97);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
   border:1px solid rgba(255,255,255,.13);border-radius:14px;overflow:hidden;
@@ -188,6 +193,7 @@ h2{font-size:11px;color:var(--tx3);font-weight:600;margin:22px 0 10px;letter-spa
 .logrow.wn .lm{color:#fbbf24}
 
 /* 触摸目标: 视觉尺寸不变, 命中区扩到 44px(触屏手指不会点空) */
+.qops button,.chitem .cdel{position:relative}   /* 缺这个: 绝对定位的 ::after 会跑到面板左上角, 透明区全叠一起 */
 .pico::after,.favbtn::after,.queuebtn::after,.tagbar .tgbtn::after,
 #qpanel .qops button::after,.chitem .cdel::after{content:'';position:absolute;inset:-8px;border-radius:50%}
 /* 标签行的伪元素不能盖住上一行的操作按钮(否则点删除会变成"打标签") */
@@ -326,8 +332,29 @@ input[type=text]::placeholder{color:var(--tx3)}
 .favbtn svg.ic{width:15px;height:15px}
 .favbtn.on{color:#FB7299}
 .favbtn.on svg.ic{fill:currentColor}
-.tagbar{display:flex;gap:5px;align-items:center;margin-top:8px;padding-top:9px;
+.tagbar{display:flex;gap:6px;align-items:center;margin-top:8px;padding-top:9px;
   border-top:1px solid var(--line);flex-wrap:nowrap;overflow:hidden}
+/* 标签入口: 以前 6 个彩点常驻每张卡片, 视觉噪音比标题还大(违反"UI 单色退后"原则) */
+.tagchip{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 9px;
+  border:1px solid var(--line);border-radius:999px;background:none;color:var(--tx2);
+  font-size:11px;cursor:pointer;max-width:62%;overflow:hidden}
+.tagchip i{width:8px;height:8px;border-radius:50%;flex:none}
+.tagchip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tagchip.has{color:var(--tx);border-color:var(--line2)}
+.tagchip .muted{color:var(--tx3)}
+.tagchip:active{background:var(--srf2)}
+/* 标签弹层 */
+.tagpop{position:fixed;z-index:120;display:none;min-width:150px;padding:6px;
+  background:var(--srf);border:1px solid var(--line2);border-radius:12px;
+  box-shadow:0 12px 40px rgba(0,0,0,.55)}
+.tagpop.show{display:block}
+.tagpop-h{font-size:10.5px;color:var(--tx3);padding:5px 8px 6px;letter-spacing:.3px}
+.tagopt{display:flex;align-items:center;gap:8px;width:100%;padding:8px 9px;border:0;border-radius:8px;
+  background:none;color:var(--tx);font-size:12.5px;cursor:pointer;text-align:left}
+.tagopt:active{background:var(--srf2)}
+.tagopt i{width:12px;height:12px;border-radius:50%;flex:none}
+.tagopt span{flex:1}
+.tagopt .ic{width:13px;height:13px;opacity:.9}
 .tgbtn{width:20px;height:20px;border-radius:50%;border:1px solid var(--line);cursor:pointer;
   background:none;padding:0;flex:none}
 .tagbar .tgbtn.on{outline:2px solid var(--txt);outline-offset:1px}
@@ -359,9 +386,9 @@ input[type=text]::placeholder{color:var(--tx3)}
 .browsecard .bops{display:flex;gap:6px;flex:none}
 
 /* ── 队列面板 ── */
-#qpanel{position:fixed;right:12px;top:60px;bottom:calc(96px + env(safe-area-inset-bottom));
+#qpanel{position:fixed;right:12px;top:calc(var(--pTop,118px) + env(safe-area-inset-top));bottom:calc(96px + env(safe-area-inset-bottom));
   touch-action:pan-y;z-index:150;
-  z-index:9;width:min(300px,calc(100% - 24px));display:none;flex-direction:column;
+  z-index:150;width:min(300px,calc(100% - 24px));display:none;flex-direction:column;
   background:rgba(16,16,20,.96);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
   border:1px solid rgba(255,255,255,.13);border-radius:14px;overflow:hidden}
 #qpanel.show{display:flex}
@@ -380,9 +407,10 @@ input[type=text]::placeholder{color:var(--tx3)}
 #qpanel .qempty{padding:26px 14px;text-align:center;color:var(--tx3);font-size:12px}
 
 /* ── 章节面板 ── */
-#chapPanel{position:absolute;right:12px;top:60px;bottom:calc(96px + env(safe-area-inset-bottom));
+#chapPanel{position:absolute;right:12px;top:calc(var(--pTop,118px) + env(safe-area-inset-top));bottom:calc(96px + env(safe-area-inset-bottom));
+  z-index:150;
   touch-action:pan-y;
-  z-index:9;width:min(310px,calc(100% - 24px));display:none;flex-direction:column;
+  z-index:150;width:min(310px,calc(100% - 24px));display:none;flex-direction:column;
   background:rgba(16,16,20,.96);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
   border:1px solid rgba(255,255,255,.13);border-radius:14px;overflow:hidden}
 #chapPanel.show{display:flex}
@@ -449,13 +477,17 @@ input[type=text]::placeholder{color:var(--tx3)}
   transition:opacity .22s}
 #phead.hide{opacity:0;pointer-events:none}
 #phead .hrow{display:flex;align-items:center;gap:10px}
-#phead .hrow2{gap:8px;flex-wrap:wrap}
+#phead .hrow2{gap:6px;flex-wrap:wrap}
+/* 图标+文字竖排: 光看图标分不清(章节和列表以前都是 ≡, 用户骂过两次) */
+.icbtn.lbl{flex-direction:column;gap:3px;width:auto;min-width:50px;height:auto;padding:6px 8px}
+.icbtn.lbl svg.ic{width:16px;height:16px}
+.icbtn.lbl span{font-size:9.5px;line-height:1;letter-spacing:.2px;opacity:.9;white-space:nowrap}
 #phead .mid{flex:1;min-width:0}
 #phead .ttl{font-weight:700;font-size:15.5px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 #phead .sub2{color:var(--tx2);font-size:11.5px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .icbtn{display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.1);
-  border:0;color:#fff;border-radius:10px;width:38px;height:38px;cursor:pointer;
+  border:0;color:#fff;border-radius:10px;width:44px;height:44px;cursor:pointer;   /* 触摸目标 44px(后面别再改小) */
   backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);transition:transform .1s,opacity .15s}
 .icbtn:active{transform:scale(.9)} .icbtn:disabled{opacity:.25}
 .icbtn svg.ic{width:17px;height:17px}
@@ -482,7 +514,7 @@ input[type=text]::placeholder{color:var(--tx3)}
 .prow::-webkit-scrollbar{display:none}
 .prow .icbtn{flex:none;white-space:nowrap}   /* 以前按钮会被挤到换行, 最后一个(全屏)被挤出屏幕 */
 .prow{gap:4px}                              /* 7 个按钮(带全屏)窄屏也要放得下 */
-@media (max-width:360px){ .prow .icbtn{width:38px;min-width:38px;padding:0 7px} }
+@media (max-width:360px){ .prow .icbtn{width:40px;min-width:40px;padding:0 6px} }
 .icbtn.txt{width:auto;min-width:38px;padding:0 9px;font-size:12px;font-weight:700;letter-spacing:.3px}
 .icbtn.on{color:#FB7299;border-color:rgba(251,114,153,.5)}
 .ptime{color:#fff;font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums;opacity:.92;
@@ -577,16 +609,17 @@ input[type=text]::placeholder{color:var(--tx3)}
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
 <symbol id="i-check" viewBox="0 0 24 24"><path d="M4 12.5l5.2 5.2L20 6.5"/></symbol>
 <symbol id="i-list" viewBox="0 0 24 24"><path d="M8.5 6H20M8.5 12H20M8.5 18H20M4 6h.6M4 12h.6M4 18h.6"/></symbol>
+<symbol id="i-mark" viewBox="0 0 24 24"><path d="M3.5 7h17M3.5 17h17M8 4.5v5M14 14.5v5"/><circle cx="12" cy="12" r="2.4"/></symbol>
     <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
-    <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
+    <symbol id="i-arrowdown" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
   </defs>
 </svg>
 
 <header class="appbar">
   <div class="logo"><svg class="lic" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 7V4h7M20 7V4h-7M4 17v3h7M20 17v3h-7" fill="none" stroke="currentColor"
-        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity=".55"/>
-      <path d="M10 8.5l6 3.5-6 3.5v-7z" fill="currentColor"/></svg>De<b>cache</b></div>
+      <path d="M4.8 8.6v6.2a2.8 2.8 0 0 0 2.8 2.8h8.8a2.8 2.8 0 0 0 2.8-2.8V8.6"
+        fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M9.6 10.0l6.8 2.8-6.8 2.8z" fill="var(--pink)"/></svg>De<b>cache</b></div>
   <span class="ver" id="ver">…</span>
   <button class="langbtn" id="themeBtn" title="主题">
     <svg class="ic" style="width:14px;height:14px"><use href="#i-theme" id="themeIcon"/></svg>
@@ -622,8 +655,8 @@ input[type=text]::placeholder{color:var(--tx3)}
       </div>
     </div>
     <div class="row" style="margin-top:14px">
-      <button class="btn ghost sm" onclick="selAll(true)" data-i18n="all">全选</button>
-      <button class="btn ghost sm" onclick="selAll(false)" data-i18n="none">全不选</button>
+      <button class="btn ghost sm" onclick="selAllParts(true)" data-i18n="all">全选</button>
+      <button class="btn ghost sm" onclick="selAllParts(false)" data-i18n="none">全不选</button>
       <label class="meta" style="margin-left:auto;display:flex;align-items:center;gap:5px">
         <input type="checkbox" id="audioOnly" style="width:16px;height:16px;accent-color:currentColor"><span data-i18n="audio">仅音频</span>
       </label>
@@ -780,6 +813,11 @@ input[type=text]::placeholder{color:var(--tx3)}
 
 <div id="gtoast"></div>
 
+<div id="tagPop" class="tagpop">
+  <div class="tagpop-h" data-i18n="addTag">标签</div>
+  <div id="tagPopList"></div>
+</div>
+
 <div id="selbar" class="selbar">
   <span id="selCount">已选 0</span>
   <span class="spacer"></span>
@@ -825,6 +863,12 @@ input[type=text]::placeholder{color:var(--tx3)}
 <div id="pmodal">
   <div id="pstage">
     <video id="pvideo" playsinline autoplay></video>
+    <button id="pTap" style="display:none;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+      z-index:6;width:72px;height:72px;border-radius:50%;border:1px solid rgba(255,255,255,.3);
+      background:rgba(0,0,0,.55);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+      align-items:center;justify-content:center;cursor:pointer">
+      <svg class="ic" style="width:30px;height:30px;fill:#fff;stroke:none"><use href="#i-play"/></svg>
+    </button>
     <div id="pErr"><p id="pErrMsg"></p><div>
       <button class="btn sm" onclick="startPart(FI)" data-i18n="pRetry">重试</button>
       <button class="btn ghost sm" onclick="closePlayer()" data-i18n="pBack">返回</button></div></div>
@@ -840,10 +884,10 @@ input[type=text]::placeholder{color:var(--tx3)}
         <button class="icbtn" id="pPip" title="画中画"><svg class="ic"><use href="#i-pip"/></svg></button>
       </div>
       <div class="hrow hrow2">
-        <button class="icbtn" id="pCC" style="display:none" title="字幕">CC</button>
-        <button class="icbtn" id="pChap" title="章节"><svg class="ic"><use href="#i-list"/></svg></button>
-        <button class="icbtn" id="pList" title="播放列表"><svg class="ic"><use href="#i-clist"/></svg></button>
-        <button class="icbtn" id="pQueue" title="队列"><svg class="ic"><use href="#i-queue"/></svg></button>
+        <button class="icbtn lbl" id="pCC" style="display:none" title="字幕">CC</button>
+        <button class="icbtn lbl" id="pChap" title="章节"><svg class="ic"><use href="#i-mark"/></svg><span>章节</span></button>
+        <button class="icbtn lbl" id="pList" title="播放列表"><svg class="ic"><use href="#i-clist"/></svg><span>列表</span></button>
+        <button class="icbtn lbl" id="pQueue" title="队列"><svg class="ic"><use href="#i-queue"/></svg><span>队列</span></button>
       </div>
     </div>
     <div id="chapPanel">
@@ -922,7 +966,7 @@ const I18N = {
     dlDone:'下载完成', dlFail:'有下载失败', nextOff:'本集不自动连播',
     fAll:'全部', fFav:'收藏', queue:'播放队列', qClear:'清空队列', qEmpty:'队列是空的',
     quality:'清晰度', qAuto:'自动(最优)', qHint:'上限, 省空间',
-    multiSel:'多选', selN:'已选 %d 项', selAll:'全选', selFav:'收藏', selDel:'删除', selExit:'退出',
+    addTag:'标签', multiSel:'多选', selN:'已选 %d 项', selAll:'全选', selFav:'收藏', selDel:'删除', selExit:'退出',
     selNone:'还没选东西呢', selFavOk:'已收藏 %d 项', selDelOk:'已删除 %d 项', selFail:'批量操作失败',
     confirmDelBulk:'删掉选中的 %d 个视频?\n\n连同磁盘上所有分P文件一起永久删除, 找不回来。\n\n确定要删吗?',
     qAdd:'加入队列', qAdded:'已加入队列', qItems:'项', tabFolder:'文件夹',
@@ -938,7 +982,7 @@ const I18N = {
     subPosTop:'顶部', subPosMid:'居中', subPosBottom:'底部',
     dupes:'查重', storage:'磁盘', scanning:'扫描中…', noDupes:'没有重复文件',
     waste:'可省', wasteTotal:'共可省', total:'占用', free:'剩余', items:'项',
-    mainPart:'正片', segment:'片段', delPart:'删除这个分P', confirmDelPart:'只删掉这个分P的文件, 其他的保留。确定删 P',
+    mainPart:'正片', segment:'片段', delPart:'删除这个分P', confirmDelPart:'只删掉这个分P的文件, 其他的保留。确定删除 P%s 吗?',
     delPartOk:'已删除该分P',
     qUp:'上移', qDown:'下移', qRemove:'移除',
     urlPh:'粘贴视频链接', sessPh:'粘贴 cookie (KEY=VALUE; ...)',
@@ -985,7 +1029,7 @@ const I18N = {
     dlDone:'Download finished', dlFail:'Some downloads failed', nextOff:'Autoplay off for this one',
     fAll:'All', fFav:'Favorites', queue:'Queue', qClear:'Clear queue', qEmpty:'Queue is empty',
     quality:'Quality', qAuto:'Auto (best)', qHint:'cap, saves space',
-    multiSel:'Select', selN:'%d selected', selAll:'All', selFav:'Favorite', selDel:'Delete', selExit:'Exit',
+    addTag:'Tags', multiSel:'Select', selN:'%d selected', selAll:'All', selFav:'Favorite', selDel:'Delete', selExit:'Exit',
     selNone:'Nothing selected', selFavOk:'Favorited %d', selDelOk:'Deleted %d', selFail:'Bulk action failed',
     confirmDelBulk:'Delete %d selected videos?\n\nAll part files will be permanently deleted from disk.\n\nAre you sure?',
     qAdd:'Add to queue', qAdded:'Added to queue', qItems:'items', tabFolder:'Folders',
@@ -1002,7 +1046,7 @@ const I18N = {
     subPosTop:'Top', subPosMid:'Middle', subPosBottom:'Bottom',
     dupes:'Duplicates', storage:'Storage', scanning:'Scanning…', noDupes:'No duplicate files',
     waste:'reclaim', wasteTotal:'Total reclaimable', total:'Used', free:'Free', items:'items',
-    mainPart:'Main', segment:'Segment', delPart:'Delete this part', confirmDelPart:'Delete only this part\'s file, keep the others. Delete P',
+    mainPart:'Main', segment:'Segment', delPart:'Delete this part', confirmDelPart:'Delete only this part\'s file, keep the others. Delete P%s?',
     delPartOk:'Part deleted',
     qUp:'Move up', qDown:'Move down', qRemove:'Remove',
     urlPh:'Paste a video link', sessPh:'Paste cookie (KEY=VALUE; ...)',
@@ -1096,17 +1140,6 @@ function prunePos() {
 function savePos(rel, t) { try { localStorage.setItem('take_pos_' + rel, t); } catch (e) {} }
 
 /* 进度记录会无限增长, 撑爆 localStorage 配额后进度再也存不上 → 只留最近 200 条 */
-function prunePos() {
-  try {
-    const ks = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith('take_pos_')) ks.push(k);
-    }
-    if (ks.length > 200) ks.slice(0, ks.length - 200).forEach(k => localStorage.removeItem(k));
-  } catch (e) {}
-}
-function savePos(rel, t) { try { localStorage.setItem('take_pos_' + rel, t); } catch (e) {} }
 
 function toast(msg) {
   if (!msg) return;
@@ -1144,7 +1177,7 @@ async function api(path, opts) {
     throw new Error(msg);
   }
   if (!r.ok) {
-    const msg = 'HTTP ' + r.status;
+    const msg = 'HTTP ' + r.status + '(服务出错了, 稍后再试)';
     toast(msg);
     throw new Error(msg);
   }
@@ -1203,7 +1236,7 @@ async function parse() {
     if (b) { b.disabled = false; b.textContent = t('parse'); }
   }
 }
-function selAll(v) { document.querySelectorAll('.pc').forEach(c => c.checked = v); }
+function selAllParts(v) { document.querySelectorAll('.pc').forEach(c => c.checked = v); }
 async function download(partsOverride) {
   const parts = partsOverride || [...document.querySelectorAll('.pc:checked')].map(c => +c.value);
   if (!parts.length) return;
@@ -1354,6 +1387,7 @@ $('chapList').addEventListener('click', e => {
 $('pChap').onclick = () => {
   const on = $('chapPanel').classList.toggle('show');
   $('qpanel').classList.remove('show');
+  $('listPanel').classList.remove('show');   // 互斥
   if (on) { loadChapters(FLAT[FI]?.rel, v.duration); }
   poke();
 };
@@ -1361,8 +1395,9 @@ $('chapClose').onclick = () => $('chapPanel').classList.remove('show');
 $('chapAdd').onclick = async () => {
   const vd = (FLAT[FI] || {}).vd;
   if (!vd || !vd.bvid) return;
-  const t = v.currentTime || 0;
-  const r = await api('/api/marks', {bvid: vd.bvid, rel: FLAT[FI].rel, t});
+  // 变量别叫 t —— 它会遮蔽全局的 i18n 函数 t(), 下面 toast(t('chMarked')) 直接 TypeError
+  const pos = v.currentTime || 0;
+  const r = await api('/api/marks', {bvid: vd.bvid, rel: FLAT[FI].rel, t: pos});
   CHAP_MARKS = r.marks || [];
   renderChapters();
   toast(t('chMarked'));
@@ -1533,7 +1568,7 @@ function toggleSel(bvid) {
   updateSelBar();
   renderLib();
 }
-function selAll() {
+function selAllLib() {          // 媒体库的多选全选(原来叫 selAll, 和解析页那个重名 → 解析页的"全不选"是空按钮)
   const vids = LIB.videos || [];
   const all = vids.length && vids.every(v => SEL.has(v.bvid));
   SEL.clear();
@@ -1560,6 +1595,18 @@ async function selDelete() {
   } catch (err) { toast(t('selFail') + ': ' + errText(err)); }
   SEL.clear(); updateSelBar(); loadLib();
 }
+
+/* 顶栏高度写进 CSS 变量: 三个浮层要躲开它, 否则会盖住顶栏第二行的按钮(点不到) */
+function syncPanelTop() {
+  const h = document.getElementById('phead');
+  if (!h) return;
+  const r = h.getBoundingClientRect();
+  if (!r.height) return;          // 播放器还没开时量到 0, 别把值清零(否则浮层会盖住顶栏)
+  document.documentElement.style.setProperty('--pTop', Math.round(r.height) + 'px');
+}
+window.addEventListener('resize', syncPanelTop);
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', syncPanelTop);
+else syncPanelTop();
 
 /* ═══ 站点凭据管理(多域名 cookie) ═══ */
 async function loadCreds() {
@@ -1682,6 +1729,43 @@ $('filterChips').addEventListener('click', e => {
   renderFilterChips();
   loadLib();
 });
+let TAGPOP_BVID = '';
+function openTagPop(bvid, el) {
+  TAGPOP_BVID = bvid;
+  const vd = LIB.videos.find(x => x.bvid === bvid);
+  const cur = (vd && vd.tags) || [];
+  // 预设 6 色 + **这个视频已挂的自定义标签**(以前只列预设色 → 自定义标签永远取消不掉)
+  const names = TAGS.map(tg => tg.k);
+  cur.forEach(k => { if (!names.includes(k)) names.push(k); });
+  $('tagPopList').innerHTML = names.map(k => {
+    const tg = TAGS.find(x => x.k === k) || {k: k, c: '#8A8A94'};
+    return `<button class="tagopt${cur.includes(k) ? ' on' : ''}" data-tp="${esc(k)}">
+      <i style="background:${tg.c}"></i><span>${esc(k)}</span>
+      ${cur.includes(k) ? '<svg class="ic"><use href="#i-check"/></svg>' : ''}</button>`;
+  }).join('');
+  const pop = $('tagPop');
+  pop.classList.add('show');
+  const r = el.getBoundingClientRect();
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  let left = Math.max(8, Math.min(window.innerWidth - w - 8, r.left));
+  let top = r.bottom + 6;
+  if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
+  pop.style.left = left + 'px';
+  pop.style.top = top + 'px';
+}
+function closeTagPop() { $('tagPop').classList.remove('show'); }
+$('tagPopList').addEventListener('click', e => {
+  const o = e.target.closest('[data-tp]');
+  if (!o) return;
+  e.stopPropagation();
+  const b = TAGPOP_BVID;
+  closeTagPop();
+  toggleTag(b, o.dataset.tp);
+});
+document.addEventListener('click', e => {
+  if (!e.target.closest('#tagPop') && !e.target.closest('[data-tagmenu]')) closeTagPop();
+});
+
 async function toggleTag(bvid, tag) {
   const r = await api('/api/tag', {bvid, tag});
   if (!r) { toast(t('notFound')); return; }
@@ -1721,7 +1805,7 @@ function renderQueue() {
       <span class="qn" data-qplay="${i}">${esc(it.title || it.name || it.rel)}</span>
       <span class="qops">
         <button data-qup="${i}" title="${t('qUp')}"><svg class="ic"><use href="#i-up"/></svg></button>
-        <button data-qdown="${i}" title="${t('qDown')}"><svg class="ic"><use href="#i-down"/></svg></button>
+        <button data-qdown="${i}" title="${t('qDown')}"><svg class="ic"><use href="#i-arrowdown"/></svg></button>
         <button data-qdel="${i}" title="${t('qRemove')}"><svg class="ic"><use href="#i-x"/></svg></button>
       </span>
     </div>`).join('');
@@ -1756,6 +1840,7 @@ $('pQueue').onclick = () => { openQueue(); poke(); };
 function openQueue() {
   $('qpanel').classList.add('show');
   $('chapPanel').classList.remove('show');
+  $('listPanel').classList.remove('show');   // 三个面板互斥: 否则队列被列表面板整个盖住
   loadQueue();
 }
 /* 队列模式开关(播放列表来源: 全库 ↔ 我的队列) —— 按钮在播放列表面板里 */
@@ -1836,6 +1921,7 @@ $('browseList').addEventListener('click', e => {
     FLAT = [{rel, vd:{title: rel.split(/[\\/]/).pop()}, p:{p:1, name:''}}];
     startPart(0);
     $('pmodal').classList.add('open');
+  syncPanelTop();
   }
 });
 $('crumbs').addEventListener('click', e => {
@@ -1845,15 +1931,22 @@ $('crumbs').addEventListener('click', e => {
 /* ═══ 媒体库 ═══ */
 let __libETag = '';
 async function loadLib() {
-  const qs = new URLSearchParams();
-  if (FILTER_TAG) qs.set('tag', FILTER_TAG);
-  if (FILTER_FAV) qs.set('fav', '1');
-  const url = '/api/library' + (qs.toString() ? '?' + qs : '');
-  const r = await fetch(url, {headers: {'If-None-Match': __libETag}});
-  if (r.status === 304) return;
-  __libETag = r.headers.get('ETag') || '';
-  LIB = await r.json();
-  renderLib(); renderResume();
+  // 服务没起/断网时**不要抛出去**: 抛出去 = 未处理的 promise rejection,
+  // 界面停在"库里还空着", 用户以为是没数据, 其实服务挂了
+  try {
+    const qs = new URLSearchParams();
+    if (FILTER_TAG) qs.set('tag', FILTER_TAG);
+    if (FILTER_FAV) qs.set('fav', '1');
+    const url = '/api/library' + (qs.toString() ? '?' + qs : '');
+    const r = await fetch(url, {headers: {'If-None-Match': __libETag}});
+    if (r.status === 304) return;
+    __libETag = (r.headers && r.headers.get('ETag')) || '';
+    const d = await r.json();
+    if (d && Array.isArray(d.videos)) LIB = d;
+    renderLib(); renderResume();
+  } catch (e) {
+    renderLib();   // 保留上一次的 LIB, 别把界面清空
+  }
 }
 async function scanNow(btn) {
   btn.disabled = true;
@@ -1913,12 +2006,16 @@ function renderLib() {
         <div class="vt">${esc(v.title)}</div>
             <div class="vm">${v.total || 0}MB · ${fmtT(v.updated)}${(() => { const h = Math.max.apply(null, v.parts.map(p => p.h || 0).concat([0])); return h ? " · " + h + "P" : ""; })()}</div>
         <div class="ops">
-          <button class="btn ghost sm" data-toggle="${esc(v.bvid)}" aria-label="${t('expand')}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-clist"/></svg> ${v.parts.length}</button>
+          <button class="btn ghost sm" data-toggle="${esc(v.bvid)}" title="${t('expand')}" aria-label="${t('expand')}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-clist"/></svg> ${v.parts.length}</button>
           <button class="btn ghost sm" data-health="${esc(v.bvid)}" title="${t('health')}" aria-label="${t('health')}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-scan"/></svg></button>
-          <button class="btn danger sm" data-delvideo="${esc(v.bvid)}" aria-label="${t('del')}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-trash"/></svg></button>
+          <button class="btn danger sm" data-delvideo="${esc(v.bvid)}" title="${t('del')}" aria-label="${t('del')}"><svg class="ic" style="width:13px;height:13px;vertical-align:-2px"><use href="#i-trash"/></svg></button>
         </div>
         <div class="tagbar">
-          ${TAGS.map(tg => `<button class="tgbtn${(v.tags||[]).includes(tg.k) ? ' on' : ''}" data-tagbtn="${v.bvid}|${tg.k}" title="${tg.k}"><i style="background:${tg.c}"></i></button>`).join('')}
+          <button class="tagchip${(v.tags||[]).length ? ' has' : ''}" data-tagmenu="${esc(v.bvid)}" title="${t('addTag')}" aria-label="${t('addTag')}">
+            ${(v.tags||[]).slice(0,1).map(k => `<i style="background:${TAGMAP[k] || '#888'}"></i>`).join('')}
+            ${(v.tags||[]).length ? `<span>${esc((v.tags||[])[0])}${(v.tags||[]).length>1 ? ' +'+(v.tags||[]).length-1 : ''}</span>`
+                                 : `<span class="muted">${t('addTag')}</span>`}
+          </button>
           <button class="queuebtn" data-qadd="${esc(v.bvid)}" title="${t('qAdd')}" aria-label="${t('qAdd')}"><svg class="ic"><use href="#i-plus"/></svg></button>
         </div>
         <div class="parts" id="parts-${esc(v.bvid)}">
@@ -1954,8 +2051,8 @@ $('lib').addEventListener('click', async e => {
   if (selb) { e.stopPropagation(); toggleSel(selb.dataset.sel); return; }
   const favb = e.target.closest('[data-fav]');
   if (favb) { e.stopPropagation(); toggleFav(favb.dataset.fav); return; }
-  const tagBtn = e.target.closest('[data-tagbtn]');
-  if (tagBtn) { e.stopPropagation(); const [b, k] = tagBtn.dataset.tagbtn.split('|'); toggleTag(b, k); return; }
+  const tagMenu = e.target.closest('[data-tagmenu]');
+  if (tagMenu) { e.stopPropagation(); openTagPop(tagMenu.dataset.tagmenu, tagMenu); return; }
   const qa = e.target.closest('[data-qadd]');
   if (qa) {
     e.stopPropagation();
@@ -1970,7 +2067,7 @@ $('lib').addEventListener('click', async e => {
   if (dp) {
     e.stopPropagation();
     const bvid = dp.dataset.delp, pp = dp.dataset.delpP, rel = dp.dataset.delpRel;
-    if (!confirm(t('confirmDelPart') + ' P' + pp + '?')) return;
+    if (!confirm(t('confirmDelPart').replace('%s', String(pp)))) return;
     dp.style.opacity = '.4';
     try {
       await api('/api/delete', {rel});
@@ -2084,6 +2181,7 @@ function openRel(rel) {
   if (i < 0) { FLAT = [{rel, vd: {title: rel.split(/[\\/]/).pop()}, p: {p: 1, name: ''}}]; i = 0; }
   startPart(i);
   $('pmodal').classList.add('open');
+  syncPanelTop();
   poke();                        // 控制条立刻显示, 别让用户干等
   renderList();                  // 播放列表面板同步刷新
   if (!localStorage.getItem('take_hint_done')) {
@@ -2112,6 +2210,7 @@ function updateMeta() {
 const AUDIO_RE = /\.(m4a|mp3|flac|aac|ogg|opus|wav|mka)$/i;
 
 function startPart(i) {
+  syncPanelTop();                 // 顶栏高度变了(两行/一行), 浮层要跟着挪
   if (!FLAT.length) { toast(t('qEmpty')); return; }
   i = Math.max(0, Math.min(FLAT.length - 1, Number(i) || 0));
   if (!FLAT[i]) return;
@@ -2125,6 +2224,7 @@ function startPart(i) {
   const saved = parseFloat(localStorage.getItem(posKey(rel)) || 0);
   let _seeked = false;
   v.onloadedmetadata = () => {
+    dur = v.duration || 0;      // 桌面端也要有(以前只在 touchstart 里赋值 → 鼠标拖进度条没缩略图, 双击变暂停)
     if (!_seeked && saved > 5 && saved < v.duration - 8) { v.currentTime = saved; _seeked = true; }
     setTime();
     setProg(v.currentTime / (v.duration || 1));
@@ -2170,7 +2270,10 @@ async function keepAwake(on) {
 function setPlayIcon() {
   $('pPlayIc').setAttribute('href', v.paused ? '#i-play' : '#i-pause');
 }
-v.addEventListener('play', () => { setPlayIcon(); poke(); keepAwake(true); });
+v.addEventListener('play', () => { setPlayIcon(); poke(); keepAwake(true); $('pTap').style.display = 'none'; });
+/* iOS Safari 等浏览器会拦自动播放(有声视频必须有用户手势) → 给个明确的"点按播放" */
+v.addEventListener('pause', () => { $('pTap').style.display = (v.currentTime < 0.2 && !v.ended) ? 'flex' : 'none'; });
+$('pTap').onclick = e => { e.stopPropagation(); v.play().catch(() => {}); };
 v.addEventListener('pause', () => { setPlayIcon(); bar.classList.remove('hide');
   phead.classList.remove('hide'); clearTimeout(barT); keepAwake(false); });
 
@@ -2469,7 +2572,9 @@ v.addEventListener('timeupdate', () => {
 
 /* 连播四模式(图标 only · 记忆) */
 const MODES = [{ic:'→', k:'seqMode'}, {ic:'∞', k:'loopAll'}, {ic:'↻', k:'loopOne'}, {ic:'⤨', k:'shuffle'}];
-let MODE_I = Math.min(3, parseInt(localStorage.getItem('take_mode') || '1') || 1);
+// 注意: 不能写 parseInt(x) || 1 —— 顺序模式是 0, 0 是假值 → 永远读不回"顺序"
+let MODE_I = (() => { const m = parseInt(localStorage.getItem('take_mode') ?? '1', 10);
+  return Number.isFinite(m) ? Math.min(3, Math.max(0, m)) : 1; })();
 function renderMode() { const m = MODES[MODE_I];
   const b = $('pAuto'); b.textContent = m.ic; b.title = t(m.k); b.setAttribute('aria-label', t(m.k)); }
 renderMode();
@@ -2590,8 +2695,8 @@ function importM3uFile(inp) {
   inp.value = '';
 }
 async function saveSess() {
-  const v = $('cfgCookie').value.trim();
-  if (!v) { toast(t('cookieEmpty')); return; }
+  const cv = $('cfgCookie').value.trim();
+  if (!cv) { toast(t('cookieEmpty')); return; }
   if (!v.includes('=')) { toast(t('cookieBad')); return; }
   try {
     const r = await api('/api/config', {cookie: v});

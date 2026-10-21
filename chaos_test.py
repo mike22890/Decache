@@ -48,7 +48,9 @@ try:
     chk("坏 JSON 会报错而不是静默清空", False, "居然返回了")
 except RuntimeError as e:
     chk("坏 JSON 报错且提示备份", "备份" in str(e), str(e)[:80])
-chk("坏文件被备份走", len(list(tmp.glob("library.corrupt-*.json"))) == 1, str(list(tmp.glob("*.json"))))
+chk("坏文件被备份走", len(list(tmp.glob("library.corrupt-*.json"))) >= 1, str(list(tmp.glob("*.json"))))
+chk("坏库时**原文件还在**(以前是搬走 -> 下次读当空库 -> 一次写盘就把空库固化)",
+    server.LIB_FILE.exists(), "原文件被搬走了")
 
 # 2) 顶层是数组
 server.LIB_FILE.write_text("[1,2,3]", encoding="utf-8")
@@ -58,9 +60,28 @@ try:
 except RuntimeError:
     chk("顶层是数组会报错", True)
 
-# 3) 空库正常
+# 3) 原文件没了但有损坏备份 -> **必须报错**, 不能当空库
+#    (以前: 读失败就把原文件改名搬走 -> 第二次读返回 {} -> 下一次写盘把空库写回
+#     -> 用户的标签/收藏永久消失)
+for _b in list(tmp.glob("library.corrupt-*.json")):
+    _b.unlink(missing_ok=True)
 server.LIB_FILE.unlink(missing_ok=True)
 chk("空库正常返回 {}", server.load_library() == {})
+server.LIB_FILE.write_text("{坏", encoding="utf-8")
+try:
+    server.load_library()
+except RuntimeError:
+    pass
+server.LIB_FILE.unlink(missing_ok=True)
+try:
+    server.load_library()
+    chk("原文件没了但有损坏备份 -> 拒绝当空库", False, "居然返回空库了")
+except RuntimeError as e:
+    chk("原文件没了但有损坏备份 -> 拒绝当空库", "备份" in str(e), str(e)[:80])
+for _b in list(tmp.glob("library.corrupt-*.json")):
+    _b.unlink(missing_ok=True)
+server.LIB_FILE.unlink(missing_ok=True)
+chk("清掉备份后空库正常返回 {}", server.load_library() == {})
 
 print("== 脏数据砸任务/队列 ==")
 server.TASKS_FILE.write_text("{坏", encoding="utf-8")
@@ -137,6 +158,10 @@ try:
 except RuntimeError:
     chk("库坏时 library_view 报错而非返回垃圾", True)
 server.LIB_FILE.unlink(missing_ok=True)
+# 坏库会留一份 library.corrupt-*.json 备份; 新版逻辑是"原文件没了但有损坏备份 -> 拒绝当空库",
+# 所以这里必须把备份清掉, 否则后面的 HTTP 端点测试会全部 500(那是**故意的保护**, 不是 bug)
+for _b in list(tmp.glob("library.corrupt-*.json")):
+    _b.unlink(missing_ok=True)
 
 print("== HTTP 层: 每个端点都不能 500 ==")
 threading.Thread(target=server.main, daemon=True).start()
@@ -218,6 +243,7 @@ except Exception as e:
 server.save_config_value("cookie", "")
 
 print("== 引擎参数必须是 yt-dlp 真有的选项(2026-10-21 用户踩到 --no-cleanup 不存在) ==")
+old_engine = server.ENGINE          # 以前没定义 → 整个 chaos 测试跑到最后一行就崩(退出码非 0, 还没打印结果)
 server.ENGINE = "yt-dlp"
 server.SESSION_COOKIE = ""
 cmd = server._cmd("https://videos.example.org/w/1?p=2", False, DL)

@@ -22,7 +22,8 @@ function makeEl(tag = 'div') {
   const store = {};
   const el = {
     tagName: tag.toUpperCase(),
-    style: new Proxy({}, { get: (t, k) => t[k] ?? '', set: (t, k, v) => (t[k] = v, true) }),
+    style: new Proxy({ setProperty() {}, removeProperty() {}, getPropertyValue: () => '' },
+      { get: (t, k) => (k in t ? t[k] : (t[k] ?? '')), set: (t, k, v) => (t[k] = v, true) }),
     dataset: {},
     classList: {
       _s: new Set(),
@@ -76,6 +77,8 @@ const doc = {
 const sandbox = {
   console: { log() {}, warn: (...a) => warnings.push(a.join(' ')), error: (...a) => warnings.push(a.join(' ')), info() {}, debug() {} },
   document: doc,
+  addEventListener() {}, removeEventListener() {},   // 全局级监听(window.addEventListener)
+  dispatchEvent() { return true; },
   navigator: { userAgent: 'node-smoke', language: 'zh-CN', mediaSession: { metadata: null, setActionHandler() {} }, share() {} },
   location: { href: 'http://127.0.0.1:8790/', protocol: 'http:', host: '127.0.0.1:8790', origin: 'http://127.0.0.1:8790', pathname: '/', search: '', hash: '' },
   history: { pushState() {}, replaceState() {} },

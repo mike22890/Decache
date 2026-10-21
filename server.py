@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -23,16 +24,47 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "6.6"          # 版本号: 显示在界面顶栏, 排查新旧用
+VERSION = "6.13"         # 版本号: 显示在界面顶栏, 排查新旧用(改代码顺手改这里)
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.ini"
+# 下载目录/扫描目录的默认值**按平台给不同值**:
+#   Termux(手机) → 共享存储 ~/storage(文件管理器能看到)
+#   Windows/macOS/Linux → 用户主目录下的 Downloads/Movies
+# 以前所有平台都写死 ~/storage/... → Windows 上会凭空多一个 storage\ 目录,
+# "扫描全盘"扫的是不存在的路径 → 永远 0 结果, 用户以为功能坏了。
+_IS_TERMUX_ENV = os.environ.get("PREFIX", "").endswith("com.termux/files/usr")
+_IS_MAC_ENV = sys.platform == "darwin"
+if _IS_TERMUX_ENV:
+    _DEF_DL = "~/storage/downloads/decache"
+    _DEF_SCAN = "~/storage/downloads,~/storage/Movies,~/storage/shared"
+elif _IS_MAC_ENV:
+    _DEF_DL = "~/Movies/decache"
+    _DEF_SCAN = "~/Movies,~/Downloads,~/Videos"
+else:
+    _DEF_DL = "~/Downloads/decache"
+    _DEF_SCAN = "~/Downloads,~/Videos,~/Movies"
+
+
+def _int_cfg(key, default):
+    """配置里的整数: 手改坏了(比如 port = abc)不能让服务起不来。"""
+    try:
+        return int(str(_CONF.get(key, default)).strip())
+    except (TypeError, ValueError):
+        try:
+            log_op("配置项 " + str(key) + " 不是数字, 用默认值 " + str(default), "error")
+        except Exception:
+            pass
+        return int(default)
+
+
+
 DEFAULTS = {
     "port": "8765",
     "engine": "yt-dlp",      # yt-dlp 跨平台有官方二进制/包且抽取器日更; you-get 已停更(2025-01)仅兜底
     "cookie": "",             # 站点登录 cookie(可选): "KEY=VALUE; K2=V2" 或裸值; 域名按链接自动推断
     "delay": "4",            # 每个P之间歇几秒, 被限速就调大
-    "download_dir": "~/storage/downloads/decache",   # 下载落点(机器相关)
-    "scan_dirs": "~/storage/downloads,~/storage/Movies",  # 全盘扫描的视频目录
+    "download_dir": _DEF_DL,          # 下载落点(按平台给不同默认值, 见 _DEF_*)
+    "scan_dirs": _DEF_SCAN,           # 全盘扫描的视频目录
     "hang_timeout": "180",   # 引擎断流多少秒判卡死(长视频/慢网速可调大)
     "exclude_dirs": "",      # 扫描排除(逗号分隔的路径片段), 目录名匹配即跳过
     "bind": "127.0.0.1",     # 监听地址。改 0.0.0.0 可让手机/平板访问(仅限可信局域网!)
@@ -127,14 +159,14 @@ def load_config():
 
 _CONF = load_config()
 HOST = "127.0.0.1"
-PORT = int(_CONF.get("port", "8765"))
+PORT = _int_cfg("port", 8765)
 ENGINE = _CONF.get("engine", "you-get")
 YUTTO = "yutto"
 SESSION_COOKIE = _CONF.get("cookie", "")
-DELAY_BETWEEN_PARTS = int(_CONF.get("delay", "4"))
+DELAY_BETWEEN_PARTS = _int_cfg("delay", 4)
 DOWNLOAD_DIR = Path(os.path.expanduser(_CONF.get("download_dir", DEFAULTS["download_dir"])))
 SCAN_DIRS = _CONF.get("scan_dirs", DEFAULTS["scan_dirs"])
-HANG_TIMEOUT = int(_CONF.get("hang_timeout", "180"))
+HANG_TIMEOUT = _int_cfg("hang_timeout", 180)
 EXCLUDE_DIRS = [x.strip() for x in _CONF.get("exclude_dirs", "").split(",") if x.strip()]
 BIND = _CONF.get("bind", "127.0.0.1").strip() or "127.0.0.1"
 
@@ -179,7 +211,6 @@ URL_RE = re.compile(r"https?://[^\s\]\)】\"'，。,]+")
 #   - Windows 需要 CREATE_NO_WINDOW 否则每条命令闪黑框
 import shutil
 import socket
-import sys
 import unicodedata
 
 IS_WIN = sys.platform.startswith("win")
@@ -428,7 +459,8 @@ def write_cookie_jar(domain, pairs, path):
     lines = ["# Netscape HTTP Cookie File"]
     for k, v in pairs.items():
         lines.append(f"{domain}\tTRUE\t/\tFALSE\t0\t{k}\t{v}")
-    path.write_text("\n".join(lines) + "\n", "utf-8")
+    # 原子写: 以前直接 write_text, 写到一半被杀会留半截 cookie → 下次下载认证失败
+    atomic_write(path, "\n".join(lines) + "\n")
 
 def mask_cookie(cv):
     """给 UI 看的掩码: 只露出键名和值的头尾, 不泄露完整凭据。"""
@@ -735,7 +767,14 @@ def universal_copy(bvid, p):
     remux = video_ok and audio_ok
     dst = src.with_name(src.stem + "_uni.mp4")
     if dst.exists():
-        dst.unlink(missing_ok=True)
+        # 目标已存在: 只有"上次本程序生成的"才允许覆盖, 否则那是**用户自己的文件**
+        # (以前无条件 unlink → 用户文件被销毁)。判断依据: 库里这个分P 的 uni_file。
+        if str(d.get("uni_file", "")) == dst.name:
+            dst.unlink(missing_ok=True)          # 是我们的产物, 放心覆盖
+        else:
+            dst = src.with_name(src.stem + "_uni2.mp4")
+            if dst.exists():
+                return {"error": "已经有一个通用版了(同名文件被占用), 先删掉再试"}
     # 只取第一条视频+第一条音频: Safari 只用第一条, 全搬会白撑大文件
     args = ["-i", str(src), "-map", "0:v:0", "-map", "0:a:0?"]
     if remux:
@@ -751,13 +790,24 @@ def universal_copy(bvid, p):
     args += [str(dst)]
     ok, err = run_ffmpeg(args, timeout=7200)
     if not ok or not dst.exists():
+        try:
+            dst.unlink(missing_ok=True)      # 失败留半截文件 → 下次会被当成"新下载的文件"
+        except OSError:
+            pass
         return {"error": f"转换失败: {err[:160]}"}
     st = dst.stat()
-    d["file"] = dst.name
-    d["size"] = round(st.st_size / 1048576, 1)
+    # **不改** d["file"]: 改了原文件就成了库不认识的孤儿(查重/统计都看不到它)。
+    # 播放时 /api/stream 会自动优先用同目录的 _uni.mp4, 不需要改库。
+    d["uni_file"] = dst.name
+    d["uni_size"] = round(st.stat().st_size / 1048576, 1)
     d["uni_copy"] = True
-    e["parts"][str(p)] = d
-    save_library(lib)
+
+    def _set_uni(lib):
+        ent = lib.get(bvid)
+        if ent is not None:
+            ent["parts"][str(p)] = d
+        return lib
+    mutate_library(_set_uni)
     return {"ok": True, "file": dst.name, "remuxed": remux,
             "size_mb": d["size"], "src_codec": vcodec, "src_pix": pix}
 
@@ -966,7 +1016,9 @@ def scan_videos():
             if excluded(folder):
                 continue                          # 黑名单目录, 跳过
             try:
-                found.setdefault(folder, []).append((f.name, round(f.stat().st_size / 1048576, 1)))
+                # 文件名统一 NFC: macOS 磁盘是 NFD, 库里存的是 NFC →
+                # 不归一化就"同一个文件两个名字" → 重复导入 + 库里有、磁盘上找不到
+                found.setdefault(folder, []).append((nfc(f.name), round(f.stat().st_size / 1048576, 1)))
             except OSError:
                 continue
 
@@ -1007,16 +1059,19 @@ def scan_videos():
 def export_bundle():
     """导出面板全部状态为 tar.gz(配置+媒体库+封面+程序), 换机整个拷走即还原。"""
     import tarfile
-    out = Path(os.path.expanduser("~/storage/downloads/decache-backup.tar.gz"))
-    out.parent.mkdir(parents=True, exist_ok=True)
+    # 放在程序目录里, 别写死 ~/storage/(Windows 上会造个 storage 目录)
+    out = BASE_DIR / "decache-backup.tar.gz"
     with tarfile.open(out, "w:gz") as tar:
         for name in ("config.ini", "library.json", "cookies.txt",
-                     "server.py", "index.html", "start.sh"):
+                     "server.py", "index.html", "start.sh", "start.bat",
+                     "manifest.json", "sw.js", "README.md"):
             p = BASE_DIR / name
             if p.exists():
                 tar.add(p, arcname=f"decache/{name}")
         if COVER_DIR.exists():
             tar.add(COVER_DIR, arcname="decache/covers")
+        if (BASE_DIR / "icons").is_dir():
+            tar.add(BASE_DIR / "icons", arcname="decache/icons")
     return out
 
 _video_re = re.compile(r"\.(mp4|m4v|webm|mkv|mov)$", re.I)
@@ -1135,14 +1190,23 @@ def load_library():
     正确做法: 备份坏文件 + 抛错, 让用户看见并处理。"""
     with _lib_lock:
         if not LIB_FILE.exists():
+            # 原文件没了但有损坏备份 → 绝不能静默当空库(会被下一次写盘固化)
+            _baks = sorted(BASE_DIR.glob("library.corrupt-*.json"))
+            if _baks:
+                raise RuntimeError(
+                    f"媒体库文件不见了, 但找到损坏备份 {_baks[-1].name} —— "
+                    f"请把它改名回 library.json 后再启动(程序不会用空库覆盖你的数据)")
             return {}
         try:
             raw = LIB_FILE.read_text("utf-8")
             d = json.loads(raw)
         except Exception as e:
+            # **只复制, 不移动**! 以前是把原文件改名搬走 → 第二次读直接返回 {} →
+            # 面板变成空库 → 下一��写盘就把空库写回 → 用户的标签/收藏永久消失。
             bak = LIB_FILE.with_name(f"library.corrupt-{int(time.time())}.json")
             try:
-                LIB_FILE.replace(bak)
+                import shutil as _sh
+                _sh.copy2(LIB_FILE, bak)
             except OSError:
                 pass
             raise RuntimeError(
@@ -1363,7 +1427,11 @@ def library_view(tag=None, fav=False):
         if fav and not e.get("fav"):
             continue
         total = round(sum(x["size"] for x in parts), 1)
-        mt = max((folder / x["file"]).stat().st_mtime for x in parts) if parts else folder.stat().st_mtime
+        # 文件可能已被用户在文件管理器里删了 → 整段包 try, 别让整个库接口 500(看着像全丢了)
+        try:
+            mt = max((folder / x["file"]).stat().st_mtime for x in parts) if parts else folder.stat().st_mtime
+        except OSError:
+            mt = time.time()
         videos.append({"bvid": bvid, "title": e["title"], "folder": e["folder"],
                        "cover": bool(e.get("cover")), "cover_rev": _cover_rev(bvid),
                        "owner": e.get("owner", ""),
@@ -1405,33 +1473,98 @@ def mutate_library(fn):
 def delete_video(bvid):
     """删掉一个视频(整个): 取消进行中的下载 + 删文件夹 + 摘库 + 删封面。
     单个删除和批量删除共用这一份逻辑 —— 批量时前端循环调 /api/delete,
-    中途断网就会删一半, 用户看到"删了一半"的烂摊子, 所以批量必须服务端一次干完。"""
+    中途断网就会删一半, 用户看到"删了一半"的烂摊子, 所以批量必须服务端一次干完。
+
+    **删不掉就不摘库条目**(Windows 上文件被播放器/杀软占着很常见):
+    以前 rmtree(ignore_errors=True) 静默失败, 库里照样摘掉 →
+    磁盘留孤儿文件, 占用/查重对不上, 用户还以为删干净了。
+    返回 (ok, err)。"""
     with _task_lock:
         for tt in tasks:
             if tt["bvid"] == bvid and tt["status"] in ("排队中", "下载中"):
                 tt["status"] = "已取消"
                 if tt.get("proc"):
                     try:
-                        tt["proc"].terminate()
+                        kill_tree(tt["proc"])      # 只 terminate 父进程会留 ffmpeg 孤儿
                     except Exception:
                         pass
     save_tasks()
     lib = load_library()
-    entry = lib.pop(bvid, None)
+    entry = lib.get(bvid)
     if not entry:
-        return False
+        return (False, "库里没这个视频")
+    err = _delete_files_of(entry)
+    if err:
+        log_op(f"删除失败: {entry.get('title', bvid)[:40]} — {err}", "error")
+        return (False, err)
+    # 文件删成功才摘库条目(用 mutate_library, 避免覆盖别人的并发改动)
+    def _pop(lib):
+        lib.pop(bvid, None)
+        return lib
     try:
-        shutil.rmtree(DOWNLOAD_DIR / entry["folder"], ignore_errors=True)
-    except Exception:
-        pass
+        mutate_library(_pop)
+    except Exception as e:
+        log_op(f"删文件成功但清库失败: {e}", "error")
     for suffix in (".jpg", "_s.jpg"):
         try:
             (COVER_DIR / f"{bvid}{suffix}").unlink(missing_ok=True)
         except OSError:
             pass
-    save_library(lib)
     log_op(f"已删除: {entry.get('title', bvid)[:50]}")
-    return True
+    return (True, "")
+
+
+def _delete_files_of(entry):
+    """删一个条目的文件, **返回空串=成功, 非空=失败原因**。
+
+    安全红线(2026-10-21 审计):
+      ① 绝对路径的条目(扫描导入的面板外目录)→ **只删本程序登记的那几个文件**,
+         绝不删整个用户目录;
+      ② 相对路径的条目 → resolve 后必须落在 DOWNLOAD_DIR 里, 且不能等于
+         DOWNLOAD_DIR 本身 —— 以前 folder=="." 时会把整个下载目录 rmtree 掉,
+         用户所有视频一起消失;
+      ③ 文件删不掉(Windows 被占用)→ 明确报错, 库条目保留。"""
+    raw = str(entry.get("folder", "") or "")
+    dl_root = DOWNLOAD_DIR.resolve()
+    if not raw:
+        return ""                                   # 没有目录, 没什么可删
+    if Path(raw).is_absolute():
+        # 面板外的目录: 只删 parts 里登记的文件, 每个都过白名单
+        bad = ""
+        for _p, _d in (entry.get("parts") or {}).items():
+            fn = str((_d or {}).get("file", "") or "")
+            if not fn:
+                continue
+            tgt = Path(raw) / fn
+            ok = safe_media_path(str(tgt))
+            if ok is None:
+                bad = bad or f"文件不在允许的目录内, 拒绝删除: {tgt}"
+                continue
+            try:
+                ok.unlink(missing_ok=True)
+            except OSError as e:
+                bad = bad or f"文件删不掉({e.strerror or e}): {ok.name}"
+        return bad
+    target = (DOWNLOAD_DIR / raw)
+    try:
+        resolved = target.resolve()
+    except Exception:
+        return "路径不合法"
+    if resolved == dl_root:
+        return "拒绝删除下载目录本身(会把你所有视频一起删掉)"
+    try:
+        if not resolved.is_relative_to(dl_root):
+            return f"拒绝删除下载目录之外的路径: {resolved}"
+    except Exception:
+        return "路径不合法"
+    try:
+        if resolved.is_dir():
+            shutil.rmtree(resolved)                # 不用 ignore_errors: 失败要能报出来
+    except OSError as e:
+        return f"文件删不掉(可能被播放器/杀软占用): {e.strerror or e}"
+    except Exception as e:
+        return f"文件删不掉: {e}"
+    return ""
 
 
 def toggle_tag(bvid, tag):
@@ -1487,12 +1620,14 @@ def save_tasks():
     with _task_lock:
         undone = [{k: t.get(k) for k in ("id", "bvid", "title", "parts", "part_names",
                                           "cover", "audio_only", "failed", "created",
-                                          "url", "part_urls", "quality")}
+                                          "url", "part_urls", "quality",
+                                          "_replace_bak", "_replace_orig")}
                   for t in tasks if t["status"] in ("排队中", "下载中")]
     try:
         atomic_write(TASKS_FILE, json.dumps(undone, ensure_ascii=False))
-    except Exception:
-        pass
+    except Exception as e:
+        # 以前完全静默 → 用户重启后队列凭空消失, 且日志里一个字都没有
+        log_op("任务落盘失败(重启后队列会丢): " + str(e), "error")
 
 def restore_tasks():
     """启动时恢复中断的队列。"""
@@ -1501,17 +1636,29 @@ def restore_tasks():
         return 0
     try:
         data = json.loads(TASKS_FILE.read_text("utf-8"))
-    except Exception:
+    except Exception as e:
+        log_op(f"任务文件读不了(已忽略): {e}", "error")
+        return 0
+    if not isinstance(data, list):
+        # 以前直接 data.items() → TypeError → main() 抛异常 → **服务根本起不来**
+        log_op("任务文件格式不对(不是列表), 已忽略", "error")
         return 0
     n = 0
     with _task_lock:
         for d in data:
-            _next_id[0] = max(_next_id[0], d["id"])
-            tasks.append({"id": d["id"], "bvid": d["bvid"], "title": d["title"],
+            if not isinstance(d, dict) or "id" not in d or "bvid" not in d:
+                continue                                   # 坏条目跳过, 别让整个恢复崩掉
+            try:
+                _next_id[0] = max(_next_id[0], int(d.get("id", 0) or 0))
+            except (TypeError, ValueError):
+                continue
+            tasks.append({"id": d["id"], "bvid": d["bvid"], "title": d.get("title", ""),
                           "parts": d["parts"], "part_names": d.get("part_names", {}),
                           "cover": d.get("cover", ""), "audio_only": d.get("audio_only", False),
                           "url": d.get("url", ""), "part_urls": d.get("part_urls", {}),
                           "quality": int(d.get("quality", 0) or 0),
+                          "_replace_bak": d.get("_replace_bak", ""),
+                          "_replace_orig": d.get("_replace_orig", ""),
                           "status": "排队中", "line": "⚡ restored, resuming",
                           "failed": d.get("failed", []), "proc": None,
                           "created": d.get("created", time.time())})
@@ -1574,7 +1721,7 @@ def cookie_for_domain(url):
                 return v
     return _CONF.get("cookie", "") or m.get("", "") or ""
 
-def _cmd(url, audio_only, folder, quality=0):
+def _cmd(url, audio_only, folder, quality=0, part_no=0):
     # cookie: 按链接域名挑对应凭据, 每个域名一个 jar 文件(多站点不打架)
     cv = cookie_for_domain(url)
     jar = None
@@ -1614,7 +1761,12 @@ def _cmd(url, audio_only, folder, quality=0):
                    "bv*[vcodec^=h264]+ba[acodec^=aac]/"
                    "b[ext=mp4]/bv*+ba/b")
         m = re.search(r"[?&]p=(\d+)", url)
-        name = f"P{m.group(1)}" if m else "video"      # 按P命名, 防互相覆盖
+        # 名字优先用**分P序号**: 合集/列表类链接的 URL 里没有 p= → 以前全叫 "video" →
+        # 同名撞车, yt-dlp 直接"已下载"跳过 → 后面几个P全部没下, 但任务显示"完成"
+        if part_no:
+            name = "P%d" % int(part_no)
+        else:
+            name = f"P{m.group(1)}" if m else "video"
         cmd = ["yt-dlp", "--no-playlist", "--no-warnings", "--newline"]
         if audio_only:
             # 仅音频: **绝对不要**带视频格式串。
@@ -1661,10 +1813,6 @@ def absorb_meta(bvid, folder, p):
                 info = None
     if not info:
         return None
-    lib = load_library()
-    e = lib.get(bvid)
-    if not e:
-        return None
     meta = {
         "uploader": info.get("uploader") or info.get("channel") or "",
         "desc": (info.get("description") or "")[:2000],
@@ -1674,17 +1822,22 @@ def absorb_meta(bvid, folder, p):
         "webpage": info.get("webpage_url") or "",
         "upload_date": info.get("upload_date") or "",
     }
-    e["meta"] = meta
-    if meta["thumb"] and not e.get("cover_url"):
-        e["cover_url"] = meta["thumb"]
-    if meta["webpage"] and not e.get("source_url"):
-        e["source_url"] = meta["webpage"]
-    if meta["uploader"] and not e.get("owner"):
-        e["owner"] = meta["uploader"]
-    if meta["desc"] and not e.get("desc"):
-        e["desc"] = meta["desc"]
-    save_library(lib)
-    return meta
+    def _apply(lib):
+        e = lib.get(bvid)
+        if e is None:
+            return None
+        e["meta"] = meta
+        if meta["thumb"] and not e.get("cover_url"):
+            e["cover_url"] = meta["thumb"]
+        if meta["webpage"] and not e.get("source_url"):
+            e["source_url"] = meta["webpage"]
+        if meta["uploader"] and not e.get("owner"):
+            e["owner"] = meta["uploader"]
+        if meta["desc"] and not e.get("desc"):
+            e["desc"] = meta["desc"]
+        return meta
+    # 走 mutate_library: 以前 load→改→save, 下载期间用户的标签/收藏会被覆盖掉
+    return mutate_library(_apply)
 
 _EXISTS = object()      # 哨兵: 下载成功但文件本来就在(重下场景)
 
@@ -1747,7 +1900,7 @@ def _run_part(task, p, folder):
                                         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
             else:
                 pk["start_new_session"] = True
-            proc = subprocess.Popen(_cmd(url, task.get("audio_only", False), folder, q),
+            proc = subprocess.Popen(_cmd(url, task.get("audio_only", False), folder, q, p),
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                     encoding="utf-8", errors="replace", **pk)
         except Exception as e:
@@ -1870,60 +2023,81 @@ def _worker_once():
         got = _run_part(task, p, folder)
         if task["status"] == "已取消":
             break
-        lib = load_library()
-        entry = lib.get(task["bvid"])
-        if not entry:
-            # 用户在下载途中把这个视频删了 → 跳过这个分P, 别让整个 worker 崩
+        # 用户在下载途中把这个视频删了 → 跳过这个分P, 别让整个 worker 崩
+        if task["bvid"] not in load_library():
+            task["line"] = f"P{p} skipped (已被删除)"
+            break
+        # 先把音频抽出来(you-get 没有纯音频开关) —— 放在写库之前
+        if isinstance(got, Path) and task.get("audio_only") and ENGINE == "you-get":
+            # you-get 没有纯音频开关: 下完视频后 ffmpeg 流复制抽音轨(不重编码, 秒级)
+            task["line"] = f"P{p} extracting audio..."
+            m4a = got.with_suffix(".m4a")
+            ok, _e = run_ffmpeg(["-i", str(got), "-vn", "-c:a", "copy", str(m4a)], timeout=600)
+            if ok and m4a.exists() and m4a.stat().st_size > 1024:
+                got.unlink(missing_ok=True)
+                got = m4a
+        # 登记用 mutate_library(读-改-写都在锁内):
+        # 以前是 load→改→save, **下载期间用户打的标签/收藏会被这份旧快照覆盖掉**
+        # (实测: 下载一完成, 用户的标签凭空消失, 且没有任何报错)
+        _info = {}
+        if isinstance(got, Path):
+            try:
+                _info["file"] = str(got.relative_to(folder))
+                _info["size"] = round(got.stat().st_size / 1048576, 1)
+            except (OSError, ValueError):
+                _info = {}
+        elif got is _EXISTS:
+            for _ext in (".mp4", ".mkv", ".webm", ".m4a"):
+                _c2 = folder / f"P{p}{_ext}"
+                if _c2.is_file():
+                    try:
+                        _info["file"] = _c2.name
+                        _info["size"] = round(_c2.stat().st_size / 1048576, 1)
+                    except OSError:
+                        pass
+                    break
+
+        def _apply(lib):
+            e = lib.get(task["bvid"])
+            if e is None:
+                return None
+            if _info:
+                e["parts"][str(p)] = {"name": task["part_names"].get(str(p), f"P{p}"),
+                                     "file": _info["file"], "size": _info["size"]}
+            return e
+
+        _ent = mutate_library(_apply)
+        if _ent is None:
             task["line"] = f"P{p} skipped (已被删除)"
             break
         if isinstance(got, Path):
-            if task.get("audio_only") and ENGINE == "you-get":
-                # you-get 没有纯音频开关: 下完视频后 ffmpeg 流复制抽音轨(不重编码, 秒级)
-                task["line"] = f"P{p} extracting audio..."
-                m4a = got.with_suffix(".m4a")
-                ok, _e = run_ffmpeg(["-i", str(got), "-vn", "-c:a", "copy", str(m4a)], timeout=600)
-                if ok and m4a.exists() and m4a.stat().st_size > 1024:
-                    got.unlink(missing_ok=True)
-                    got = m4a
-            st = got.stat()
-            entry["parts"][str(p)] = {"name": task["part_names"].get(str(p), f"P{p}"),
-                                      "file": str(got.relative_to(folder)),
-                                      "size": round(st.st_size / 1048576, 1)}
             task["line"] = f"P{p} done ✓"
             # 下载那一刻就把元数据抓住(yt-dlp 的 info.json): UP主/简介/时长/封面
             try:
                 m = absorb_meta(task["bvid"], folder, p)
                 if m and m.get("uploader"):
-                    task["line"] = f"P{p} done ✓ · {m['uploader']}"
+                    task["line"] = f"P{p} done ✓ · " + str(m.get("uploader"))
                 if m and m.get("height"):
+                    def _set_h(lib):
+                        e = lib.get(task["bvid"])
+                        if e is not None:
+                            try:
+                                e["parts"][str(p)]["h"] = int(m["height"])
+                            except Exception:
+                                pass
+                        return lib
                     try:
-                        entry["parts"][str(p)]["h"] = int(m["height"])
+                        mutate_library(_set_h)
                     except Exception:
                         pass
             except Exception:
                 pass
         elif got is _EXISTS:
             task["line"] = f"P{p} already exists, skipped"
-            # 文件已存在也要写进库, 否则"补下"的片在 UI 里永远看不见
-            cand = None
-            for ext in (".mp4", ".mkv", ".webm", ".m4a"):
-                c2 = folder / f"P{p}{ext}"
-                if c2.is_file():
-                    cand = c2
-                    break
-            if cand is not None:
-                try:
-                    entry["parts"][str(p)] = {
-                        "name": task["part_names"].get(str(p), f"P{p}"),
-                        "file": cand.name,
-                        "size": round(cand.stat().st_size / 1048576, 1)}
-                except OSError:
-                    pass
         else:
             task["failed"].append(p)
             # 失败原因在 _run_part 里已存(引擎原话); 这里兜底
             task["error"] = task.get("error") or f"P{p} failed"
-        save_library(lib)
     task.pop("_before", None)
     save_tasks()                                  # 队列有变动就落盘
     if snapshot_thumb(task["bvid"]):           # 下载完顺手抽帧, 媒体库立刻有脸
@@ -2140,34 +2314,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.wfile.write(body)
         if u.path == "/api/log":                       # 运行日志(用户排查用)
             return self._json({"items": _ops_log})
-        if u.path == "/api/redownload":                 # 重下: 先下到临时名, 成功才替换(失败不丢原文件)
-            bvid = str(body.get("bvid", ""))
-            p = str(body.get("p", ""))
-            rel = str(body.get("rel", ""))
-            if not bvid or not p:
-                return self._json({"error": "缺 bvid 或 p"}, 400)
-            lib = load_library()
-            e = lib.get(bvid)
-            if not e:
-                return self._json({"error": "库里没这个视频"}, 404)
-            d = (e.get("parts") or {}).get(str(p))
-            folder = DOWNLOAD_DIR / e.get("folder", "")
-            old = folder / (d or {}).get("file", rel.split("/")[-1] if rel else "")
-            # 备份原文件, 下载成功再换, 失败就还原
-            bak = None
-            try:
-                if old.is_file():
-                    bak = old.with_suffix(old.suffix + ".old")
-                    old.replace(bak)
-            except OSError:
-                bak = None
-            t = new_task(bvid, e.get("title", ""), [int(p)],
-                         {str(p): (d or {}).get("name", f"P{p}")}, "",
-                         "", {}, int(body.get("quality", 0) or 0))
-            t["_replace_bak"] = str(bak) if bak else ""
-            t["_replace_orig"] = str(old)
-            log_op(f"重新下载: {e.get('title', '')[:40]} P{p}")
-            return self._json({"id": t["id"]})
         if u.path == "/api/credentials":               # 凭据列表
             m = load_cookie_map()
             out = []
@@ -2426,6 +2572,34 @@ class Handler(BaseHTTPRequestHandler):
                 body = {}
         except Exception:
             return self._json({"error": "请求格式不对(不是合法 JSON)"}, 400)
+        if u.path == "/api/redownload":                 # 重下: 先下到临时名, 成功才替换(失败不丢原文件)
+            bvid = str(body.get("bvid", ""))
+            p = str(body.get("p", ""))
+            rel = str(body.get("rel", ""))
+            if not bvid or not p:
+                return self._json({"error": "缺 bvid 或 p"}, 400)
+            lib = load_library()
+            e = lib.get(bvid)
+            if not e:
+                return self._json({"error": "库里没这个视频"}, 404)
+            d = (e.get("parts") or {}).get(str(p))
+            folder = DOWNLOAD_DIR / e.get("folder", "")
+            old = folder / (d or {}).get("file", rel.split("/")[-1] if rel else "")
+            # 备份原文件, 下载成功再换, 失败就还原
+            bak = None
+            try:
+                if old.is_file():
+                    bak = old.with_suffix(old.suffix + ".old")
+                    old.replace(bak)
+            except OSError:
+                bak = None
+            t = new_task(bvid, e.get("title", ""), [int(p)],
+                         {str(p): (d or {}).get("name", f"P{p}")}, "",
+                         "", {}, int(body.get("quality", 0) or 0))
+            t["_replace_bak"] = str(bak) if bak else ""
+            t["_replace_orig"] = str(old)
+            log_op(f"重新下载: {e.get('title', '')[:40]} P{p}")
+            return self._json({"id": t["id"]})
         if u.path == "/api/credentials":               # 凭据: 增/删/改(POST)
             dom = str(body.get("domain", "")).strip().lower()
             cv = str(body.get("cookie", "")).strip()
@@ -2487,13 +2661,14 @@ class Handler(BaseHTTPRequestHandler):
             if op == "del":
                 for b in ids:
                     try:
-                        if delete_video(b):
+                        ok, err = delete_video(b)
+                        if ok:
                             done.append(b)
                         else:
-                            failed.append(b)
+                            failed.append({"bvid": b, "error": err})
                     except Exception as e:
                         log_op(f"批量删除 {b} 失败: {e}", "error")
-                        failed.append(b)
+                        failed.append({"bvid": b, "error": str(e)})
             elif op in ("fav", "unfav"):
                 want = (op == "fav")
 
@@ -2538,7 +2713,8 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 if safe_media_path(str(p)) is None:
                     continue                              # 越权路径不进队列
-                items.append({"rel": rel_of(p.resolve()), "title": p.stem, "p": 1, "name": p.stem})
+                items.append({"rel": rel_of(p.resolve()).replace("\\", "/"),
+                               "title": p.stem, "p": 1, "name": p.stem})
             if not items:
                 return self._json({"error": "没解析出可用文件(路径必须在允许目录内)"}, 400)
             return self._json(queue_ops({"op": "set", "items": items}))
@@ -2557,8 +2733,12 @@ class Handler(BaseHTTPRequestHandler):
                 title = str(body.get("title", ""))[:60] or f"标记 {fmt_sec(t)}"
                 marks.append({"t": round(t, 2), "title": title})
                 marks.sort(key=lambda m: m["t"])
-            e["marks"] = marks
-            save_library(lib)
+            def _set_marks(lib):
+                e = lib.get(bvid)
+                if e is not None:
+                    e["marks"] = marks
+                return lib
+            mutate_library(_set_marks)
             return self._json({"ok": True, "marks": marks})
         if u.path == "/api/download":
             parts = [int(p) for p in body.get("parts", [])]
@@ -2577,11 +2757,16 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/delete":
             bvid = body.get("bvid")
             if bvid:                                   # 删整个视频(文件夹+记录+封面)
-                ok = delete_video(bvid)
+                ok, err = delete_video(bvid)
+                if not ok:
+                    return self._json({"ok": False, "error": err}, 409)
                 return self._json({"ok": True, "deleted": ok})
             target = safe_media_path(body.get("rel", ""))
             if target is None:
                 return self._json({"error": "路径不合法"}, 403)
+            if target.suffix.lower() not in VIDEO_EXTS:
+                # 白名单目录里的**非媒体文件**(字幕/nfo/笔记)不许被这个接口删掉
+                return self._json({"error": "只能删媒体文件"}, 403)
             # 删文件 + 同步把库里的这个分P 摘掉(否则界面显示 0P 但文件已经没了)
             name = target.name
             try:
@@ -2589,14 +2774,23 @@ class Handler(BaseHTTPRequestHandler):
             except OSError as e:
                 return self._json({"error": f"删不掉: {e}"}, 500)
 
+            # 按 (目录, 文件名) 双键匹配 —— 只按文件名匹配会**误伤同名分P的其他视频**
+            # (不同视频的 P1.mp4 大量同名, 删 A 的 P1 会把 B 的 P1 条目也摘掉)
+            rel_dir = str(Path(body.get("rel", "")).parent).replace("\\", "/")
+            rel_name = name
+
             def _drop(lib):
                 hit = False
                 for bvid, e in lib.items():
                     parts = e.get("parts") or {}
+                    edir = str(e.get("folder", "")).replace("\\", "/")
                     for pk in list(parts.keys()):
-                        if parts[pk].get("file") == name:
-                            parts.pop(pk)
-                            hit = True
+                        if parts[pk].get("file") != rel_name:
+                            continue
+                        if edir and rel_dir and not (edir == rel_dir or edir.endswith(rel_dir) or rel_dir.endswith(edir)):
+                            continue                      # 不同目录的同名文件, 不动
+                        parts.pop(pk)
+                        hit = True
                     if hit:
                         e["parts"] = parts
                 return hit
@@ -2609,6 +2803,13 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"error": "not found"}, 404)
 
 def main():
+    # Windows 中文控制台默认 GBK, 输出 emoji/中文到重定向的 stdout 会 UnicodeEncodeError
+    # → main() 抛异常 → 进程直接死(sock 已 bind 但还没 serve_forever, 连报错都看不到)
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     threading.Thread(target=worker, daemon=True).start()
     def _auto_scan():                     # 启动后台自动扫描(幂等) —— 懒人不用点按钮
         time.sleep(3)

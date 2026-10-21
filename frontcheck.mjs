@@ -11,6 +11,8 @@ import vm from 'node:vm';
 
 const base = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(join(base, 'index.html'), 'utf8');
+const _m = src.match(/<script>([\s\S]*?)<\/script>/);
+const JS = _m ? _m[1] : src;          // 脚本正文(闸6/闸7 用)
 let bad = 0;
 
 /* ── 闸 1: id 悬空 ── */
@@ -162,6 +164,32 @@ let bad = 0;
   const missing = [...used].filter(u => !defs.has(u));
   if (missing.length) { bad++; console.log('❌ 闸5 缺图标 symbol: ' + missing.join(', ')); }
   else console.log('✅ 闸5 图标 symbol: ' + used.size + ' 个引用全部有定义');
+}
+
+/* ── 闸 6: 同名函数声明(后定义覆盖前定义 → 某个按钮变成空操作) ── */
+{
+  const names = [...JS.matchAll(/^function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map(x => x[1]);
+  const dup = [...new Set(names.filter((n, i) => names.indexOf(n) !== i))];
+  if (dup.length) { bad++; console.log('❌ 闸6 同名函数声明(后者覆盖前者): ' + dup.join(', ')); }
+  else console.log('✅ 闸6 同名函数声明: 无 (' + names.length + ' 个函数)');
+}
+
+/* ── 闸 7: 块级变量遮蔽全局函数(比如 const t = ... 把 i18n 的 t() 遮掉) ── */
+{
+  const globals = new Set([...JS.matchAll(/^function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map(x => x[1]));
+  // 顶层 let/const 声明的全局名字
+  const topDecl = new Set([...JS.matchAll(/^(?:let|const|var)\s+([A-Za-z_$][\w$]*)/gm)].map(x => x[1]));
+  const hits = [];
+  for (const mm of JS.matchAll(/^\s{2,}(?:let|const)\s+([A-Za-z_$][\w$]*)\s*=/gm)) {
+    const nm = mm[1];
+    if (globals.has(nm) || topDecl.has(nm)) hits.push(nm);
+  }
+  const uniq = [...new Set(hits)];
+  if (uniq.length) {
+    bad++;
+    console.log('❌ 闸7 块级变量遮蔽了同名全局: ' + uniq.join(', ') +
+      ' (会被后定义的同名标识符顶掉, 例如 const t = ... 把 i18n 的 t() 遮没)');
+  } else console.log('✅ 闸7 变量遮蔽: 无');
 }
 
 console.log(bad ? `\n${bad} 道闸没过` : '\n前端静态闸全过 ✅');
