@@ -68,9 +68,9 @@ createServer((req, res) => {
   if (u.pathname === '/api/diagnostics') return j({platform:'linux', termux:false, python:'3.12.2',
     ffmpeg:'/usr/bin/ffmpeg', ffmpeg_ok:true, min_python:'3.9',
     hints:['Termux: Android 12+ 需授予 wakelock, 否则系统会杀掉 ffmpeg 子进程']});
-  if (u.pathname === '/api/config') return j({engine:'yt-dlp', port:8765, download_dir:'/fake/path', sessdata_set:false});
+  if (u.pathname === '/api/config') return j({engine:'yt-dlp', port:8765, download_dir:'/fake/path', cookie_set:false});
   if (u.pathname === '/api/credentials') return j({items:[
-    {domain:'bilibili.com', keys:['SESSDATA','buvid3'], masked:'SESSDATA=abcd…wxyz; buvid3=1234…5678', n:2},
+    {domain:'example.com', keys:['SESSION','buvid'], masked:'SESSION=abcd…wxyz; buvid=1234…5678', n:2},
     {domain:'', keys:['session'], masked:'session=qqqq…wwww', n:1}]});
   if (u.pathname === '/api/dupes') return j({waste_mb: 1234.5, groups:[
     {hash:'abc', size_mb: 842.0, waste_mb: 842.0, files:[

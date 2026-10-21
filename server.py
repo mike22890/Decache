@@ -1746,7 +1746,7 @@ def _cmd(url, audio_only, folder, quality=0, part_no=0):
         cap = int(quality or 0)
         # cap=0 时这段必须和以前**逐字一致**(selftest 有断言), cap>0 时才加过滤
         if cap > 0:
-            # 上限 = **短边** <= cap。B站竖屏视频的 height 是长边(480x852 -> height=852),
+            # 上限 = **短边** <= cap。竖屏视频的 height 是长边(480x852 -> height=852),
             # 只写 height<=480 会一个都匹配不上 -> "Requested format is not available"。
             # 所以 height / width 两套链都写, 顶层逗号并列(= 两者里挑最好的)。
             def _chain(dim):

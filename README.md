@@ -83,7 +83,7 @@ decache calls an external engine. Install it yourself — it is not bundled:
 |---|---|---|
 | **yt-dlp** (default) | `pip install -U yt-dlp` / `pkg install yt-dlp` / [releases](https://github.com/yt-dlp/yt-dlp/releases) | actively maintained, supports most sites |
 | you-get | `pip install -U you-get` | fallback, upstream mostly dormant |
-| yutto | `pip install -U yutto` | another B站-focused engine; may fail to build on Android (Rust extension) |
+| yutto | `pip install -U yutto` | another video-site-focused engine; may fail to build on Android (Rust extension) |
 
 Set it in `config.ini`:
 

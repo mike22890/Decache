@@ -1773,7 +1773,7 @@ def _cmd(url, audio_only, folder, quality=0, part_no=0):
         cap = int(quality or 0)
         # cap=0 时这段必须和以前**逐字一致**(selftest 有断言), cap>0 时才加过滤
         if cap > 0:
-            # 上限 = **短边** <= cap。B站竖屏视频的 height 是长边(480x852 -> height=852),
+            # 上限 = **短边** <= cap。竖屏视频的 height 是长边(480x852 -> height=852),
             # 只写 height<=480 会一个都匹配不上 -> "Requested format is not available"。
             # 所以 height / width 两套链都写, 顶层逗号并列(= 两者里挑最好的)。
             def _chain(dim):
@@ -5816,7 +5816,7 @@ server.SESSION_COOKIE = old_cookie
 # 7c) 元数据吸收: 写个 info.json 模拟 yt-dlp 产出
 (DL / "P1.info.json").write_text(json.dumps({
     "uploader": "某UP主", "description": "简介内容", "duration": 1234,
-    "thumbnail": "https://i0.hdslb.com/cover.jpg", "upload_date": "20260101"}), encoding="utf-8")
+    "thumbnail": "https://cdn.example.com/cover.jpg", "upload_date": "20260101"}), encoding="utf-8")
 m = server.absorb_meta("BV1test", DL, "1")
 chk("absorb_meta 吃下 UP主", m and m["uploader"] == "某UP主", str(m))
 lib = server.load_library()
@@ -5877,10 +5877,10 @@ chk("atomic_write 定义在 load_config 之前",
     _src.index("def atomic_write(") < _src.index("def load_config():"), "顺序错了, import 会 NameError")
 
 # 分P参数剥离(2026-10-21 用户实测: 带 ?p=1 的链接只解析出 1 个分P)
-u = server.strip_page_params("https://www.bilibili.com/video/BV1x/?buvid=Z&p=1&plat_id=114&share_from=ugc")
+u = server.strip_page_params("https://video.example.com/watch/BV1x/?buvid=Z&p=1&plat_id=114&share_from=ugc")
 chk("剥离 ?p= 参数", "p=1" not in u, u)
 chk("剥离分享追踪参数(buvid/mid/plat_id)", "buvid=" not in u and "plat_id=" not in u, u)
-chk("保留路径", "/video/BV1x" in u, u)
+chk("保留路径", "/watch/BV1x" in u, u)
 chk("剥掉合集 sid", "sid=" not in server.strip_page_params("https://x.com/v?sid=9&p=2"), "")
 chk("无参数不动", server.strip_page_params("https://x.com/v") == "https://x.com/v")
 chk("非 ASCII 参数值不被解码破坏",
@@ -6243,7 +6243,7 @@ if True:
     chk("给不存在的视频打标签要报错", s == 400 or s == 404, f"{s} {b2[:80]}")
 
 # ── 竖屏视频 + 报错翻译(2026-10-21 用户实测: 选 480P 下载失败) ──
-# 根因: B站竖屏视频 480x852 -> height=852(长边), 只写 height<=480 一个都匹配不上,
+# 根因: 竖屏视频 480x852 -> height=852(长边), 只写 height<=480 一个都匹配不上,
 #       yt-dlp 直接报 "Requested format is not available"。
 # 修法: 短边语义 = height<=N **或** width<=N(顶层逗号并列两条链)。
 if True:
@@ -6280,7 +6280,7 @@ if True:
     chk("mp4s_of 认得 .mp4", "P2.mp4" in _seen, str(_seen))
     # 3) 格式错的识别(触发"清晰度选不出就降级到自动"重试)
     chk("认得出 Requested format is not available",
-        server._is_format_err("ERROR: [BiliBili] BV1x: Requested format is not available."),
+        server._is_format_err("ERROR: [Engine] BV1x: Requested format is not available."),
         "没认出来")
     chk("网络错不会被当成格式错",
         not server._is_format_err("ERROR: unable to download: HTTP Error 503"),
@@ -6457,7 +6457,7 @@ cat > "$APP"/HANDOVER.md <<'MDEOF'
      并且当失败原因是"这个清晰度选不出格式"时，**自动降级成"自动(最优)"再试** ——
      用户选清晰度是偏好，不是"必须失败"的理由。真机实测：选 7P(不存在) → 自动降级成功。
 - **v6.12 竖屏清晰度 + 报错翻译 + 模式提示（2026-10-21 用户实机）**：
-  ① **清晰度上限改成"短边"语义**：B站**竖屏**视频是 480x852 / 720x1280 这种，
+  ① **清晰度上限改成"短边"语义**：**竖屏**视频是 480x852 / 720x1280 这种，
      `height` 是**长边**（852/1280），所以 `height<=480` 一个都匹配不上 → yt-dlp 直接
      报 `Requested format is not available`（用户实测：选 480P 下载失败）。
      **修法**：`height<=N` 与 `width<=N` **两条链顶层逗号并列**（逗号 = 取其中最好的），
@@ -6695,7 +6695,7 @@ exclude_dirs =         # 扫描排除（逗号分隔的路径片段，命中即�
 2. **`$` 在使用点之后才 `const` 定义**（TDZ）→ 运行时 ReferenceError，语法检查**看不见**。工具函数定义必须在脚本最顶部。
 3. `urllib.parse.parse_qs` 返回**列表**：`q.get("rel","")` 必须写 `q.get("rel",[""])[0]`，否则 Path/列表 TypeError。
 4. **Kiwi 浏览器缓存阴魂不散**：HTML 已加 no-store；封面 URL 带 `?t=mtime`；用户端必须**杀进程重开**（关标签页不够）。
-5. **412/风控**：部分站点强制登录 Cookie → `cookie` 配置项必填；症状=全部下载失败。**（历史条目：原为某站 SESSDATA，v6.5 已泛化）**
+5. **412/风控**：部分站点强制登录 Cookie → `cookie` 配置项必填；症状=全部下载失败。
 6. **yutto 2.3.1 × Python 3.14**：`_Exc_BaseException` 符号缺失 → 默认引擎 you-get。
 7. **Termux ffmpeg 装不上**（libc++ 符号错位）→ 先 `pkg upgrade` 再装。
 8. **多行粘贴冲掉 pacman/paru 的 Y/n 提示** → 交互命令单独发，或 --noconfirm。
@@ -6860,8 +6860,8 @@ node smoke.mjs        # 加载期冒烟: 用 DOM 桩真跑一遍脚本, 谁抛�
 
 ## 13. 部署机器档案
 
-realme GT8（Android，realme UI）；Termux + Termux:API + Termux:Widget（F-Droid 三件套，勿混装签名）；
-浏览器 Kiwi（停更，建议换 Via）；下载目录 `~/storage/downloads/decache`；同用户在 Windows(Arch 双系统) 可用 start.bat / python3 直接跑。
+Android 手机（Termux + Termux:API + Termux:Widget，建议 F-Droid 版）+ Windows PC 双端使用；
+手机浏览器建议 Chromium 内核 80+；下载目录 `~/storage/downloads/decache`；Windows 上 start.bat 直接跑。
 
 ---
 *本文件随版本更新。改代码不改本文档 = 失职。*

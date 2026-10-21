@@ -11,7 +11,7 @@ decache **不打包**任何第三方二进制文件。以下工具均为**你自
 |---|---|---|
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Unlicense | default download engine (external) |
 | [you-get](https://github.com/soimort/you-get) | MIT | optional fallback engine (external) |
-| [yutto](https://github.com/yutto-dev/yutto) | GPL-3.0 | optional B站-focused engine (external) || [FFmpeg](https://ffmpeg.org/) | LGPL-2.1+ / GPL (build-dependent) | thumbnails, audio extraction, remux (external) |
+| [yutto](https://github.com/yutto-dev/yutto) | GPL-3.0 | optional video-site-focused engine (external) || [FFmpeg](https://ffmpeg.org/) | LGPL-2.1+ / GPL (build-dependent) | thumbnails, audio extraction, remux (external) |
 
 `yt-dlp` is licensed under the Unlicense (public domain). `FFmpeg` is
 LGPL-2.1+ when built with `--enable-gpl` disabled and `--enable-libx264`

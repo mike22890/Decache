@@ -113,8 +113,8 @@ print("== cookie 解析 ==")
 chk("KEY=VALUE 形式", server.cookie_pairs("a=1; b=2") == {"a": "1", "b": "2"}, str(server.cookie_pairs("a=1; b=2")))
 chk("裸值形式", list(server.cookie_pairs("rawtoken").values()) == ["rawtoken"])
 chk("空值", server.cookie_pairs("") == {})
-chk("域名推断", server.host_of("https://www.bilibili.com/video/x") == ".www.bilibili.com",
-    server.host_of("https://www.bilibili.com/video/x"))
+chk("域名推断", server.host_of("https://www.example.com/video/x") == ".www.example.com",
+    server.host_of("https://www.example.com/video/x"))
 
 print("== 错误提示映射 ==")
 chk("登录类", "cookie" in server.hint_for("ERROR: Sign in to confirm you're not a bot"), server.hint_for("Sign in"))

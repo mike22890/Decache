@@ -24,7 +24,7 @@ server.COOKIE_FILE = tmp / "cookies.txt"
 server.CONFIG_FILE = tmp / "config.ini"
 server.SCAN_DIRS = str(server.DOWNLOAD_DIR)
 
-URL = sys.argv[1] if len(sys.argv) > 1 else "https://b23.tv/WwFNogP"
+URL = sys.argv[1] if len(sys.argv) > 1 else ""   # 默认不带示例链接(公开仓库不放真站地址), 用法: python e2e_real_test.py <视频页URL>
 
 print(f"== 真机解析: {URL} ==")
 try:

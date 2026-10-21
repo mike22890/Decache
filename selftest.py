@@ -136,7 +136,7 @@ server.SESSION_COOKIE = old_cookie
 # 7c) 元数据吸收: 写个 info.json 模拟 yt-dlp 产出
 (DL / "P1.info.json").write_text(json.dumps({
     "uploader": "某UP主", "description": "简介内容", "duration": 1234,
-    "thumbnail": "https://i0.hdslb.com/cover.jpg", "upload_date": "20260101"}), encoding="utf-8")
+    "thumbnail": "https://cdn.example.com/cover.jpg", "upload_date": "20260101"}), encoding="utf-8")
 m = server.absorb_meta("BV1test", DL, "1")
 chk("absorb_meta 吃下 UP主", m and m["uploader"] == "某UP主", str(m))
 lib = server.load_library()
@@ -197,10 +197,10 @@ chk("atomic_write 定义在 load_config 之前",
     _src.index("def atomic_write(") < _src.index("def load_config():"), "顺序错了, import 会 NameError")
 
 # 分P参数剥离(2026-10-21 用户实测: 带 ?p=1 的链接只解析出 1 个分P)
-u = server.strip_page_params("https://www.bilibili.com/video/BV1x/?buvid=Z&p=1&plat_id=114&share_from=ugc")
+u = server.strip_page_params("https://video.example.com/watch/BV1x/?buvid=Z&p=1&plat_id=114&share_from=ugc")
 chk("剥离 ?p= 参数", "p=1" not in u, u)
 chk("剥离分享追踪参数(buvid/mid/plat_id)", "buvid=" not in u and "plat_id=" not in u, u)
-chk("保留路径", "/video/BV1x" in u, u)
+chk("保留路径", "/watch/BV1x" in u, u)
 chk("剥掉合集 sid", "sid=" not in server.strip_page_params("https://x.com/v?sid=9&p=2"), "")
 chk("无参数不动", server.strip_page_params("https://x.com/v") == "https://x.com/v")
 chk("非 ASCII 参数值不被解码破坏",
@@ -563,7 +563,7 @@ if True:
     chk("给不存在的视频打标签要报错", s == 400 or s == 404, f"{s} {b2[:80]}")
 
 # ── 竖屏视频 + 报错翻译(2026-10-21 用户实测: 选 480P 下载失败) ──
-# 根因: B站竖屏视频 480x852 -> height=852(长边), 只写 height<=480 一个都匹配不上,
+# 根因: 竖屏视频 480x852 -> height=852(长边), 只写 height<=480 一个都匹配不上,
 #       yt-dlp 直接报 "Requested format is not available"。
 # 修法: 短边语义 = height<=N **或** width<=N(顶层逗号并列两条链)。
 if True:
@@ -600,7 +600,7 @@ if True:
     chk("mp4s_of 认得 .mp4", "P2.mp4" in _seen, str(_seen))
     # 3) 格式错的识别(触发"清晰度选不出就降级到自动"重试)
     chk("认得出 Requested format is not available",
-        server._is_format_err("ERROR: [BiliBili] BV1x: Requested format is not available."),
+        server._is_format_err("ERROR: [Engine] BV1x: Requested format is not available."),
         "没认出来")
     chk("网络错不会被当成格式错",
         not server._is_format_err("ERROR: unable to download: HTTP Error 503"),

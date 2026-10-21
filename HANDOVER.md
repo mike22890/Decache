@@ -86,7 +86,7 @@
      并且当失败原因是"这个清晰度选不出格式"时，**自动降级成"自动(最优)"再试** ——
      用户选清晰度是偏好，不是"必须失败"的理由。真机实测：选 7P(不存在) → 自动降级成功。
 - **v6.12 竖屏清晰度 + 报错翻译 + 模式提示（2026-10-21 用户实机）**：
-  ① **清晰度上限改成"短边"语义**：B站**竖屏**视频是 480x852 / 720x1280 这种，
+  ① **清晰度上限改成"短边"语义**：**竖屏**视频是 480x852 / 720x1280 这种，
      `height` 是**长边**（852/1280），所以 `height<=480` 一个都匹配不上 → yt-dlp 直接
      报 `Requested format is not available`（用户实测：选 480P 下载失败）。
      **修法**：`height<=N` 与 `width<=N` **两条链顶层逗号并列**（逗号 = 取其中最好的），
@@ -324,7 +324,7 @@ exclude_dirs =         # 扫描排除（逗号分隔的路径片段，命中即�
 2. **`$` 在使用点之后才 `const` 定义**（TDZ）→ 运行时 ReferenceError，语法检查**看不见**。工具函数定义必须在脚本最顶部。
 3. `urllib.parse.parse_qs` 返回**列表**：`q.get("rel","")` 必须写 `q.get("rel",[""])[0]`，否则 Path/列表 TypeError。
 4. **Kiwi 浏览器缓存阴魂不散**：HTML 已加 no-store；封面 URL 带 `?t=mtime`；用户端必须**杀进程重开**（关标签页不够）。
-5. **412/风控**：部分站点强制登录 Cookie → `cookie` 配置项必填；症状=全部下载失败。**（历史条目：原为某站 SESSDATA，v6.5 已泛化）**
+5. **412/风控**：部分站点强制登录 Cookie → `cookie` 配置项必填；症状=全部下载失败。
 6. **yutto 2.3.1 × Python 3.14**：`_Exc_BaseException` 符号缺失 → 默认引擎 you-get。
 7. **Termux ffmpeg 装不上**（libc++ 符号错位）→ 先 `pkg upgrade` 再装。
 8. **多行粘贴冲掉 pacman/paru 的 Y/n 提示** → 交互命令单独发，或 --noconfirm。
@@ -489,8 +489,8 @@ node smoke.mjs        # 加载期冒烟: 用 DOM 桩真跑一遍脚本, 谁抛�
 
 ## 13. 部署机器档案
 
-realme GT8（Android，realme UI）；Termux + Termux:API + Termux:Widget（F-Droid 三件套，勿混装签名）；
-浏览器 Kiwi（停更，建议换 Via）；下载目录 `~/storage/downloads/decache`；同用户在 Windows(Arch 双系统) 可用 start.bat / python3 直接跑。
+Android 手机（Termux + Termux:API + Termux:Widget，建议 F-Droid 版）+ Windows PC 双端使用；
+手机浏览器建议 Chromium 内核 80+；下载目录 `~/storage/downloads/decache`；Windows 上 start.bat 直接跑。
 
 ---
 *本文件随版本更新。改代码不改本文档 = 失职。*
