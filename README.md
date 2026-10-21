@@ -18,81 +18,48 @@
   <img alt="deps" src="https://img.shields.io/badge/runtime%20deps-stdlib%20only-orange">
 </p>
 
-<p align="center">
-  <em>One folder. One command. Your files stay on your machine.</em><br>
-  <em>一个文件夹，一条命令，文件全在你自己的机器上。</em>
-</p>
-
 ---
 
-## Highlights / 为什么值得看
+## 这是什么
 
-Not a toy: a 2,600-line stdlib-only backend and a 2,700-line zero-build
-frontend, built test-first and audited three ways (data-integrity,
-frontend robustness, cross-platform).
+**Decache 是一个装在你自己设备上的小网站。** 它做两件事：
 
-不是玩具项目：2,600 行纯标准库后端 + 2,700 行零构建前端，
-测试先行，经过数据完整性 / 前端健壮性 / 跨平台三路独立审计。
+1. **下载视频** — 粘贴视频链接，视频就存到你自己的硬盘上
+2. **播放视频** — 下载好的视频，在浏览器里播放，有进度条、字幕、播放列表、多倍速
 
-- **Zero runtime dependencies / 零运行时依赖** — the server runs on the
-  Python standard library alone (`http.server`, `threading`, `subprocess`);
-  no pip install, no node_modules, no build step. Drops into a folder and runs.
-- **Pluggable download engines / 下载引擎可插拔** — yt-dlp / you-get / yutto
-  behind one interface; the app itself contains no site-specific code, so an
-  engine change (or its death) never breaks the product.
-- **10k-scale library / 万级库性能** — ETag + 304 incremental sync, server-side
-  view caching, lazy thumbnail sprite generation, server-side filtering so a
-  3,000-video library stays responsive on a phone.
-- **Data-integrity engineering / 数据完整性工程** — single-writer library
-  mutations under an RLock (no lost updates), atomic writes with fsync +
-  unique temp names + retry, corrupt-DB quarantining that never silently
-  resets to empty, path-validated deletes that refuse to touch anything
-  outside the download root.
-- **Reliability / 可靠性** — worker crash recovery, engine hang detection
-  with auto-kill, resumable downloads, atomic file replacement on
-  re-download (original restored on failure), per-domain cookie jars.
-- **Cross-platform / 跨平台** — one codebase, five platforms; per-platform
-  defaults, NFC normalization for macOS filenames, no `select()` on pipes
-  (Windows), WebView-safe CSS fallbacks.
-- **Test discipline / 测试纪律** — 278 offline assertions across three suites
-  (unit / chaos / fake-engine end-to-end), plus a 7-gate static check for the
-  frontend (dangling ids, undeclared identifiers, template leaks, duplicate
-  functions, shadowed globals, missing icons, syntax) and a DOM-stub smoke run.
+**所有文件都在你自己的设备上**，不上传任何服务器，不收钱，不看广告，不收集数据。
 
-## Screenshots / 截图
+**能干什么**：
 
-<!-- 建议放 4-6 张真机截图: 媒体库(深色) / 播放器(顶栏+进度条) / 章节面板 / 标签弹层 / 多选 / 下载页 -->
-<!-- 放 docs/ 目录, 这里用相对路径引用 -->
+- ✅ 下载大多数视频站的视频（含 B站）—— 选清晰度，选 480p 省空间
+- ✅ 本地播放器：进度条缩略图、章节、A-B 循环、播放列表、画中画、倍速、字幕
+- ✅ 媒体库：文件夹浏览、彩色标签、收藏、多选删除、查重、磁盘统计
+- ✅ 选清晰度：自动(最优) / 2160 / 1440 / 1080 / 720 / 480 / 360 / 240
+- ✅ 仅音频下载：下成 m4a，省空间
+- ✅ 手机/平板/电视都能播（下载成 H.264 + AAC，所有设备通用）
 
-## What it is / 是什么
+## 截图
 
+All screenshots are taken from the actual app (preview mode with mock data).
 
+<table>
+<tr>
+<td align="center" width="50%"><img src="docs/screenshots/library.png" width="240"><br><sub>媒体库 · tag chip + cover</sub></td>
+<td align="center" width="50%"><img src="docs/screenshots/player.png" width="240"><br><sub>播放器 · 2-row header / pink progress bar</sub></td>
+</tr>
+<tr>
+<td align="center" width="50%"><img src="docs/screenshots/chapters.png" width="240"><br><sub>章节面板 · thumbnail fallback chain</sub></td>
+<td align="center" width="50%"><img src="docs/screenshots/playlist.png" width="240"><br><sub>播放列表 · thumbnail + name, click to switch</sub></td>
+</tr>
+<tr>
+<td align="center" width="50%"><img src="docs/screenshots/multiselect.png" width="240"><br><sub>多选模式 · batch delete / favorite</sub></td>
+<td align="center" width="50%"><img src="docs/screenshots/download.png" width="240"><br><sub>下载页 · quality cap + audio-only</sub></td>
+</tr>
+</table>
 
-A single-folder web app that turns your device into a personal media library
-and a decent video player. It runs on **Android (Termux) / Windows / macOS /
-Linux** with nothing but a Python 3 interpreter and `ffmpeg`.
+## 怎么安装
 
-一个"单文件夹"的 Web 应用，把你的设备变成私人媒体库 + 视频播放器。
-只需要 Python 3 和 `ffmpeg`，在 **Android(Termux) / Windows / macOS / Linux** 上都能跑。
-
-- **Local library** — scan folders, browse a directory tree, tag with colors,
-  star favourites, build a play queue, export/import `.m3u`
-- **Player** — seek-bar thumbnail previews, chapter markers, A–B loop, Up Next
-  card, external subtitles with style control, PiP, audio mode, 4 play modes
-- **Import** — paste a link; an **external general-purpose download engine**
-  (yt-dlp by default) does the fetching. decache itself ships **no parser**
-  for any specific site.
-- **Runs anywhere** — pure Python standard library backend, zero-build
-  single-page frontend, no external assets, no accounts, no telemetry
-- **Installable as an app** — PWA: "Add to Home Screen" gives you a desktop
-  icon, no terminal required
-- **Plays everywhere** — downloads prefer H.264 + AAC in MP4, the one format
-  every phone, tablet, TV and browser understands; anything else can be
-  converted on demand
-
-## Quick start / 快速开始
-
-### Android (Termux)
+### 安卓手机（Termux）
 
 ```bash
 pkg install python ffmpeg
@@ -100,84 +67,67 @@ bash install.sh          # 一键安装/升级
 bash ~/decache/start.sh
 ```
 
-### Windows / macOS / Linux
+打开浏览器 → `http://127.0.0.1:8765`
 
-```bash
-python3 server.py
-```
+### Windows / Mac / Linux
 
-Open `http://127.0.0.1:8765`.
+1. 装 Python 3.9+ 和 ffmpeg
+2. 下载这个仓库解压
+3. 双击 `start.bat`（Windows）或运行 `bash start.sh`（Mac/Linux）
+4. 浏览器打开 `http://127.0.0.1:8765`
 
-### Universal playback / 全平台通用播放
+### 手机访问电脑上的视频库
 
-The format selector prefers **H.264 (avc1) + AAC (mp4a) in MP4** over
-higher-efficiency codecs, because that combination is the only one every
-platform accepts out of the box:
+把 config.ini 里的 `bind = 127.0.0.1` 改成 `bind = 0.0.0.0`，重启。
+手机和电脑在同一 WiFi 下，手机浏览器打开 `http://电脑的IP:8765`。
 
-| | iPhone/Safari | Android | Windows/macOS | Smart TV |
-|---|---|---|---|---|
-| MP4 + H.264 + AAC | ✅ | ✅ | ✅ | ✅ |
-| MP4 + HEVC | ✅ (A10+) | ⚠️ | ⚠️ | ❌ |
-| MP4 + AV1 | ⚠️ (iPhone 15 Pro/16+, M3+) | ✅ | ✅ | ❌ |
-| WebM (VP8/VP9) | ✅ (Safari 14.1+) | ✅ | ✅ | ❌ |
-| MKV | ❌ | ⚠️ | ✅ (Firefox 145+) | ❌ |
+## 怎么用
 
-If a video only exists in HEVC/AV1 or a non-MP4 container, the per-part
-**"生成通用版"** button converts it. It only remuxes (container swap, seconds,
-lossless) when that is genuinely enough — H.264 in 8-bit 4:2:0 with AAC —
-and re-encodes otherwise (10-bit/4:2:2 H.264, HEVC, AV1, Opus audio all need
-it). The server also detects Safari/iOS clients — including Chrome and Firefox
-on iOS, which are WebKit under the hood — and serves the compatible copy
-automatically.
+### 下载一个视频
 
-### Download engine / 下载引擎
+1. 打开 **下载** 页
+2. 粘贴视频链接，点"解析"
+3. 勾选想下的分P，选清晰度，点"下载所选"
+4. 去 **任务** 页看进度
 
-decache calls an external engine. Install it yourself — it is not bundled:
+### 看下载好的视频
 
-| Engine | Install | Note |
-|---|---|---|
-| **yt-dlp** (default) | `pip install -U yt-dlp` / `pkg install yt-dlp` / [releases](https://github.com/yt-dlp/yt-dlp/releases) | actively maintained, supports most sites |
-| you-get | `pip install -U you-get` | fallback, upstream mostly dormant |
-| yutto | `pip install -U yutto` | another video-site-focused engine; may fail to build on Android (Rust extension) |
+1. 打开 **媒体库** 页
+2. 点视频封面 → 播放器打开
+3. 点画面 → 控制条出现（6 秒后自动消失）
 
-Set it in `config.ini`:
+### 其他功能
 
-```ini
-[panel]
-engine = yt-dlp
-cookie =                 ; optional site login cookie: "KEY=VALUE; K2=V2"
-```
+- **标签**：卡片上点"标签" chip，选颜色
+- **多选删除**：工具栏"多选" → 勾选 → 底部"删除"
+- **播放列表**：播放器顶栏 ≡ 按钮，看所有视频并切换
+- **章节**：播放器顶栏 "章节" 按钮，视频有章节的话自动显示
+- **字幕**：播放器顶栏 CC 按钮，自动找同目录的 srt/vtt
+- **画质切换**：播放器里点 "生成通用版" 把 HEVC/AV1/MKV 转成全平台通吃的 MP4
 
-The cookie domain is inferred automatically from the link you paste.
+## 常见问题
 
-## Configuration / 配置
+**Q: 下载失败怎么办？**
+打开 **任务** 页，失败的 P 旁边有"补下"按钮。或者去 **日志** 页看具体原因（中文翻译）。
 
-Everything lives in `config.ini` next to `server.py` — never overwritten by
-upgrades.
+**Q: 视频在手机相册/文件管理器里找不到？**
+下载目录默认是 `~/storage/downloads/decache`（Termux）或 `~/Downloads/decache`（电脑）。用手机文件管理器去那里找。或者在 **磁盘** 页看占了多少空间、在哪里。
 
-```ini
-[panel]
-port = 8765
-engine = yt-dlp
-cookie =
-delay = 4
-download_dir = ~/storage/downloads/decache
-scan_dirs = ~/storage/downloads,~/storage/Movies
-exclude_dirs =
-hang_timeout = 180
-```
+**Q: iOS Safari 播不了？**
+iOS 只支持 MP4 + H.264 + AAC。下载时选"自动(最优)"会自动选这个组合；如果是 HEVC/MKV，点播放器里的"生成通用版"转换一下。
 
-You can also set the cookie from the web UI (**设置** tab).
+**Q: 重新下载 / 删掉视频？**
+- 重新下：媒体库卡片的 ↻ 按钮
+- 删掉整个视频：🗑 按钮（会删磁盘上的文件，不可恢复）
+- 删一个分P：展开分P列表里的 🗑
 
-## Testing / 自测
+## 合法声明
 
-```bash
-python3 selftest.py       # 190 assertions, isolated temp HOME, no network
-python3 chaos_test.py     # 71 assertions: dirty data / races / traversal / injection
-python3 fake_yt_dlp_test.py  # 17 assertions: end-to-end with a fake engine binary
-node frontcheck.mjs       # 7 static gates for the frontend (see HANDOVER)
-node smoke.mjs            # DOM-stub smoke run: catches load-time crashes
-```
+仅供个人学习研究与个人使用。请自行确保遵守所访问站点的服务条款与所在司法辖区的著作权法律。本项目不提供任何站点专属解析器，也不协助获取付费或受保护内容。
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ## Documentation / 文档
 
@@ -185,20 +135,3 @@ node smoke.mjs            # DOM-stub smoke run: catches load-time crashes
   known limitations, and the blood-stained lessons (read before editing)
 - `LEGAL.md` — legal notice, scope boundaries, infringement report process
 - `THIRD_PARTY_LICENSES.md` — attribution for external dependencies
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
-## Disclaimer / 免责声明
-
-For personal study, research and personal use only. You are responsible for
-complying with the terms of service of the sites you access and with the
-copyright law of your jurisdiction. This project provides **no** site-specific
-parser, and does not assist with obtaining paid or protected content.
-
-The authors are not liable for any consequences of your use.
-
-仅供个人学习研究与个人使用。请自行确保遵守所访问站点的服务条款与所在司法辖区的
-著作权法律。本项目不提供任何站点专属解析器，也不协助获取付费或受保护内容。
-作者不对使用后果承担责任。本声明不构成法律意见。
