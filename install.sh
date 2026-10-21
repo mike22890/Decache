@@ -5687,6 +5687,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -5723,6 +5724,10 @@ server.CONFIG_FILE = HOME / "config.ini"      # 隔离! 否则测试会写坏用
 # 之后所有配置读写都指向临时 HOME, 用户真实 config.ini 一个字节都不碰
 server.CONFIG_FILE = HOME / "config.ini"
 
+# 平台相关的"白名单外路径"——写死 Windows 路径在 Linux 上是相对路径, 会被拼进下载目录
+# (CI 在 ubuntu 上就是这么红的: safe_dir_path / browse 越权 三条全挂)
+OUTSIDE_DIR = "C:/Windows/System32" if os.name == "nt" else "/etc"
+
 print("== 单元级 ==")
 ok = True
 
@@ -5737,7 +5742,7 @@ def chk(name, cond, extra=""):
 # 1) 路径白名单
 r = server.safe_dir_path(str(DL))
 chk("safe_dir_path 允许白名单内", r is not None)
-chk("safe_dir_path 拒绝外部", server.safe_dir_path("C:/Windows/System32") is None)
+chk("safe_dir_path 拒绝外部", server.safe_dir_path(OUTSIDE_DIR) is None)
 chk("safe_dir_path 拒绝穿越", server.safe_dir_path(str(DL / ".." / ".." / "etc")) is None)
 
 # 2) browse
@@ -5748,7 +5753,7 @@ b = server.browse_dir(str(DL))
 chk("browse 根目录", b is not None and len(b["dirs"]) == 1, str(b))
 b2 = server.browse_dir(str(DL / "movies"))
 chk("browse 子目录", b2 and len(b2["files"]) == 1 and b2["files"][0]["name"] == "a.mp4", str(b2))
-chk("browse 拒绝白名单外", server.browse_dir("C:/Windows") is None)
+chk("browse 拒绝白名单外", server.browse_dir(OUTSIDE_DIR) is None)
 
 # 3) 标签 / 收藏
 server.save_library({"BV1test": {"title": "T", "owner": "O", "folder": "movies",
@@ -5936,7 +5941,7 @@ s, b = get("/api/browse")
 chk("GET /api/browse 根", s == 200 and b'"dirs"' in b, f"{s} {b[:60]}")
 s, b = get("/api/browse?path=" + str(DL))
 chk("GET /api/browse 目录", s == 200 and b'"files"' in b, f"{s} {b[:60]}")
-s, b = get("/api/browse?path=C:/Windows")
+s, b = get("/api/browse?path=" + urllib.parse.quote(OUTSIDE_DIR))
 chk("GET /api/browse 越权 403", s == 403, f"{s} {b[:60]}")
 s, b = get("/api/tags")
 chk("GET /api/tags", s == 200 and b'"tags"' in b, f"{s}")

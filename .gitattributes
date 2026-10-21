@@ -1,0 +1,3 @@
+# install.sh 是 sync_install.mjs 生成的(内嵌全部源码), 不该参与语言统计
+install.sh linguist-generated=true
+docs/screenshots/* linguist-generated=true
