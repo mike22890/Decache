@@ -14,6 +14,7 @@
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-green"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Android%20%7C%20Windows%20%7C%20macOS%20%7C%20Linux-blue">
   <img alt="python" src="https://img.shields.io/badge/python-3.9%2B-informational">
+  <a href="https://github.com/mike22890/Decache/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/mike22890/Decache/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="tests" src="https://img.shields.io/badge/tests-278%20assertions-success">
   <img alt="deps" src="https://img.shields.io/badge/runtime%20deps-stdlib%20only-orange">
 </p>
