@@ -56,22 +56,87 @@ Real screenshots from an Android phone (Termux), unmodified.
 
 ## 怎么安装
 
+### 第 0 步：文件在哪（先下这个）
+
+不知道下哪个？**就点这个按钮**：
+
+> **[⬇ 下载最新版安装包 (take-bundle.tar.gz)](https://github.com/mike22890/Decache/releases/latest/download/take-bundle.tar.gz)**
+
+其他拿法：
+
+| 你想要什么 | 去哪拿 |
+|---|---|
+| 完整安装包（解压即用） | [Releases 页面](https://github.com/mike22890/Decache/releases) → `take-bundle.tar.gz` |
+| 只要一个安装脚本 | [install.sh 直接下载](https://raw.githubusercontent.com/mike22890/Decache/main/install.sh) |
+| 想看源码 | [Code → Download ZIP](https://github.com/mike22890/Decache/archive/refs/heads/main.zip) |
+
 ### 安卓手机（Termux）
+
+**第 1 步**：装 [Termux](https://f-droid.org/packages/com.termux/)（Play 商店里那个版本太老，别用）
+
+**第 2 步**：打开 Termux，把下面这行**整行复制粘贴**进去，回车（装依赖，几分钟）：
 
 ```bash
 pkg install python ffmpeg
-bash install.sh          # 一键安装/升级
+```
+
+**第 3 步**：给存储权限（**只做一次**；不做的话下载的文件在 Termux 私有目录里，手机文件管理器根本看不到）：
+
+```bash
+termux-setup-storage
+```
+
+（弹出权限框 → 点"允许" → 自动跳回 Termux）
+
+**第 4 步**：下载并安装（还是整行粘贴，回车）：
+
+```bash
+curl -L -o install.sh https://raw.githubusercontent.com/mike22890/Decache/main/install.sh && bash install.sh
+```
+
+> 不会用命令行？去 [Releases 页面](https://github.com/mike22890/Decache/releases) 下载 `take-bundle.tar.gz`，
+> 用 ZArchiver 之类的解压工具解开，进到那个文件夹里运行 `bash install.sh`（一样效果）。
+
+**第 5 步**：启动：
+
+```bash
 bash ~/decache/start.sh
 ```
 
-打开浏览器 → `http://127.0.0.1:8765`
+看到 "面板已启动" 就行了。**别关掉这个窗口**（关了服务就停了；想放到后台跑就用 `tmux` 或 `nohup`）。
+
+**第 6 步**：手机浏览器打开 → `http://127.0.0.1:8765`
 
 ### Windows / Mac / Linux
 
-1. 装 Python 3.9+ 和 ffmpeg
-2. 下载这个仓库解压
-3. 双击 `start.bat`（Windows）或运行 `bash start.sh`（Mac/Linux）
-4. 浏览器打开 `http://127.0.0.1:8765`
+**第 1 步**：装两个东西
+
+- Python 3.9 或更高：[python.org/downloads](https://www.python.org/downloads/)
+  （Windows 安装时**一定要勾上 "Add Python to PATH"**）
+- ffmpeg：[ffmpeg.org/download.html](https://ffmpeg.org/download.html)（Windows 选 "essentials" 那个 zip，解压后把 `bin` 目录加进 PATH）
+
+**第 2 步**：下载安装包 → [⬇ take-bundle.tar.gz](https://github.com/mike22890/Decache/releases/latest/download/take-bundle.tar.gz)，解压到任意文件夹
+
+**第 3 步**：启动
+
+- **Windows**：双击 `start.bat`
+- **Mac / Linux**：在这个文件夹里打开终端，运行 `bash start.sh`
+
+**第 4 步**：浏览器打开 → `http://127.0.0.1:8765`
+
+### 手机访问电脑上的视频库
+
+把 config.ini 里的 `bind = 127.0.0.1` 改成 `bind = 0.0.0.0`，重启服务。
+手机和电脑在同一 WiFi 下，手机浏览器打开 `http://电脑的IP:8765`（电脑 IP 在设置页「手机访问与安装」里有显示）。
+
+### 装完还是打不开？
+
+| 现象 | 原因和办法 |
+|---|---|
+| 浏览器说"无法访问" | 服务没起来。看终端窗口里的报错；端口被占用就改 `config.ini` 里的 `port` |
+| 一直转圈 / 视频播不了 | ffmpeg 没装好。打开设置页看 "ffmpeg:" 那一行显示的是不是路径 |
+| 找不到下载的视频 | 手机上要去 `termux-setup-storage` 授权过；下载目录是 `~/storage/downloads/decache` |
+| 提示要登录 | 有些站要 cookie，在设置页填一下（格式 `KEY=VALUE; ...`）|
 
 ### 手机访问电脑上的视频库
 
