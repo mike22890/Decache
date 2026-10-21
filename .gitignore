@@ -43,3 +43,7 @@ Thumbs.db
 
 # Node
 node_modules/
+
+# backups
+*.bak*
+
