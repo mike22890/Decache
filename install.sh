@@ -3072,6 +3072,7 @@ input[type=text]::placeholder{color:var(--tx3)}
   padding-bottom:2px;flex-shrink:0;-webkit-overflow-scrolling:touch}
 .prow::-webkit-scrollbar{display:none}
 .prow .icbtn{flex:none;white-space:nowrap}   /* 以前按钮会被挤到换行, 最后一个(全屏)被挤出屏幕 */
+.prow{gap:4px}                              /* 7 个按钮(带全屏)窄屏也要放得下 */
 @media (max-width:360px){ .prow .icbtn{width:38px;min-width:38px;padding:0 7px} }
 .icbtn.txt{width:auto;min-width:38px;padding:0 9px;font-size:12px;font-weight:700;letter-spacing:.3px}
 .icbtn.on{color:#FB7299;border-color:rgba(251,114,153,.5)}
@@ -3434,7 +3435,6 @@ input[type=text]::placeholder{color:var(--tx3)}
         <button class="icbtn" id="pChap" title="章节"><svg class="ic"><use href="#i-list"/></svg></button>
         <button class="icbtn" id="pList" title="播放列表"><svg class="ic"><use href="#i-clist"/></svg></button>
         <button class="icbtn" id="pQueue" title="队列"><svg class="ic"><use href="#i-queue"/></svg></button>
-        <button class="icbtn" id="pFS" title="全屏"><svg class="ic"><use href="#i-fs"/></svg></button>
       </div>
     </div>
     <div id="chapPanel">
@@ -3476,6 +3476,8 @@ input[type=text]::placeholder{color:var(--tx3)}
         <button class="icbtn txt" id="pAB">A–B</button>
         <button class="icbtn txt" id="pRate">1x</button>
         <button class="icbtn txt" id="pAuto">∞</button>
+        <div class="spacer"></div>
+        <button class="icbtn" id="pFS" title="全屏"><svg class="ic"><use href="#i-fs"/></svg></button>
       </div>
     </div>
   </div>
@@ -3536,7 +3538,7 @@ const I18N = {
     cookieEmpty:'先粘贴 cookie', cookieBad:'格式不对 —— 应为 KEY=VALUE',
     cookieOk:'已保存 ✓ 生效中', cookieSaveFail:'保存失败',
     logs:'运行日志', refresh:'刷新', loading:'加载中…', entries:'条', noLog:'还没有日志',
-    tagSet:'已标记', favOn:'已收藏 ★', favOff:'已取消收藏', cancelled:'已取消',
+    tagSet:'已标记', tagUnset:'已取消标记', favOn:'已收藏 ★', favOff:'已取消收藏', cancelled:'已取消',
     retrying:'正在重新下载…', deleted:'已删除', opening:'正在打开…',
     goDl:'去下载视频', goFolder:'浏览文件夹', goScan:'扫描全盘',
     notFound:'找不到这个视频了(可能已被删除)', delFail:'没删掉',
@@ -3600,7 +3602,7 @@ const I18N = {
     cookieEmpty:'Paste a cookie first', cookieBad:'Bad format — should be KEY=VALUE',
     cookieOk:'Saved ✓ active', cookieSaveFail:'Save failed',
     logs:'Runtime log', refresh:'Refresh', loading:'Loading…', entries:'entries', noLog:'No log yet',
-    tagSet:'Tagged', favOn:'Favourited ★', favOff:'Unfavourited', cancelled:'Cancelled',
+    tagSet:'Tagged', tagUnset:'Tag removed', favOn:'Favourited ★', favOff:'Unfavourited', cancelled:'Cancelled',
     retrying:'Re-downloading…', deleted:'Deleted', opening:'Opening…',
     goDl:'Go download', goFolder:'Browse folders', goScan:'Scan disk',
     notFound:'Video not found (maybe deleted)', delFail:'Could not delete',
@@ -4274,7 +4276,9 @@ $('filterChips').addEventListener('click', e => {
 async function toggleTag(bvid, tag) {
   const r = await api('/api/tag', {bvid, tag});
   if (!r) { toast(t('notFound')); return; }
-  toast(t('tagSet') + ' ' + tag);
+  // 同一个标签再点一次 = 取消标记。以前提示写死"已标记", 用户分不清到底加没加
+  const now = (r.tags || []).includes(tag);
+  toast((now ? t('tagSet') : t('tagUnset')) + ' ' + tag);
   loadTagStats(); loadLib();
 }
 async function toggleFav(bvid) {
@@ -4781,12 +4785,17 @@ const togglePlay = () => v.paused ? v.play().catch(() => {}) : v.pause();
 $('pPlay').onclick = togglePlay;
 let pdrag = false, pRatio = 0;
 /* 缩略图预览: 在指定时间比例处显示(进度条拖动 + 画面横滑共用) */
-function showThumbAt(ratio, clientX) {
+function showThumbAt(ratio) {
   if (!dur) return;
   const pt = $('pthumb'), sr = stage.getBoundingClientRect();
+  const br = pbar.getBoundingClientRect();
   pt.style.display = 'flex';
-  const x = (clientX != null) ? clientX : sr.left + sr.width * ratio;
-  pt.style.left = Math.max(92, Math.min(sr.width - 92, x - sr.left)) + 'px';
+  // 位置一律按「进度条上播放头在哪」算, **不跟手指**。
+  // 画面横滑时手指位置和实际时间根本不对应(时间是按 ±150s 窗口跳的),
+  // 跟着手指画 → 缩略图飞到屏幕最右, 看着像"跳到片尾了"(用户实测)。
+  const x = br.left + Math.max(0, Math.min(1, ratio)) * br.width;
+  // 夹在 [76, 宽-76]: 缩略图 160px 宽, 中心贴住滑块, 最多露一点点边(比夹死更一致)
+  pt.style.left = Math.max(76, Math.min(sr.width - 76, x - sr.left)) + 'px';
   $('pthumbT').textContent = fmtDur(ratio * dur);
   if (thumbReady) {
     const k = Math.min(thumbN - 1, Math.max(0, Math.floor(ratio * thumbN)));
@@ -4804,16 +4813,8 @@ function pSeekTo(cx) {
   $('pTime').innerHTML = `<b>${fmtDur(pRatio * (v.duration || 0))}</b> <span>/ ${fmtDur(v.duration)}</span>`;
   /* 缩略图预览: 首次拖动触发服务端抽帧(懒生成), 之后秒回 */
   if (v.duration) {
-    const pt = $('pthumb'), sr = stage.getBoundingClientRect();
-    pt.style.display = 'flex';
-    pt.style.left = Math.max(92, Math.min(sr.width - 92, cx - sr.left)) + 'px';
-    $('pthumbT').textContent = fmtDur(pRatio * v.duration);
-    if (thumbReady) {
-      const k = Math.min(thumbN - 1, Math.floor(pRatio * thumbN));
-      const cw = thumbW / thumbCols, ch = thumbH / Math.ceil(thumbN / thumbCols);
-      $('pthumbImg').style.backgroundSize = `${thumbW}px ${thumbH}px`;
-      $('pthumbImg').style.backgroundPosition = `-${(k % thumbCols) * cw}px -${Math.floor(k / thumbCols) * ch}px`;
-    } else if (!thumbURL && FLAT[FI]) {
+    showThumbAt(pRatio);            // 位置/切片都走同一个函数(别各画各的)
+    if (!thumbReady && !thumbURL && FLAT[FI]) {
       ensureThumbs(FLAT[FI].rel, v.duration);
     }
   }
@@ -4898,8 +4899,9 @@ stage.addEventListener('touchmove', e => {
     gdelta = Math.max(-150, Math.min(150, Math.round(dx / 5)));
     const nt = Math.max(0, Math.min(dur, baseT + gdelta));
     v.currentTime = nt;
-    ovShow((gdelta >= 0 ? '+' : '') + gdelta + 's');
-    showThumbAt(nt / dur, tt.clientX);   // 画面上滑动也要出缩略图(原来只有进度条有)
+    // 浮层显示**绝对时间**(1:07 / 2:05)而不是 ±几秒 —— 用户要知道拖到哪一段
+    ovShow(fmtDur(nt) + ' / ' + fmtDur(dur));
+    showThumbAt(nt / dur);   // 画面上滑动也要出缩略图(原来只有进度条有)
   } else if (gmode === 2) {
     const nv = Math.max(0, Math.min(1, baseV - dy / 250));
     v.volume = nv; v.muted = nv === 0;
@@ -4910,7 +4912,8 @@ stage.addEventListener('touchmove', e => {
   }
 }, {passive: false});
 stage.addEventListener('touchend', () => {
-  if (gmode === 1) { toast((gdelta >= 0 ? '+' : '') + gdelta + 's');
+  if (gmode === 1) {
+    // 以前浮层 + toast 会同时报"±几秒", 同一个信息显示两遍还互相打架 → toast 去掉
     localStorage.setItem(posKey(FLAT[FI].rel), v.currentTime);
     // 横滑时弹出的缩略图要自己消失(旧 bug: 这条路没有隐藏逻辑, 缩略图一直挂在那)
     clearTimeout(_thumbHideT);
@@ -4958,7 +4961,8 @@ function ensureThumbs(rel, dur) {
       thumbURL = URL.createObjectURL(b);
       const im = new Image();
       im.onload = () => { thumbW = im.naturalWidth; thumbH = im.naturalHeight; thumbReady = true;
-                          renderChapters(); showThumbAt(0, null); };
+                          renderChapters();
+                          if ($('pthumb').style.display === 'flex') showThumbAt(pRatio); };
       im.onerror = () => { thumbURL = ''; };
       im.src = thumbURL;
     })
@@ -5104,15 +5108,32 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
   /* Android Chromium 已知 bug: 切后台回来 video 渲染表面(surface)被系统回收 →
-     黑屏有声, 换 src 也无效。回前台把 <video> 在 DOM 里挪一下位, 强制重建
-     渲染表面(currentTime 保留, 只有一次可感知的停顿)。 */
-  if (!$('pmodal').classList.contains('open') || !v.src) return;
-  requestAnimationFrame(() => {
+     黑屏有声, 换 src 也无效。
+     **老代码栽在 requestAnimationFrame 上**: 刚回前台时页面还没开始渲染,
+     rAF 可能**根本不触发** → 整段修复代码没跑 → 黑屏照旧(用户实测回归)。
+     现在: setTimeout 兜底 + 两层修复(挪位置 → 还不行就 load() 重载, 保位置保播放)。 */
+  if (!$('pmodal').classList.contains('open') || !v.getAttribute('src')) return;
+  setTimeout(() => {
+    const src = v.getAttribute('src');
+    const at = v.currentTime, wasPaused = v.paused;
+    /* ① 在 DOM 里挪一下位, 强制重建渲染表面 */
     const p = v.parentNode, n = v.nextSibling;
-    if (!p) return;
-    p.insertBefore(v, n);
-    if (v.paused && !v.ended) v.play().catch(() => {});
-  });
+    if (p) p.insertBefore(v, n);
+    if (v.ended) return;
+    /* ② 挪位置不够就彻底重载(Android 有时就是不给 surface) */
+    try {
+      v.removeAttribute('src');
+      v.load();                        // 复位
+      v.setAttribute('src', src);      // 源原样放回
+      v.load();                        // 重新拉流
+      v.addEventListener('loadedmetadata', () => {
+        try { v.currentTime = at; } catch (e) {}
+        if (!wasPaused) v.play().catch(() => {});
+      }, {once: true});
+    } catch (e) {
+      if (!wasPaused) v.play().catch(() => {});
+    }
+  }, 250);
 });
 
 /* ═══ 启动 ═══ */
@@ -5765,6 +5786,25 @@ if True:
     _t2 = server.new_task("BVqual2", "清晰度", [1], {"1": "P1"}, "", "", {})
     chk("默认任务 quality=0(自动)", _t2.get("quality") == 0, str(_t2.get("quality")))
 
+# ── 标签切换: 返回值必须能区分"加上了"还是"取消了" ──
+# 前端靠这个显示"已标记/已取消标记", 分不清用户就会以为没生效(用户实测)
+if True:
+    _lt = server.load_library()
+    _lt["BVtagtest"] = {"title": "标签测试", "owner": "", "folder": "movies", "cover": "",
+                        "cover_url": "", "tags": [], "parts": {}, "seq": 88}
+    server.save_library(_lt)
+    s, b = post("/api/tag", {"bvid": "BVtagtest", "tag": "red"})
+    d = json.loads(b) if s == 200 else {}
+    chk("打标签后 tags 里有它", s == 200 and "red" in (d.get("tags") or []), f"{s} {b[:100]}")
+    s, b = post("/api/tag", {"bvid": "BVtagtest", "tag": "red"})
+    d = json.loads(b) if s == 200 else {}
+    chk("再打一次 = 取消(前端据此显示'已取消标记')",
+        s == 200 and "red" not in (d.get("tags") or []), f"{s} {b[:100]}")
+    s, b = post("/api/tag", {"bvid": "BVtagtest", "tag": "red"})
+    d = json.loads(b) if s == 200 else {}
+    s, b2 = post("/api/tag", {"bvid": "BVnope", "tag": "red"})
+    chk("给不存在的视频打标签要报错", s == 400 or s == 404, f"{s} {b2[:80]}")
+
 print("\n== 结果 ==")
 print("全部通过 ✅" if ok else "有失败 ❌")
 sys.exit(0 if ok else 1)
@@ -5803,6 +5843,21 @@ cat > "$APP"/HANDOVER.md <<'MDEOF'
   ② **站点凭据管理**：按域名分组存 cookie（`cookies` 键 + `cookies/<hash>.txt` jar），
      域名留空 = 通用凭据；UI 有列表/掩码显示/删除/添加；下载时按链接域名自动挑。
   ③ **端到端真机测试** `e2e_real_test.py`：用本机真 yt-dlp 解析真实短链，断言分P 数。
+- **v6.11 对齐与回归修复（2026-10-21 用户实机截图驱动）**：
+  ① **缩略图与进度条强绑定**：缩略图位置一律按「进度条上播放头在哪」算（`ratio` → 
+     `pbar` 矩形），**不再跟手指**。画面横滑时手指位置和时间根本不对应（时间是按 ±150s
+     窗口跳的），跟着手指画 → 缩略图飞到屏幕最右，看着像"跳到片尾了"。
+     `pSeekTo` 和手势共用同一个 `showThumbAt()`，别再各画各的。
+  ② **手势浮层改绝对时间**：画面横滑时中间浮层显示 `1:07 / 2:05`（不是 `+35s`），
+     用户才知道自己拖到了哪一段；同时**删掉重复的 toast**（以前浮层和 toast 报同一个
+     `±几秒`，同一信息显示两遍还互相打架）。
+  ③ **标签提示区分加/取消**：同一个标签再点一次 = 取消。以前提示写死"已标记"，用户
+     分不清到底加没加 → 现在按服务端返回的 `tags` 判断，显示"已标记 / 已取消标记"。
+  ④ **回前台黑屏回归修复**：Android Chromium 切后台会回收 video 渲染表面 → 黑屏有声。
+     老代码用 `requestAnimationFrame` 触发修复，**但刚回前台时 rAF 可能根本不触发**
+     → 修复代码压根没跑 → 黑屏照旧（用户实测回归）。现在用 `setTimeout(250)`，
+     两层修复：DOM 里挪位置（强制重建 surface）→ 还不行就 `load()` 重载（保位置保播放）。
+  ⑤ **全屏按钮回右下角**（用户原话："谁家好人把最大化按钮放上面中间"）。
 - **v6.10 播放器重排 + 清晰度 + 多选（2026-10-21 用户实机截图驱动）**：
   ① **播放器 UI 重排**：标题**独占第一行**（第二行放章节/播放列表/队列/全屏），
      全屏按钮从控制行挪到顶栏 —— 控制行以前 7 个按钮在 360px 屏上**最后一个被挤出屏幕**。
@@ -6038,6 +6093,9 @@ exclude_dirs =         # 扫描排除（逗号分隔的路径片段，命中即�
 19. **后台扫描 = lost update**（v6.10 修）：`scan_videos()` 以前 load → 全盘 rglob →
     save，手机上扫描几十秒，期间用户打的标签/收藏**全被覆盖**。凡是"读-算-写"里
     **算的过程很慢**的，都不能直接 load→save，必须走 `mutate_library()`。
+21. **rAF 不保证触发**（v6.11 修）：`requestAnimationFrame` 在页面刚可见时**可能根本不跑**
+    （浏览器还没开始渲染）→ 挂在 rAF 里的"修复代码"等于没写。**修 UI 可见性/渲染问题
+    一律用 setTimeout**，别赌 rAF。
 20. **touchstart 显示 + click 再藏**（v6.10 修）：控制条"只闪 0.28 秒"的真凶。
     单击路径上**只能有一个地方决定显隐**。
 18. **`$('x').onclick` 指向已删元素 = 整个 JS 停摆**（v6.9 修）：一个 null 的 onclick
@@ -6053,7 +6111,7 @@ sed -n '/<script>/,/<\/script>/p' index.html | sed '1d;$d' > /tmp/check.js
 node --check /tmp/check.js
 
 # 2) 四套自动化测试(全离线, 不碰用户数据)
-python3 selftest.py          # 161 项: 端点/白名单/全局存在性/队列/路径/UA/封面链路/批量/清晰度
+python3 selftest.py          # 165 项: 端点/白名单/全局存在性/队列/路径/UA/封面/批量/清晰度/标签
 python3 chaos_test.py        # 68 项: 脏数据/并发/死锁/穿越/注入/SSRF/20端点不5xx
 python3 fake_yt_dlp_test.py  # 17 项: 假 yt-dlp 真跑解析链路/缓存/null不崩
 ```

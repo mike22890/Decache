@@ -112,7 +112,9 @@ createServer((req, res) => {
     req.on('end', () => {
       let b = {};
       try { b = JSON.parse(raw || '{}'); } catch {}
-      return j({ok: true, done: b.bvid || [], failed: [], tags: [], fav: true});
+      // 标签接口要像真服务器一样回 tags(前端靠它判断"加上了"还是"取消了")
+      return j({ok: true, done: b.bvid || [], failed: [],
+                tags: b.tag ? [b.tag] : [], fav: true});
     });
     return;
   }

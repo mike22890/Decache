@@ -543,6 +543,25 @@ if True:
     _t2 = server.new_task("BVqual2", "清晰度", [1], {"1": "P1"}, "", "", {})
     chk("默认任务 quality=0(自动)", _t2.get("quality") == 0, str(_t2.get("quality")))
 
+# ── 标签切换: 返回值必须能区分"加上了"还是"取消了" ──
+# 前端靠这个显示"已标记/已取消标记", 分不清用户就会以为没生效(用户实测)
+if True:
+    _lt = server.load_library()
+    _lt["BVtagtest"] = {"title": "标签测试", "owner": "", "folder": "movies", "cover": "",
+                        "cover_url": "", "tags": [], "parts": {}, "seq": 88}
+    server.save_library(_lt)
+    s, b = post("/api/tag", {"bvid": "BVtagtest", "tag": "red"})
+    d = json.loads(b) if s == 200 else {}
+    chk("打标签后 tags 里有它", s == 200 and "red" in (d.get("tags") or []), f"{s} {b[:100]}")
+    s, b = post("/api/tag", {"bvid": "BVtagtest", "tag": "red"})
+    d = json.loads(b) if s == 200 else {}
+    chk("再打一次 = 取消(前端据此显示'已取消标记')",
+        s == 200 and "red" not in (d.get("tags") or []), f"{s} {b[:100]}")
+    s, b = post("/api/tag", {"bvid": "BVtagtest", "tag": "red"})
+    d = json.loads(b) if s == 200 else {}
+    s, b2 = post("/api/tag", {"bvid": "BVnope", "tag": "red"})
+    chk("给不存在的视频打标签要报错", s == 400 or s == 404, f"{s} {b2[:80]}")
+
 print("\n== 结果 ==")
 print("全部通过 ✅" if ok else "有失败 ❌")
 sys.exit(0 if ok else 1)
