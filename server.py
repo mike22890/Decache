@@ -1995,19 +1995,32 @@ def _worker_once():
     if task is None:
         return
     task["status"] = "下载中"
-    lib = load_library()
-    entry = lib.setdefault(task["bvid"], {"title": task["title"], "owner": "",
-                           "folder": "", "cover": "", "cover_url": "", "parts": {}})
-    entry["cover_url"] = entry["cover_url"] or task.get("cover", "")
-    entry["source_url"] = entry.get("source_url") or task.get("url", "")   # 来源页: 抓封面的 Referer 用它
-    entry["title"] = task["title"] or entry["title"]
-    if "seq" not in entry:
-        entry["seq"] = next_seq(lib)
-    if not entry["folder"]:
-        entry["folder"] = ensure_folder(lib, task["bvid"], task["title"])
-    if not entry["cover"] and fetch_cover(task["bvid"], task.get("cover"), task.get("url", "")):
-        entry["cover"] = f"{task['bvid']}.jpg"
-    save_library(lib)
+    # 建条目也走 mutate_library: 以前 load→改→save, **worker 处理任务时的旧快照会把
+    # 用户刚打的标签/收藏冲掉**(实测: 下载一跑起来, 标签就没了)
+    def _mk(lib):
+        e = lib.setdefault(task["bvid"], {"title": task["title"], "owner": "",
+                                  "folder": "", "cover": "", "cover_url": "", "parts": {}})
+        e["cover_url"] = e["cover_url"] or task.get("cover", "")
+        e["source_url"] = e.get("source_url") or task.get("url", "")   # 来源页: 抓封面的 Referer 用它
+        e["title"] = task["title"] or e["title"]
+        if "seq" not in e:
+            e["seq"] = next_seq(lib)
+        if not e["folder"]:
+            e["folder"] = ensure_folder(lib, task["bvid"], task["title"])
+        return e
+
+    entry = mutate_library(_mk) or {}
+    if not entry.get("cover") and fetch_cover(task["bvid"], task.get("cover"), task.get("url", "")):
+        def _set_cover(lib):
+            e = lib.get(task["bvid"])
+            if e is not None and not e.get("cover"):
+                e["cover"] = f"{task['bvid']}.jpg"
+            return lib
+        try:
+            mutate_library(_set_cover)
+        except Exception:
+            pass
+    folder = DOWNLOAD_DIR / entry.get("folder", "")
     folder = DOWNLOAD_DIR / entry["folder"]
 
     for pi, p in enumerate(task["parts"]):
