@@ -2277,6 +2277,14 @@ const stage = $('pstage'), ov = $('seekOv');
 let sx = 0, sy = 0, baseT = 0, baseV = 0, gmode = 0, gdelta = 0, dur = 0, ovT = 0, _thumbHideT = 0;
 function ovShow(txt) { ov.textContent = txt; ov.style.display = 'block';
   clearTimeout(ovT); ovT = setTimeout(() => ov.style.display = 'none', 1000); }
+/* 模式/倍速切换提示: 复用中间浮层(比 toast 大, 一眼就看到) */
+let modeT = 0;
+function showMode(txt) {
+  ov.textContent = txt; ov.style.display = 'block';
+  ov.style.fontSize = '19px';
+  clearTimeout(modeT);
+  modeT = setTimeout(() => { ov.style.display = 'none'; ov.style.fontSize = ''; }, 1300);
+}
 let baseB = parseFloat(sessionStorage.getItem('take_bright') || '1');
 function applyB(b) {
   baseB = Math.max(0.4, Math.min(1.6, b));
@@ -2466,7 +2474,9 @@ function renderMode() { const m = MODES[MODE_I];
   const b = $('pAuto'); b.textContent = m.ic; b.title = t(m.k); b.setAttribute('aria-label', t(m.k)); }
 renderMode();
 $('pAuto').onclick = () => { MODE_I = (MODE_I + 1) % MODES.length;
-  localStorage.setItem('take_mode', MODE_I); renderMode(); poke(); };
+  localStorage.setItem('take_mode', MODE_I); renderMode(); poke();
+  showMode(t(MODES[MODE_I].k));   // 光换图标看不出是啥模式, 要弹个提示
+};
 v.addEventListener('ended', () => {
   const L = FLAT.length;
   if (MODE_I === 0 && FI < L - 1) startPart(FI + 1);
@@ -2488,7 +2498,9 @@ $('pPrev').onclick = () => startPart(FI - 1);
 $('pNextB').onclick = () => startPart((FI + 1) % FLAT.length);
 $('pRate').onclick = () => { RATE_I = (RATE_I + 1) % RATES.length;
   v.playbackRate = RATES[RATE_I]; $('pRate').textContent = RATES[RATE_I] + 'x';
-  localStorage.setItem('take_rate', RATES[RATE_I]); };
+  localStorage.setItem('take_rate', RATES[RATE_I]);
+  showMode(RATES[RATE_I] + 'x');
+};
 function closePlayer() {
   v.pause(); v.removeAttribute('src'); v.load();
   $('pmodal').classList.remove('open');

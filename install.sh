@@ -1615,12 +1615,22 @@ def _cmd(url, audio_only, folder, quality=0):
         # 清晰度上限: quality=0 = 自动(最优, 老行为); 720 = 只要 720 及以下
         # (yt-dlp 的 height<= 是"上限", 站点只有 360P 时会给你 360P, 省空间)
         cap = int(quality or 0)
-        h = f"[height<={cap}]" if cap > 0 else ""
         # cap=0 时这段必须和以前**逐字一致**(selftest 有断言), cap>0 时才加过滤
-        FMT = (f"bv*{h}[vcodec^=avc1]+ba[acodec^=mp4a]/"
-               f"bv*{h}[vcodec^=h264]+ba[acodec^=aac]/"
-               f"b{h}[ext=mp4]/"
-               f"bv*{h}+ba/b")
+        if cap > 0:
+            # 上限 = **短边** <= cap。B站竖屏视频的 height 是长边(480x852 -> height=852),
+            # 只写 height<=480 会一个都匹配不上 -> "Requested format is not available"。
+            # 所以 height / width 两套链都写, 顶层逗号并列(= 两者里挑最好的)。
+            def _chain(dim):
+                d = f"[{dim}<={cap}]"
+                return (f"bv*{d}[vcodec^=avc1]+ba[acodec^=mp4a]/"
+                        f"bv*{d}[vcodec^=h264]+ba[acodec^=aac]/"
+                        f"b{d}[ext=mp4]/"
+                        f"bv*{d}+ba")
+            FMT = _chain("height") + "," + _chain("width") + "/b[ext=mp4]/b"
+        else:
+            FMT = ("bv*[vcodec^=avc1]+ba[acodec^=mp4a]/"
+                   "bv*[vcodec^=h264]+ba[acodec^=aac]/"
+                   "b[ext=mp4]/bv*+ba/b")
         m = re.search(r"[?&]p=(\d+)", url)
         name = f"P{m.group(1)}" if m else "video"      # 按P命名, 防互相覆盖
         cmd = ["yt-dlp", "--no-playlist", "--no-warnings", "--newline",
@@ -1692,6 +1702,34 @@ def absorb_meta(bvid, folder, p):
 
 _EXISTS = object()      # 哨兵: 下载成功但文件本来就在(重下场景)
 
+# 引擎(yt-dlp)的英文报错, 翻成用户能行动的话。
+# 以前直接把英文原话扔给用户(还截断到 120 字), 用户只能干瞪眼。
+_ERR_ZH = [
+    ("requested format is not available",
+     "这个清晰度没有可用的格式 —— 换一个清晰度, 或者选「自动(最优)」"),
+    ("requested format not available",
+     "这个清晰度没有可用的格式 —— 换一个清晰度, 或者选「自动(最优)」"),
+    ("sign in to confirm", "这个视频要登录才能下 —— 去设置里填 cookie"),
+    ("private video", "私密视频, 没权限"),
+    ("members-only", "会员专享, 没会员下不了"),
+    ("http error 403", "被拒了(403) —— 可能要登录 cookie, 或者被限流了"),
+    ("http error 404", "链接失效了(404)"),
+    ("no space left", "磁盘满了"),
+    ("ffmpeg", "ffmpeg 报错 —— 确认机器上装了 ffmpeg"),
+    ("sign in", "需要登录 —— 去设置里填 cookie"),
+    ("unsupported url", "这个链接引擎不支持"),
+]
+
+
+def friendly_err(reason):
+    """把引擎的英文报错翻成一句能行动的话。认不出来就返回空(照原样给用户看)。"""
+    low = (reason or "").lower()
+    for k, v in _ERR_ZH:
+        if k in low:
+            return v
+    return ""
+
+
 def _run_part(task, p, folder):
     """下单个P(重试1次)。返回值三态: Path=新下好的文件 / _EXISTS=已有 / False=真失败"""
     # part_urls 可能是 null(旧数据/手改过的库) → 不能直接 .get
@@ -1759,7 +1797,8 @@ def _run_part(task, p, folder):
             return new[-1] if new else _EXISTS
         # 失败: 把引擎说的原话留下来(用户要看到"为什么失败", 不是"P1 失败")
         reason = " | ".join(tail[-4:]).strip()[:400]
-        task["error"] = reason or f"exit={proc.returncode}"
+        hint = friendly_err(reason)
+        task["error"] = (hint + " || " + reason) if hint else (reason or f"exit={proc.returncode}")
         return False
 
 def worker():
@@ -4868,6 +4907,14 @@ const stage = $('pstage'), ov = $('seekOv');
 let sx = 0, sy = 0, baseT = 0, baseV = 0, gmode = 0, gdelta = 0, dur = 0, ovT = 0, _thumbHideT = 0;
 function ovShow(txt) { ov.textContent = txt; ov.style.display = 'block';
   clearTimeout(ovT); ovT = setTimeout(() => ov.style.display = 'none', 1000); }
+/* 模式/倍速切换提示: 复用中间浮层(比 toast 大, 一眼就看到) */
+let modeT = 0;
+function showMode(txt) {
+  ov.textContent = txt; ov.style.display = 'block';
+  ov.style.fontSize = '19px';
+  clearTimeout(modeT);
+  modeT = setTimeout(() => { ov.style.display = 'none'; ov.style.fontSize = ''; }, 1300);
+}
 let baseB = parseFloat(sessionStorage.getItem('take_bright') || '1');
 function applyB(b) {
   baseB = Math.max(0.4, Math.min(1.6, b));
@@ -5057,7 +5104,9 @@ function renderMode() { const m = MODES[MODE_I];
   const b = $('pAuto'); b.textContent = m.ic; b.title = t(m.k); b.setAttribute('aria-label', t(m.k)); }
 renderMode();
 $('pAuto').onclick = () => { MODE_I = (MODE_I + 1) % MODES.length;
-  localStorage.setItem('take_mode', MODE_I); renderMode(); poke(); };
+  localStorage.setItem('take_mode', MODE_I); renderMode(); poke();
+  showMode(t(MODES[MODE_I].k));   // 光换图标看不出是啥模式, 要弹个提示
+};
 v.addEventListener('ended', () => {
   const L = FLAT.length;
   if (MODE_I === 0 && FI < L - 1) startPart(FI + 1);
@@ -5079,7 +5128,9 @@ $('pPrev').onclick = () => startPart(FI - 1);
 $('pNextB').onclick = () => startPart((FI + 1) % FLAT.length);
 $('pRate').onclick = () => { RATE_I = (RATE_I + 1) % RATES.length;
   v.playbackRate = RATES[RATE_I]; $('pRate').textContent = RATES[RATE_I] + 'x';
-  localStorage.setItem('take_rate', RATES[RATE_I]); };
+  localStorage.setItem('take_rate', RATES[RATE_I]);
+  showMode(RATES[RATE_I] + 'x');
+};
 function closePlayer() {
   v.pause(); v.removeAttribute('src'); v.load();
   $('pmodal').classList.remove('open');
@@ -5805,6 +5856,27 @@ if True:
     s, b2 = post("/api/tag", {"bvid": "BVnope", "tag": "red"})
     chk("给不存在的视频打标签要报错", s == 400 or s == 404, f"{s} {b2[:80]}")
 
+# ── 竖屏视频 + 报错翻译(2026-10-21 用户实测: 选 480P 下载失败) ──
+# 根因: B站竖屏视频 480x852 -> height=852(长边), 只写 height<=480 一个都匹配不上,
+#       yt-dlp 直接报 "Requested format is not available"。
+# 修法: 短边语义 = height<=N **或** width<=N(顶层逗号并列两条链)。
+if True:
+    _fc = server._cmd("https://example.com/v", False, DL, 480)
+    _fs = _fc[_fc.index("-f") + 1]
+    chk("清晰度过滤同时含 height 与 width(短边语义, 竖屏也能命中)",
+        "height<=480" in _fs and "width<=480" in _fs, _fs[:200])
+    chk("竖屏链保留 avc1+mp4a 兼容约束", "avc1" in _fs and "mp4a" in _fs, _fs[:200])
+    # 报错翻译
+    chk("英文报错翻成人话: 格式不可用",
+        "清晰度" in server.friendly_err("ERROR: Requested format is not available"),
+        server.friendly_err("ERROR: Requested format is not available"))
+    chk("英文报错翻成人话: 需要登录",
+        "cookie" in server.friendly_err("ERROR: Sign in to confirm you're not a bot"),
+        server.friendly_err("ERROR: Sign in to confirm"))
+    chk("认不出来的报错保持原样(不瞎翻译)",
+        server.friendly_err("ERROR: something weird happened") == "",
+        server.friendly_err("ERROR: something weird happened"))
+
 print("\n== 结果 ==")
 print("全部通过 ✅" if ok else "有失败 ❌")
 sys.exit(0 if ok else 1)
@@ -5843,6 +5915,17 @@ cat > "$APP"/HANDOVER.md <<'MDEOF'
   ② **站点凭据管理**：按域名分组存 cookie（`cookies` 键 + `cookies/<hash>.txt` jar），
      域名留空 = 通用凭据；UI 有列表/掩码显示/删除/添加；下载时按链接域名自动挑。
   ③ **端到端真机测试** `e2e_real_test.py`：用本机真 yt-dlp 解析真实短链，断言分P 数。
+- **v6.12 竖屏清晰度 + 报错翻译 + 模式提示（2026-10-21 用户实机）**：
+  ① **清晰度上限改成"短边"语义**：B站**竖屏**视频是 480x852 / 720x1280 这种，
+     `height` 是**长边**（852/1280），所以 `height<=480` 一个都匹配不上 → yt-dlp 直接
+     报 `Requested format is not available`（用户实测：选 480P 下载失败）。
+     **修法**：`height<=N` 与 `width<=N` **两条链顶层逗号并列**（逗号 = 取其中最好的），
+     横竖都命中。真站实测：竖屏 480P → 480x852、横屏 480P → 640x480，全对。
+  ② **引擎英文报错翻人话**：`friendly_err()` 把 "Requested format is not available"、
+     "Sign in"、403/404、磁盘满等翻成"能行动的一句话"，**原话仍然保留在后面**
+     （用户要能自己排查）。认不出来的**不瞎翻译**，原样给。
+  ③ **循环/倍速切换弹提示**：以前只换图标（∞ ↻ ⤨ →），根本看不出是啥模式。
+     现在复用中间浮层弹出模式名（单集循环/随机/顺序/全部循环，1.3 秒），倍速同理。
 - **v6.11 对齐与回归修复（2026-10-21 用户实机截图驱动）**：
   ① **缩略图与进度条强绑定**：缩略图位置一律按「进度条上播放头在哪」算（`ratio` → 
      `pbar` 矩形），**不再跟手指**。画面横滑时手指位置和时间根本不对应（时间是按 ±150s
@@ -6093,6 +6176,9 @@ exclude_dirs =         # 扫描排除（逗号分隔的路径片段，命中即�
 19. **后台扫描 = lost update**（v6.10 修）：`scan_videos()` 以前 load → 全盘 rglob →
     save，手机上扫描几十秒，期间用户打的标签/收藏**全被覆盖**。凡是"读-算-写"里
     **算的过程很慢**的，都不能直接 load→save，必须走 `mutate_library()`。
+22. **`height<=N` 对竖屏视频是错的**（v6.12 修）：清晰度上限必须按**短边**算
+    （`height<=N` **或** `width<=N`），否则竖屏一个都匹配不上。写过滤器前先问
+    "这个站的竖屏视频长宽比是什么样"。
 21. **rAF 不保证触发**（v6.11 修）：`requestAnimationFrame` 在页面刚可见时**可能根本不跑**
     （浏览器还没开始渲染）→ 挂在 rAF 里的"修复代码"等于没写。**修 UI 可见性/渲染问题
     一律用 setTimeout**，别赌 rAF。
@@ -6111,7 +6197,7 @@ sed -n '/<script>/,/<\/script>/p' index.html | sed '1d;$d' > /tmp/check.js
 node --check /tmp/check.js
 
 # 2) 四套自动化测试(全离线, 不碰用户数据)
-python3 selftest.py          # 165 项: 端点/白名单/全局存在性/队列/路径/UA/封面/批量/清晰度/标签
+python3 selftest.py          # 171 项: 端点/白名单/全局存在性/队列/路径/UA/封面/批量/清晰度/标签/报错翻译
 python3 chaos_test.py        # 68 项: 脏数据/并发/死锁/穿越/注入/SSRF/20端点不5xx
 python3 fake_yt_dlp_test.py  # 17 项: 假 yt-dlp 真跑解析链路/缓存/null不崩
 ```

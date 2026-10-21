@@ -1588,12 +1588,22 @@ def _cmd(url, audio_only, folder, quality=0):
         # 清晰度上限: quality=0 = 自动(最优, 老行为); 720 = 只要 720 及以下
         # (yt-dlp 的 height<= 是"上限", 站点只有 360P 时会给你 360P, 省空间)
         cap = int(quality or 0)
-        h = f"[height<={cap}]" if cap > 0 else ""
         # cap=0 时这段必须和以前**逐字一致**(selftest 有断言), cap>0 时才加过滤
-        FMT = (f"bv*{h}[vcodec^=avc1]+ba[acodec^=mp4a]/"
-               f"bv*{h}[vcodec^=h264]+ba[acodec^=aac]/"
-               f"b{h}[ext=mp4]/"
-               f"bv*{h}+ba/b")
+        if cap > 0:
+            # 上限 = **短边** <= cap。B站竖屏视频的 height 是长边(480x852 -> height=852),
+            # 只写 height<=480 会一个都匹配不上 -> "Requested format is not available"。
+            # 所以 height / width 两套链都写, 顶层逗号并列(= 两者里挑最好的)。
+            def _chain(dim):
+                d = f"[{dim}<={cap}]"
+                return (f"bv*{d}[vcodec^=avc1]+ba[acodec^=mp4a]/"
+                        f"bv*{d}[vcodec^=h264]+ba[acodec^=aac]/"
+                        f"b{d}[ext=mp4]/"
+                        f"bv*{d}+ba")
+            FMT = _chain("height") + "," + _chain("width") + "/b[ext=mp4]/b"
+        else:
+            FMT = ("bv*[vcodec^=avc1]+ba[acodec^=mp4a]/"
+                   "bv*[vcodec^=h264]+ba[acodec^=aac]/"
+                   "b[ext=mp4]/bv*+ba/b")
         m = re.search(r"[?&]p=(\d+)", url)
         name = f"P{m.group(1)}" if m else "video"      # 按P命名, 防互相覆盖
         cmd = ["yt-dlp", "--no-playlist", "--no-warnings", "--newline",
@@ -1665,6 +1675,34 @@ def absorb_meta(bvid, folder, p):
 
 _EXISTS = object()      # 哨兵: 下载成功但文件本来就在(重下场景)
 
+# 引擎(yt-dlp)的英文报错, 翻成用户能行动的话。
+# 以前直接把英文原话扔给用户(还截断到 120 字), 用户只能干瞪眼。
+_ERR_ZH = [
+    ("requested format is not available",
+     "这个清晰度没有可用的格式 —— 换一个清晰度, 或者选「自动(最优)」"),
+    ("requested format not available",
+     "这个清晰度没有可用的格式 —— 换一个清晰度, 或者选「自动(最优)」"),
+    ("sign in to confirm", "这个视频要登录才能下 —— 去设置里填 cookie"),
+    ("private video", "私密视频, 没权限"),
+    ("members-only", "会员专享, 没会员下不了"),
+    ("http error 403", "被拒了(403) —— 可能要登录 cookie, 或者被限流了"),
+    ("http error 404", "链接失效了(404)"),
+    ("no space left", "磁盘满了"),
+    ("ffmpeg", "ffmpeg 报错 —— 确认机器上装了 ffmpeg"),
+    ("sign in", "需要登录 —— 去设置里填 cookie"),
+    ("unsupported url", "这个链接引擎不支持"),
+]
+
+
+def friendly_err(reason):
+    """把引擎的英文报错翻成一句能行动的话。认不出来就返回空(照原样给用户看)。"""
+    low = (reason or "").lower()
+    for k, v in _ERR_ZH:
+        if k in low:
+            return v
+    return ""
+
+
 def _run_part(task, p, folder):
     """下单个P(重试1次)。返回值三态: Path=新下好的文件 / _EXISTS=已有 / False=真失败"""
     # part_urls 可能是 null(旧数据/手改过的库) → 不能直接 .get
@@ -1732,7 +1770,8 @@ def _run_part(task, p, folder):
             return new[-1] if new else _EXISTS
         # 失败: 把引擎说的原话留下来(用户要看到"为什么失败", 不是"P1 失败")
         reason = " | ".join(tail[-4:]).strip()[:400]
-        task["error"] = reason or f"exit={proc.returncode}"
+        hint = friendly_err(reason)
+        task["error"] = (hint + " || " + reason) if hint else (reason or f"exit={proc.returncode}")
         return False
 
 def worker():

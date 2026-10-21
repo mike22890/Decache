@@ -562,6 +562,27 @@ if True:
     s, b2 = post("/api/tag", {"bvid": "BVnope", "tag": "red"})
     chk("给不存在的视频打标签要报错", s == 400 or s == 404, f"{s} {b2[:80]}")
 
+# ── 竖屏视频 + 报错翻译(2026-10-21 用户实测: 选 480P 下载失败) ──
+# 根因: B站竖屏视频 480x852 -> height=852(长边), 只写 height<=480 一个都匹配不上,
+#       yt-dlp 直接报 "Requested format is not available"。
+# 修法: 短边语义 = height<=N **或** width<=N(顶层逗号并列两条链)。
+if True:
+    _fc = server._cmd("https://example.com/v", False, DL, 480)
+    _fs = _fc[_fc.index("-f") + 1]
+    chk("清晰度过滤同时含 height 与 width(短边语义, 竖屏也能命中)",
+        "height<=480" in _fs and "width<=480" in _fs, _fs[:200])
+    chk("竖屏链保留 avc1+mp4a 兼容约束", "avc1" in _fs and "mp4a" in _fs, _fs[:200])
+    # 报错翻译
+    chk("英文报错翻成人话: 格式不可用",
+        "清晰度" in server.friendly_err("ERROR: Requested format is not available"),
+        server.friendly_err("ERROR: Requested format is not available"))
+    chk("英文报错翻成人话: 需要登录",
+        "cookie" in server.friendly_err("ERROR: Sign in to confirm you're not a bot"),
+        server.friendly_err("ERROR: Sign in to confirm"))
+    chk("认不出来的报错保持原样(不瞎翻译)",
+        server.friendly_err("ERROR: something weird happened") == "",
+        server.friendly_err("ERROR: something weird happened"))
+
 print("\n== 结果 ==")
 print("全部通过 ✅" if ok else "有失败 ❌")
 sys.exit(0 if ok else 1)
