@@ -6378,6 +6378,98 @@ cat > "$APP"/HANDOVER.md <<'MDEOF'
 
 > 本文档写给接手本项目的 AI 或人类维护者。读完第 0/5/6 节即可安全动手。
 
+> English readers: see the **English Overview** below (section 1–6).
+> 英文读者请直接看下面的 **English Overview**（第 1–6 节）。
+
+---
+
+# English Overview (full details below are in Chinese)
+
+**Decache** is a single-folder, self-hosted local media library and video
+player. Pure Python standard library on the back end, one zero-build HTML file
+on the front end, no accounts, no telemetry, no cloud services.
+
+## 1. What it is
+
+- A local media library: scan folders, browse a tree, colour tags, favourites,
+  a play queue, multi-select delete, dedupe, disk stats.
+- A player: seek-bar thumbnail sprites, chapters, A-B loop, playlist, PiP,
+  speed control, external subtitles with styling, four play modes.
+- A downloader front-end: it parses a link, then hands the actual fetching to
+  an **external, general-purpose engine** (yt-dlp by default) that the user
+  installs. The project ships **no site-specific code at all** — that is a
+  hard rule, see `LEGAL.md` and `CONTRIBUTING.md`.
+
+## 2. Architecture at a glance
+
+| Piece | What it is |
+|---|---|
+| `server.py` | ~2,600 lines, Python stdlib only (`http.server` + `threading`), one `ThreadingHTTPServer`, JSON over HTTP, a background worker loop for the download queue |
+| `index.html` | ~2,700 lines, one file: CSS + SVG icon sprite + vanilla JS, zero build, zero external assets, i18n table with zh/en |
+| `install.sh` | **generated** by `sync_install.mjs` — a self-contained installer that embeds every runtime file; never edit it by hand |
+| `selftest.py` / `chaos_test.py` / `fake_yt_dlp_test.py` | 278 offline assertions total (190 / 71 / 17) |
+| `frontcheck.mjs` / `smoke.mjs` | 7 static gates for the frontend + a DOM-stub smoke run |
+
+Data-integrity rules that everything else depends on:
+
+- **One writer.** All library mutations go through `mutate_library()` — a
+  single lock around read-modify-write. Anything that loads a snapshot, works
+  for a while, and saves it back will silently wipe concurrent changes.
+- **Atomic writes.** `atomic_write()` = unique temp file + `fsync` +
+  `os.replace` + exponential-backoff retry on `PermissionError` (Windows loves
+  to hold files open).
+- **Corrupt data is quarantined, never reset.** A broken `library.json` is
+  *copied* to `library.corrupt-<ts>.json` and the original is left alone; the
+  app refuses to start on an empty library rather than overwriting it.
+- **Path whitelist.** Every filesystem access resolves the target and
+  compares **path components** (`is_relative_to`), never string prefixes.
+  Deletes are validated the same way — including refusing to delete the
+  download root itself.
+- **Destructive ops report failure.** If a file cannot be deleted (Windows
+  keeps it locked), the library entry is *kept* and the user gets a message.
+
+## 3. Cross-platform notes
+
+| Platform | Notes |
+|---|---|
+| Android (Termux) | `pkg install python ffmpeg`; `termux-setup-storage` is required or downloads land in a private folder. Android 12+ may kill background processes — the panel holds a `wakelock` and the player reloads its surface on resume (an Android Chromium bug destroys the surface and leaves black-with-audio). |
+| Windows | `python -u server.py` (output buffering); the console codepage can be GBK, so the server forces UTF-8 stdout; `select()` does not work on pipes here, so the engine output is read in a thread. |
+| macOS | Filenames are NFD on disk — everything is normalised to NFC before comparison. |
+| Linux | Standard. |
+| iOS | The **server** cannot run on iOS; the phone is only a client over the LAN, and iOS Safari plays MP4/H.264/AAC only. |
+
+## 4. Test SOP (run all of it)
+
+```bash
+python3 -m py_compile server.py selftest.py chaos_test.py fake_yt_dlp_test.py
+sed -n '/<script>/,/<\/script>/p' index.html | sed '1d;$d' > /tmp/check.js
+node --check /tmp/check.js
+python3 selftest.py && python3 chaos_test.py && python3 fake_yt_dlp_test.py
+node frontcheck.mjs && node smoke.mjs
+node sync_install.mjs
+```
+
+Check the **exit code**, not just the number of passing assertions — a test
+suite that dies on its last line still prints a wall of PASS.
+
+## 5. Known limitations (honest list)
+
+- Web playback in the background is PiP-only; system volume/brightness are
+  out of reach.
+- Third-party download engines come and go; the engine is pluggable for
+  exactly that reason.
+- Browsers need Chromium 80+ / Safari 13.1+ (`?.` / `??` are used).
+- 4K/high-bitrate playback depends on the source and the browser; the panel
+  does not transcode.
+
+## 6. Before you edit
+
+Read this file end to end. The sections below record the reasoning behind
+each non-obvious decision, plus the bugs that are easy to reintroduce
+(there is a numbered "blood-stained lessons" list further down).
+
+---
+
 ## 0. 一分钟速览
 
 - **是什么**：**Decache** —— 跑在 Android(Termux) / Windows / macOS / Linux 上的**单文件夹便携 Web 应用**：
@@ -6868,7 +6960,6 @@ node smoke.mjs        # 加载期冒烟: 用 DOM 桩真跑一遍脚本, 谁抛�
 Android 手机（Termux + Termux:API + Termux:Widget，建议 F-Droid 版）+ Windows PC 双端使用；
 手机浏览器建议 Chromium 内核 80+；下载目录 `~/storage/downloads/decache`；Windows 上 start.bat 直接跑。
 
----
 *本文件随版本更新。改代码不改本文档 = 失职。*
 MDEOF
 
