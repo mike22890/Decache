@@ -135,3 +135,5 @@ MIT — see [LICENSE](LICENSE).
   known limitations, and the blood-stained lessons (read before editing)
 - `LEGAL.md` — legal notice, scope boundaries, infringement report process
 - `THIRD_PARTY_LICENSES.md` — attribution for external dependencies
+
+<!-- TEST MARKER -->
