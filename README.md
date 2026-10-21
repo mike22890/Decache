@@ -1,8 +1,22 @@
 # Decache
 
-**Self-hosted local media library and video player.**
-自托管的本地媒体库与视频播放器。
-把"缓存里的东西"变成"你自己的文件"——下载一次，任何设备直接播。
+<p align="center">
+  <img src="favicon.svg" width="88" alt="Decache logo">
+</p>
+
+<h1 align="center">Decache</h1>
+<p align="center">
+  <strong>Self-hosted local media library and video player.</strong><br>
+  自托管的本地媒体库与视频播放器 —— 把"缓存里的东西"变成"你自己的文件"。
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-green"></a>
+  <img alt="platform" src="https://img.shields.io/badge/platform-Android%20%7C%20Windows%20%7C%20macOS%20%7C%20Linux-blue">
+  <img alt="python" src="https://img.shields.io/badge/python-3.9%2B-informational">
+  <img alt="tests" src="https://img.shields.io/badge/tests-278%20assertions-success">
+  <img alt="deps" src="https://img.shields.io/badge/runtime%20deps-stdlib%20only-orange">
+</p>
 
 <p align="center">
   <em>One folder. One command. Your files stay on your machine.</em><br>
@@ -11,7 +25,48 @@
 
 ---
 
+## Highlights / 为什么值得看
+
+Not a toy: a 2,600-line stdlib-only backend and a 2,700-line zero-build
+frontend, built test-first and audited three ways (data-integrity,
+frontend robustness, cross-platform).
+
+不是玩具项目：2,600 行纯标准库后端 + 2,700 行零构建前端，
+测试先行，经过数据完整性 / 前端健壮性 / 跨平台三路独立审计。
+
+- **Zero runtime dependencies / 零运行时依赖** — the server runs on the
+  Python standard library alone (`http.server`, `threading`, `subprocess`);
+  no pip install, no node_modules, no build step. Drops into a folder and runs.
+- **Pluggable download engines / 下载引擎可插拔** — yt-dlp / you-get / yutto
+  behind one interface; the app itself contains no site-specific code, so an
+  engine change (or its death) never breaks the product.
+- **10k-scale library / 万级库性能** — ETag + 304 incremental sync, server-side
+  view caching, lazy thumbnail sprite generation, server-side filtering so a
+  3,000-video library stays responsive on a phone.
+- **Data-integrity engineering / 数据完整性工程** — single-writer library
+  mutations under an RLock (no lost updates), atomic writes with fsync +
+  unique temp names + retry, corrupt-DB quarantining that never silently
+  resets to empty, path-validated deletes that refuse to touch anything
+  outside the download root.
+- **Reliability / 可靠性** — worker crash recovery, engine hang detection
+  with auto-kill, resumable downloads, atomic file replacement on
+  re-download (original restored on failure), per-domain cookie jars.
+- **Cross-platform / 跨平台** — one codebase, five platforms; per-platform
+  defaults, NFC normalization for macOS filenames, no `select()` on pipes
+  (Windows), WebView-safe CSS fallbacks.
+- **Test discipline / 测试纪律** — 278 offline assertions across three suites
+  (unit / chaos / fake-engine end-to-end), plus a 7-gate static check for the
+  frontend (dangling ids, undeclared identifiers, template leaks, duplicate
+  functions, shadowed globals, missing icons, syntax) and a DOM-stub smoke run.
+
+## Screenshots / 截图
+
+<!-- 建议放 4-6 张真机截图: 媒体库(深色) / 播放器(顶栏+进度条) / 章节面板 / 标签弹层 / 多选 / 下载页 -->
+<!-- 放 docs/ 目录, 这里用相对路径引用 -->
+
 ## What it is / 是什么
+
+
 
 A single-folder web app that turns your device into a personal media library
 and a decent video player. It runs on **Android (Termux) / Windows / macOS /
@@ -117,7 +172,11 @@ You can also set the cookie from the web UI (**设置** tab).
 ## Testing / 自测
 
 ```bash
-python3 selftest.py       # 70 assertions, isolated temp HOME, no network
+python3 selftest.py       # 190 assertions, isolated temp HOME, no network
+python3 chaos_test.py     # 71 assertions: dirty data / races / traversal / injection
+python3 fake_yt_dlp_test.py  # 17 assertions: end-to-end with a fake engine binary
+node frontcheck.mjs       # 7 static gates for the frontend (see HANDOVER)
+node smoke.mjs            # DOM-stub smoke run: catches load-time crashes
 ```
 
 ## Documentation / 文档
