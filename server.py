@@ -24,7 +24,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "6.16"         # 版本号: 显示在界面顶栏, 排查新旧用(改代码顺手改这里)
+VERSION = "6.17"         # 版本号: 显示在界面顶栏, 排查新旧用(改代码顺手改这里)
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.ini"
 # 下载目录/扫描目录的默认值**按平台给不同值**:

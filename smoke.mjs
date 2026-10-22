@@ -61,8 +61,23 @@ function makeEl(tag = 'div') {
   });
 }
 
+/* 真·内存版 localStorage: 空的时候照样返回 null(冷启动路径不变),
+   但写进去能读回来 —— 「继续观看」的回归测试要靠它 */
+function makeLS() {
+  const m = new Map();
+  return {
+    getItem: k => (m.has(String(k)) ? m.get(String(k)) : null),
+    setItem: (k, v) => m.set(String(k), String(v)),
+    removeItem: k => m.delete(String(k)),
+    clear: () => m.clear(),
+    key: i => [...m.keys()][i] ?? null,
+    get length() { return m.size; }
+  };
+}
+const __els = {};      // 同一个 id 永远拿到同一个假元素(不然写完读不回来)
+
 const doc = {
-  getElementById: () => makeEl(),
+  getElementById: (id) => (__els[id] ||= makeEl()),
   querySelector: () => makeEl(),
   querySelectorAll: () => [],
   createElement: (t) => makeEl(t),
@@ -82,7 +97,7 @@ const sandbox = {
   navigator: { userAgent: 'node-smoke', language: 'zh-CN', mediaSession: { metadata: null, setActionHandler() {} }, share() {} },
   location: { href: 'http://127.0.0.1:8790/', protocol: 'http:', host: '127.0.0.1:8790', origin: 'http://127.0.0.1:8790', pathname: '/', search: '', hash: '' },
   history: { pushState() {}, replaceState() {} },
-  localStorage: { getItem: () => null, setItem() {}, removeItem() {}, clear() {} },
+  localStorage: makeLS(),
   sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} },
   window: null,
   self: null,
@@ -152,4 +167,69 @@ console.log('✅ 加载期无异常(脚本跑通, 桩环境)');
 if (warnings.length) {
   console.log('  (控制台警告 ' + warnings.length + ' 条, 桩环境噪音可忽略)');
 }
+/* ═══ 回归: 「继续观看」卡片 ═══
+   旧 bug(用户报的): 卡片按 **pos 秒数最大** 选, 上次看 40 分钟的老片永远压过
+   今天看 2 分钟的新片 → "继续播放不是前一次的, 而是好几次前的"。
+   现在按观看时间戳选, 看完的跳过。这几条断言就是钉住这个行为。 */
+const LS = sandbox.localStorage;
+const bad = [];
+let cnt = 0;
+const check = (name, got, want) => {
+  cnt++;
+  if (got !== want) bad.push(name + ' → ' + JSON.stringify(got) + ' (期望 ' + JSON.stringify(want) + ')');
+};
+const setLib = arr => vm.runInContext('LIB = ' + JSON.stringify({ videos: arr, loose: [] }), sandbox);
+setLib([
+  { folder: 'a', title: 'A-old', parts: [{ p: 1, file: 'P1.mp4' }] },
+  { folder: 'b', title: 'B-new', parts: [{ p: 1, file: 'P1.mp4' }] },
+  { folder: 'c', title: 'C-done', parts: [{ p: 1, file: 'P1.mp4' }] }
+]);
+const now = Date.now();
+const card = () => { sandbox.renderResume(); return __els.resumeSlot.innerHTML; };
+
+LS.setItem('take_hist_v1', JSON.stringify([
+  { r: 'b/P1.mp4', t: 120, d: 1800, at: now - 60000 },
+  { r: 'a/P1.mp4', t: 2400, d: 3600, at: now - 3 * 86400000 }
+]));
+check('最近看的赢, 不是秒数最大', card().includes('B-new'), true);
+check('卡片显示百分比', card().includes('7%'), true);
+check('卡片有进度细线', card().includes('class="rprog"'), true);
+
+LS.setItem('take_hist_v1', JSON.stringify([
+  { r: 'c/P1.mp4', t: 1795, d: 1800, at: now },
+  { r: 'a/P1.mp4', t: 2400, d: 3600, at: now - 86400000 }
+]));
+check('看完的自动跳过', card().includes('A-old'), true);
+
+LS.setItem('take_hist_v1', JSON.stringify([{ r: 'c/P1.mp4', t: 1795, d: 1800, at: now }]));
+check('全看完 = 卡片空', card().trim(), '');
+
+LS.setItem('take_hist_v1', '[]');
+sandbox.savePos('a/P1.mp4', 400, 1200);
+sandbox.savePos('b/P1.mp4', 90, 600);
+const h = JSON.parse(LS.getItem('take_hist_v1'));
+check('账本按新到旧', h.map(x => x.r).join(','), 'b/P1.mp4,a/P1.mp4');
+check('老进度键照写', LS.getItem('take_pos_b/P1.mp4'), '90');
+sandbox.savePos('b/P1.mp4', 300, 600);
+const h2 = JSON.parse(LS.getItem('take_hist_v1'));
+check('同一集只留一条', h2.filter(x => x.r === 'b/P1.mp4').length, 1);
+check('进度刷新到 300', h2[0].t, 300);
+
+LS.setItem('take_hist_v1', '[]');
+LS.setItem('take_pos_c/P1.mp4', '500');
+check('空账本+旧键 = 兜底仍出卡', card().includes('C-done'), true);
+
+/* 老用户升级路径: 没有账本键, 只有旧进度键 → 自动搬进账本, 卡片不能空掉 */
+LS.removeItem('take_hist_v1');
+LS.setItem('take_pos_a/P1.mp4', '900');
+check('旧进度键自动搬进账本', card().includes('A-old'), true);
+check('搬完账本真写进去了', (JSON.parse(LS.getItem('take_hist_v1')) || []).length, 3);
+
+if (bad.length) {
+  console.log('❌ 继续观看 失败 ' + bad.length + '/' + cnt + ':');
+  bad.forEach(b => console.log('  ' + b));
+  process.exit(1);
+}
+console.log('✅ 继续观看 ' + cnt + ' 项全过');
+
 process.exit(0);

@@ -44,6 +44,26 @@ createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   const j = o => { res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify(o)); };
   if (u.pathname === '/') { res.writeHead(200, {'Content-Type':'text/html; charset=utf-8'}); return res.end(html); }
+  /* 慢图: 拖住 load 事件, 让 `floorp --screenshot` 那种"一 load 就拍"的工具等得到渲染完 */
+  if (u.pathname === '/slow.png') {
+    return setTimeout(() => {
+      res.writeHead(200, {'Content-Type':'image/png', 'Cache-Control':'no-store'});
+      res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
+    }, 1200);
+  }
+  /* /seed —— 往 localStorage 里塞一份"继续观看"账本, 顺便停在媒体库, 专门用来肉眼验卡片/动效 */
+  if (u.pathname === '/seed') {
+    const now = Date.now(), v0 = LIB.videos[0], v1 = LIB.videos[1];
+    const hist = [
+      { r: v1.folder + '/' + v1.parts[0].file, t: 120, d: 1800, at: now - 60000 },
+      { r: v0.folder + '/' + v0.parts[0].file, t: 2400, d: 3600, at: now - 3 * 86400000 },
+    ];
+    const pre = `<script>try{localStorage.setItem('take_hist_v1', ${JSON.stringify(JSON.stringify(hist))});}` +
+      `catch(e){}</script><img src="/slow.png" style="position:absolute;width:1px;height:1px;opacity:0" alt="">`;
+    const post = `<script>try{switchTab('lib');renderResume();}catch(e){}</script>`;
+    res.writeHead(200, {'Content-Type':'text/html; charset=utf-8'});
+    return res.end(html.replace(/<body([^>]*)>/, '<body$1>' + pre).replace('</body>', post + '</body>'));
+  }
   if (u.pathname === '/api/version') return j({v:'6.13'});
   if (u.pathname === '/api/tasks') return j(TASKS);
   if (u.pathname === '/api/library') return j(LIB);

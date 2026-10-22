@@ -1,4 +1,4 @@
-# decache · AI 交接书 (HANDOVER) · v6.16
+# decache · AI 交接书 (HANDOVER) · v6.17
 
 > 本文档写给接手本项目的 AI 或人类维护者。读完第 0/5/6 节即可安全动手。
 
@@ -32,7 +32,7 @@ on the front end, no accounts, no telemetry, no cloud services.
 | `index.html` | ~2,700 lines, one file: CSS + SVG icon sprite + vanilla JS, zero build, zero external assets, i18n table with zh/en |
 | `install.sh` | **generated** by `sync_install.mjs` — a self-contained installer that embeds every runtime file; never edit it by hand |
 | `selftest.py` / `chaos_test.py` / `fake_yt_dlp_test.py` | 278 offline assertions total (190 / 71 / 17) |
-| `frontcheck.mjs` / `smoke.mjs` | 7 static gates for the frontend + a DOM-stub smoke run |
+| `frontcheck.mjs` / `smoke.mjs` | 7 static gates for the frontend + a DOM-stub smoke run (smoke.mjs also regression-tests the "Resume" card, 10 assertions) |
 
 Data-integrity rules that everything else depends on:
 
@@ -122,6 +122,25 @@ each non-obvious decision, plus the bugs that are easy to reintroduce
   ② **站点凭据管理**：按域名分组存 cookie（`cookies` 键 + `cookies/<hash>.txt` jar），
      域名留空 = 通用凭据；UI 有列表/掩码显示/删除/添加；下载时按链接域名自动挑。
   ③ **端到端真机测试** `e2e_real_test.py`：用本机真 yt-dlp 解析真实短链，断言分P 数。
+- **v6.17 继续观看选错片 + 动效层（2026-10-23 用户实测驱动）**：
+  ① **"继续观看"万年不变（用户原话：显示的继续播放不是前一次的，而是好几次前的）**：
+     老 `renderResume()` 遍历所有 `take_pos_*`，取 **pos 秒数最大** 的那条 ——
+     上次看 40 分钟的老片永远压过昨天看 2 分钟的新片，跟"最近"毫无关系。
+     现在另存一本带时间戳的账本 `take_hist_v1`（`{r,t,d,at}`，新在前，≤40 条），
+     由 `savePos(rel, t, dur)` 统一写（进度键 `take_pos_*` 照写，恢复播放位置的逻辑没动）；
+     卡片取**账本第一条**，并**跳过看完的**（`t ≥ d-15`）和刚开头的（`t ≤ 20`）、
+     跳过已从库里删掉的。`closePlayer()` 关之前再钉一次并 `renderResume()` 刷新 ——
+     老代码关播放器回来卡片根本不重绘。卡片多了百分比 + 一条 3px 进度细线。
+     老用户升级：第一次没有账本键时，把旧 `take_pos_*` 按秒数倒序搬进账本（`at=0`，排最后），
+     卡片不会突然空掉。
+     **回归测试在 `smoke.mjs` 里**（12 条断言，桩环境把 localStorage 换成真内存版）。
+  ② **动效层**：只动 `transform`/`opacity`（合成器上跑，手机不重排）；
+     曲线用 `linear()` 烘焙的 spring，老 WebView 自动退回 `cubic-bezier`；
+     `prefers-reduced-motion` 一票否决全部归零。具体：页面切换 10px 上浮、
+     卡片封面悬停轻推/按下回弹、控制条与顶栏"出用 spring 收用 ease-in"（不对称才有重量）、
+     进度条滑块播放时轻微呼吸、缓冲转圈（等 220ms 才显示，秒开不闪）、
+     缩略图/实时帧/片尾卡/列表面板入场的位移淡入、toast 弹簧。
+     **刻意没做**：列表逐张 stagger —— 库每 30 秒轮询重绘，会有动画重播的鬼影。
 - **v6.16 实时预览帧 + 回前台黑屏/白屏真修（2026-10-23 用户实测驱动）**：
   ① **缩略图从"12 段"改成"这一秒"**：老雪碧图 12 帧均布，一小时的片子每段差 5 分钟，
      拖到哪看到的都是别处的画面。新增 `GET /api/frame?rel=&t=&w=` 按需抽单帧

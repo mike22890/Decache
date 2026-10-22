@@ -51,7 +51,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "6.16"         # 版本号: 显示在界面顶栏, 排查新旧用(改代码顺手改这里)
+VERSION = "6.17"         # 版本号: 显示在界面顶栏, 排查新旧用(改代码顺手改这里)
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.ini"
 # 下载目录/扫描目录的默认值**按平台给不同值**:
@@ -3564,6 +3564,88 @@ input[type=text]::placeholder{color:var(--tx3)}
 #phint.show{opacity:1}
 #phint span{display:flex;align-items:center;gap:6px;font-size:11px;color:rgba(255,255,255,.85);
   background:rgba(0,0,0,.55);padding:6px 12px;border-radius:999px;backdrop-filter:blur(6px)}
+
+/* ═══════════════ 动效 v6.17 ═══════════════
+   规矩只有三条:
+   1. 只碰 transform / opacity —— 这两样走合成器, 手机不重新排版, 才不会卡
+   2. 曲线走 spring(linear() 烘焙), 老 WebView 自动退回 cubic-bezier
+   3. prefers-reduced-motion 一票否决, 全部归零(晕动症的人不该被界面晃) */
+:root{
+  --e-out:cubic-bezier(.16,1,.3,1);          /* 进场: 起步快, 收尾软 */
+  --e-in:cubic-bezier(.4,0,.85,1);           /* 退场: 加速离开, 不拖泥带水 */
+  --e-spring:cubic-bezier(.34,1.45,.64,1);   /* 交互反馈: 微过冲 */
+  --d1:.12s; --d2:.2s; --d3:.34s;
+}
+@supports (animation-timing-function: linear(0,1)){
+  :root{
+    --e-out:linear(0,.45,.82,.97,1.01,1);
+    --e-in:linear(0,.12,.42,.78,.96,1);
+    --e-spring:linear(0,.55,.9,1.06,1.05,1,1);
+  }
+}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{
+    animation-duration:.001s!important;animation-delay:0s!important;
+    animation-iteration-count:1!important;transition-duration:.001s!important;
+    scroll-behavior:auto!important}
+}
+
+/* 页面切换: 10px 上浮 + 淡入(原来只有 4px, 看不出来) */
+.page.active{animation:pageIn var(--d3) var(--e-out) both}
+@keyframes pageIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+
+/* 卡片: 封面悬停轻推(仅真鼠标), 按下回弹 */
+.vcard .cov{transition:transform var(--d1) var(--e-spring)}
+.vcard .cov img{transition:transform var(--d3) var(--e-out)}
+@media (hover:hover) and (pointer:fine){
+  .vcard .cov:hover img{transform:scale(1.035)}
+}
+/* 按钮/页签/图标: 按下回弹统一走 spring */
+.btn,.chip,.tabbar button,.langbtn,.icbtn{
+  transition:transform var(--d2) var(--e-spring),opacity var(--d2) var(--e-out),
+    background-color var(--d2) var(--e-out),border-color var(--d2) var(--e-out),color var(--d2) var(--e-out)}
+.chip:active,.tabbar button:active,.langbtn:active{transform:scale(.94)}
+
+/* 播放器进场: 只淡入, 别对一整块 video 做位移(会掉帧) */
+#pmodal.open{animation:pIn var(--d2) var(--e-out)}
+@keyframes pIn{from{opacity:0}to{opacity:1}}
+/* 控制条/顶栏: 出用 spring 顶上来, 收用 ease-in 退得快 —— 不对称才像有重量 */
+#pctrl{transition:opacity var(--d2) var(--e-out),transform var(--d3) var(--e-spring)}
+#pctrl.hide{transition:opacity var(--d1) var(--e-in),transform var(--d1) var(--e-in)}
+#phead{transition:opacity var(--d2) var(--e-out),transform var(--d3) var(--e-spring)}
+#phead.hide{opacity:0;transform:translateY(-10px);pointer-events:none;
+  transition:opacity var(--d1) var(--e-in),transform var(--d1) var(--e-in)}
+/* 进度条: 播放时正常走, 拖的时候不插值(手在拖, 加了插值就黏) */
+#pbar:not(.drag) #pfill{transition:width .12s linear,height .12s}
+#pknob::after{content:'';position:absolute;inset:-7px;border-radius:50%;
+  background:rgba(251,114,153,.35);opacity:0;transition:opacity var(--d2) var(--e-out)}
+#pmodal.playing #pknob::after{animation:knobPulse 2.2s var(--e-out) infinite}
+@keyframes knobPulse{0%{opacity:.55;transform:scale(.7)}70%{opacity:0;transform:scale(1.35)}100%{opacity:0;transform:scale(1.35)}}
+/* 缓冲: 转圈(JS 会等 220ms 才给 .buf, 秒开不闪) */
+#pstage.buf::after{content:'';position:absolute;top:50%;left:50%;width:34px;height:34px;
+  margin:-17px 0 0 -17px;border-radius:50%;z-index:5;pointer-events:none;
+  border:2.5px solid rgba(255,255,255,.18);border-top-color:#FB7299;animation:spin .75s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+/* 缩略图/实时帧/片尾卡: 入场都带一点位移, 别硬切 */
+#pthumb{animation:thumbIn var(--d2) var(--e-out) both}
+@keyframes thumbIn{from{opacity:0;transform:translateX(-50%) translateY(6px)}
+  to{opacity:1;transform:translateX(-50%) translateY(0)}}
+#pthumbLive.on{animation:fadeOnly var(--d2) var(--e-out)}
+@keyframes fadeOnly{from{opacity:0}to{opacity:1}}
+#pnext.show{animation:nextIn var(--d3) var(--e-spring) both}
+@keyframes nextIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
+/* 片尾卡倒计时数字: 换数时弹一下 */
+#pnext .pnCnt{transition:transform var(--d2) var(--e-spring)}
+#listPanel.show{animation:panelIn var(--d3) var(--e-spring) both}
+@keyframes panelIn{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}
+#gtoast{transition:opacity var(--d2) var(--e-out),transform var(--d3) var(--e-spring)}
+
+/* 「继续观看」卡: 加一条进度细线, 按下回弹 */
+.resume{transition:transform var(--d2) var(--e-spring),border-color var(--d2) var(--e-out)}
+.resume:active{transform:scale(.985)}
+.resume .rprog{height:3px;border-radius:2px;background:var(--line2);margin-top:7px;overflow:hidden}
+.resume .rprog i{display:block;height:100%;border-radius:2px;background:var(--tx);
+  transition:width var(--d3) var(--e-out)}
 </style>
 </head>
 <body>
@@ -4126,7 +4208,44 @@ function prunePos() {
     if (ks.length > 200) ks.slice(0, ks.length - 200).forEach(k => localStorage.removeItem(k));
   } catch (e) {}
 }
-function savePos(rel, t) { try { localStorage.setItem('take_pos_' + rel, t); } catch (e) {} }
+/* ── 观看账本 ──
+   旧 bug: "继续观看"遍历 take_pos_ 取 **pos 秒数最大** 的那个。
+   上次看了 40 分钟的老片永远压过昨天看了 2 分钟的新片 → 卡片万年不动。
+   现在另存一张带时间戳的账本, 取 **最近一次** 看的; 看完的自动跳过。 */
+const HIST_KEY = 'take_hist_v1';
+let _histMigrated = false;
+function histLoad() {
+  let raw = null;
+  try { raw = localStorage.getItem(HIST_KEY); } catch (e) {}
+  if (raw) { try { const a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+  if (_histMigrated) return [];
+  /* 老用户第一次升到 v6.17: 旧进度键没有时间戳, 只能按"看到第几秒"倒序搬进账本,
+     at 记 0 → 永远排在有时间戳的记录后面。不搬的话卡片会突然空掉。 */
+  _histMigrated = true;
+  let out = [];
+  try {
+    const ks = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('take_pos_')) ks.push(k);
+    }
+    out = ks.map(k => ({ r: k.slice(9), t: Math.round(parseFloat(localStorage.getItem(k)) || 0), d: 0, at: 0 }))
+      .filter(x => x.t > 20)
+      .sort((a, b) => b.t - a.t)
+      .slice(0, 40);
+    if (out.length) histSave(out);
+  } catch (e) {}
+  return out;
+}
+function histSave(a) { try { localStorage.setItem(HIST_KEY, JSON.stringify(a.slice(0, 40))); } catch (e) {} }
+/* t = 当前秒数, d = 总时长(拿不到传 0) */
+function savePos(rel, t, d) {
+  try { localStorage.setItem('take_pos_' + rel, t); } catch (e) {}
+  if (!rel) return;
+  const a = histLoad().filter(x => x && x.r !== rel);
+  a.unshift({ r: rel, t: Math.round(t || 0), d: Math.round(d || 0), at: Date.now() });
+  histSave(a);       // 账本就这么大(≤40 条), 每次整写比"算增量"简单也不会错
+}
 
 /* 进度记录会无限增长, 撑爆 localStorage 配额后进度再也存不上 → 只留最近 200 条 */
 
@@ -4954,18 +5073,38 @@ document.querySelectorAll('#sortChips .chip').forEach(c => c.onclick = () => {
 });
 
 function renderResume() {
+  if (!LIB.videos.length) { $('resumeSlot').innerHTML = ''; return; }
+  const byRel = new Map();
+  for (const vd of LIB.videos) for (const p of vd.parts) byRel.set(vd.folder + '/' + p.file, {vd, p});
   let best = null;
-  for (const vd of LIB.videos) for (const p of vd.parts) {
-    const rel = vd.folder + '/' + p.file;
-    const pos = parseFloat(localStorage.getItem('take_pos_' + rel) || 0);
-    if (pos > 30 && (!best || pos > best.pos)) best = {vd, p, rel, pos};
+  const hist = histLoad();
+  if (hist.length) {
+    for (const e of hist) {                    // 账本本身就是"新的在前", 第一个命中就是最近看的
+      if (!e || !e.r) continue;
+      const hit = byRel.get(e.r); if (!hit) continue;
+      const pos = Number(e.t) || 0, dur0 = Number(e.d) || 0;
+      if (pos <= 20) continue;                 // 刚开头几秒, 不算"看到一半"
+      if (dur0 && pos >= dur0 - 15) continue;  // 看完了, 别再问要不要继续
+      best = {...hit, rel: e.r, pos, dur0};
+      break;
+    }
+  } else {
+    // 老用户/清过缓存: 没账本时退回旧扫描, 只为了别让卡片空着
+    for (const vd of LIB.videos) for (const p of vd.parts) {
+      const rel = vd.folder + '/' + p.file;
+      const pos = parseFloat(localStorage.getItem('take_pos_' + rel) || 0);
+      if (pos > 30 && (!best || pos > best.pos)) best = {vd, p, rel, pos, dur0: 0};
+    }
   }
-  $('resumeSlot').innerHTML = best ? `
+  if (!best) { $('resumeSlot').innerHTML = ''; return; }
+  const pct = best.dur0 > 0 ? Math.min(100, Math.round(best.pos / best.dur0 * 100)) : 0;
+  $('resumeSlot').innerHTML = `
     <div class="resume" data-open="${esc(best.rel)}">
       <span class="ric"><svg class="ic" style="width:16px;height:16px;fill:currentColor;stroke:none"><use href="#i-play"/></svg></span>
       <div style="flex:1;min-width:0"><b>${t('resume')}</b>
-        <div class="sub">${esc(best.vd.title)} · P${best.p.p} · ${fmtDur(best.pos)}</div></div>
-    </div>` : '';
+        <div class="sub">${esc(best.vd.title)} · P${best.p.p} · ${fmtDur(best.pos)}${pct ? ' · ' + pct + '%' : ''}</div>
+        ${pct ? `<div class="rprog"><i style="width:${pct}%"></i></div>` : ''}</div>
+    </div>`;
 }
 $('resumeSlot').addEventListener('click', e => {
   const o = e.target.closest('[data-open]'); if (o) openRel(o.dataset.open);
@@ -5264,12 +5403,24 @@ async function keepAwake(on) {
 function setPlayIcon() {
   $('pPlayIc').setAttribute('href', v.paused ? '#i-play' : '#i-pause');
 }
-v.addEventListener('play', () => { setPlayIcon(); poke(); keepAwake(true); $('pTap').style.display = 'none'; });
+v.addEventListener('play', () => { setPlayIcon(); poke(); keepAwake(true); $('pTap').style.display = 'none';
+  $('pmodal').classList.add('playing'); });
 /* iOS Safari 等浏览器会拦自动播放(有声视频必须有用户手势) → 给个明确的"点按播放" */
 v.addEventListener('pause', () => { $('pTap').style.display = (v.currentTime < 0.2 && !v.ended) ? 'flex' : 'none'; });
 $('pTap').onclick = e => { e.stopPropagation(); v.play().catch(() => {}); };
 v.addEventListener('pause', () => { setPlayIcon(); bar.classList.remove('hide');
-  phead.classList.remove('hide'); clearTimeout(barT); keepAwake(false); });
+  phead.classList.remove('hide'); clearTimeout(barT); keepAwake(false);
+  $('pmodal').classList.remove('playing'); setBuf(0); });
+/* 缓冲转圈: 等 220ms 再显示, 秒开的时候不闪一下 */
+let _bufT = 0;
+function setBuf(on) {
+  clearTimeout(_bufT);
+  if (on) _bufT = setTimeout(() => $('pstage').classList.add('buf'), 220);
+  else $('pstage').classList.remove('buf');
+}
+v.addEventListener('waiting', () => setBuf(1));
+v.addEventListener('playing', () => setBuf(0));
+v.addEventListener('canplay', () => setBuf(0));
 
 /* 控制条 */
 const pbar = $('pbar'), pfill = $('pfill'), pknob = $('pknob'), pbufEl = $('pbuf');
@@ -5498,8 +5649,7 @@ stage.addEventListener('touchmove', e => {
 stage.addEventListener('touchend', () => {
   if (gmode === 1) {
     // 以前浮层 + toast 会同时报"±几秒", 同一个信息显示两遍还互相打架 → toast 去掉
-    localStorage.setItem(posKey(FLAT[FI].rel), v.currentTime);
-    // 横滑时弹出的缩略图要自己消失(旧 bug: 这条路没有隐藏逻辑, 缩略图一直挂在那)
+    savePos(FLAT[FI].rel, v.currentTime, v.duration);
     clearTimeout(_thumbHideT);
     _thumbHideT = setTimeout(() => { $('pthumb').style.display = 'none'; }, 350);
   }
@@ -5660,7 +5810,7 @@ v.addEventListener('timeupdate', () => {
   const now = Date.now();
   if (now - _saveT > 2000 && v.duration) {
     _saveT = now;
-    localStorage.setItem(posKey(FLAT[FI].rel), v.currentTime);
+    savePos(FLAT[FI].rel, v.currentTime, v.duration);
   }
 });
 $('pPrev').onclick = () => startPart(FI - 1);
@@ -5671,10 +5821,13 @@ $('pRate').onclick = () => { RATE_I = (RATE_I + 1) % RATES.length;
   showMode(RATES[RATE_I] + 'x');
 };
 function closePlayer() {
+  if (FLAT[FI] && v.duration) savePos(FLAT[FI].rel, v.currentTime, v.duration);  // 关之前把这集钉成"最近观看"
+  setBuf(0);
   v.pause(); v.removeAttribute('src'); v.load();
-  $('pmodal').classList.remove('open');
+  $('pmodal').classList.remove('open', 'playing');
   keepAwake(false);
   if (document.fullscreenElement) document.exitFullscreen();
+  renderResume();          // 旧 bug: 关掉播放器回媒体库, 卡片还是老样子, 不刷新
 }
 $('pmodal').addEventListener('click', e => { if (e.target === $('pmodal')) closePlayer(); });
 
@@ -6600,7 +6753,7 @@ sys.exit(0 if ok else 1)
 PYEOF2
 
 cat > "$APP"/HANDOVER.md <<'MDEOF'
-# decache · AI 交接书 (HANDOVER) · v6.16
+# decache · AI 交接书 (HANDOVER) · v6.17
 
 > 本文档写给接手本项目的 AI 或人类维护者。读完第 0/5/6 节即可安全动手。
 
@@ -6634,7 +6787,7 @@ on the front end, no accounts, no telemetry, no cloud services.
 | `index.html` | ~2,700 lines, one file: CSS + SVG icon sprite + vanilla JS, zero build, zero external assets, i18n table with zh/en |
 | `install.sh` | **generated** by `sync_install.mjs` — a self-contained installer that embeds every runtime file; never edit it by hand |
 | `selftest.py` / `chaos_test.py` / `fake_yt_dlp_test.py` | 278 offline assertions total (190 / 71 / 17) |
-| `frontcheck.mjs` / `smoke.mjs` | 7 static gates for the frontend + a DOM-stub smoke run |
+| `frontcheck.mjs` / `smoke.mjs` | 7 static gates for the frontend + a DOM-stub smoke run (smoke.mjs also regression-tests the "Resume" card, 10 assertions) |
 
 Data-integrity rules that everything else depends on:
 
@@ -6724,6 +6877,25 @@ each non-obvious decision, plus the bugs that are easy to reintroduce
   ② **站点凭据管理**：按域名分组存 cookie（`cookies` 键 + `cookies/<hash>.txt` jar），
      域名留空 = 通用凭据；UI 有列表/掩码显示/删除/添加；下载时按链接域名自动挑。
   ③ **端到端真机测试** `e2e_real_test.py`：用本机真 yt-dlp 解析真实短链，断言分P 数。
+- **v6.17 继续观看选错片 + 动效层（2026-10-23 用户实测驱动）**：
+  ① **"继续观看"万年不变（用户原话：显示的继续播放不是前一次的，而是好几次前的）**：
+     老 `renderResume()` 遍历所有 `take_pos_*`，取 **pos 秒数最大** 的那条 ——
+     上次看 40 分钟的老片永远压过昨天看 2 分钟的新片，跟"最近"毫无关系。
+     现在另存一本带时间戳的账本 `take_hist_v1`（`{r,t,d,at}`，新在前，≤40 条），
+     由 `savePos(rel, t, dur)` 统一写（进度键 `take_pos_*` 照写，恢复播放位置的逻辑没动）；
+     卡片取**账本第一条**，并**跳过看完的**（`t ≥ d-15`）和刚开头的（`t ≤ 20`）、
+     跳过已从库里删掉的。`closePlayer()` 关之前再钉一次并 `renderResume()` 刷新 ——
+     老代码关播放器回来卡片根本不重绘。卡片多了百分比 + 一条 3px 进度细线。
+     老用户升级：第一次没有账本键时，把旧 `take_pos_*` 按秒数倒序搬进账本（`at=0`，排最后），
+     卡片不会突然空掉。
+     **回归测试在 `smoke.mjs` 里**（12 条断言，桩环境把 localStorage 换成真内存版）。
+  ② **动效层**：只动 `transform`/`opacity`（合成器上跑，手机不重排）；
+     曲线用 `linear()` 烘焙的 spring，老 WebView 自动退回 `cubic-bezier`；
+     `prefers-reduced-motion` 一票否决全部归零。具体：页面切换 10px 上浮、
+     卡片封面悬停轻推/按下回弹、控制条与顶栏"出用 spring 收用 ease-in"（不对称才有重量）、
+     进度条滑块播放时轻微呼吸、缓冲转圈（等 220ms 才显示，秒开不闪）、
+     缩略图/实时帧/片尾卡/列表面板入场的位移淡入、toast 弹簧。
+     **刻意没做**：列表逐张 stagger —— 库每 30 秒轮询重绘，会有动画重播的鬼影。
 - **v6.16 实时预览帧 + 回前台黑屏/白屏真修（2026-10-23 用户实测驱动）**：
   ① **缩略图从"12 段"改成"这一秒"**：老雪碧图 12 帧均布，一小时的片子每段差 5 分钟，
      拖到哪看到的都是别处的画面。新增 `GET /api/frame?rel=&t=&w=` 按需抽单帧
