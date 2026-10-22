@@ -51,7 +51,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "6.13"         # 版本号: 显示在界面顶栏, 排查新旧用(改代码顺手改这里)
+VERSION = "6.16"         # 版本号: 显示在界面顶栏, 排查新旧用(改代码顺手改这里)
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.ini"
 # 下载目录/扫描目录的默认值**按平台给不同值**:
@@ -1162,6 +1162,76 @@ def make_thumb_sheet(target: Path, dur: float, n=12, cols=4, w=160):
             except OSError:
                 pass
     return sheet if sheet.exists() and sheet.stat().st_size > 200 else None
+
+
+# ---------------- 实时帧预览 (v6.16) ----------------
+# 雪碧图是 12 段均布 —— 一小时的片子每段差 5 分钟, 拖到 12:34 看到的是第 2 段的画面,
+# 用户说的"分段缩略图"就是这个。这里按需抽「你指的那一秒」的单帧, 结果按
+# (文件, mtime, 秒, 宽) 缓存, 同一次拖动里同一秒只抽一次。
+FRAME_DIR = THUMB_DIR / "frames"
+FRAME_DIR.mkdir(exist_ok=True)
+_frame_sem = threading.Semaphore(2)      # 手机同时跑 >2 个 ffmpeg 互相拖慢, 不如排队
+_frame_count = 0
+FRAME_MAX = 3000                         # 全局帧缓存上限(约 30MB), 超了删最旧的
+
+def _prune_frames():
+    """帧缓存按数量封顶: 删最旧的, 别让一次长片全扫把手机塞满。"""
+    try:
+        files = list(FRAME_DIR.glob("*.jpg"))
+    except OSError:
+        return
+    if len(files) <= FRAME_MAX:
+        return
+    try:
+        files.sort(key=lambda p: p.stat().st_mtime)
+    except OSError:
+        return
+    for f in files[:len(files) - FRAME_MAX]:
+        try:
+            f.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+def make_frame(target: Path, t: float, w=200):
+    """在 t 秒处抽 1 帧 JPEG(实时预览用)。失败返回 None, 前端自动退回雪碧图。"""
+    global _frame_count
+    try:
+        if t < 0 or not target.is_file():
+            return None
+        st = target.stat()
+        key = hashlib.md5(f"{target}|{st.st_mtime_ns}|{t:.2f}|{w}".encode()).hexdigest()[:20]
+    except OSError:
+        return None
+    out = FRAME_DIR / f"{key}.jpg"
+    if out.exists() and out.stat().st_size > 200:
+        return out
+    lock = None
+    with _frame_sem:                       # 限并发: 拖得快时排队, 不 OOM 也不互相踩
+        if out.exists() and out.stat().st_size > 200:
+            return out
+        with _thumb_locks_guard:
+            lock = _thumb_locks.setdefault(key, threading.Lock())
+        with lock:                         # 同一秒被连点两次只抽一次
+            if out.exists() and out.stat().st_size > 200:
+                return out
+            tmp = FRAME_DIR / f"_p_{key}.jpg"
+            ok, _err = run_ffmpeg(
+                ["-ss", f"{t:.2f}", "-i", str(target), "-frames:v", "1",
+                 "-vf", f"scale={w}:-2", "-q:v", "4", str(tmp)], timeout=25)
+            if not ok or not (tmp.exists() and tmp.stat().st_size > 200):
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return None
+            try:
+                os.replace(tmp, out)
+            except OSError:
+                return None
+            _frame_count += 1
+            if _frame_count % 50 == 0:
+                _prune_frames()
+    return out
 
 SUB_EXTS = {".srt", ".vtt"}
 
@@ -2520,6 +2590,29 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             return self.wfile.write(body)
+        if u.path == "/api/frame":                     # 实时预览帧: 指定秒的那一帧(v6.16)
+            target = safe_media_path(q.get("rel", [""])[0])
+            try:
+                t = float(q.get("t", ["0"])[0])
+            except ValueError:
+                t = -1
+            try:
+                fw = int(float(q.get("w", ["200"])[0]))
+            except ValueError:
+                fw = 200
+            fw = max(120, min(320, fw))
+            if target is None or not target.exists() or t < 0:
+                return self._json({"error": "路径不允许"}, 404)
+            img = make_frame(target, t, fw)
+            if not img:
+                return self._json({"error": "抽帧失败"}, 500)
+            body = img.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "max-age=604800, immutable")   # 内容寻址
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
         if u.path == "/api/subs":                      # 外挂字幕发现
             target = safe_media_path(q.get("rel", [""])[0])
             if target is None or not target.exists():
@@ -3006,6 +3099,9 @@ button{font:inherit;color:inherit}
 /* 4) 安全区: env() 在非刘海屏恒为 0 → 永远保底 12px */
 .safeb{padding-bottom:max(12px, env(safe-area-inset-bottom))}
 .safet{padding-top:max(12px, env(safe-area-inset-top))}
+/* 5) 回前台白屏急救: 安卓 Chromium 丢 GPU context 时模糊层会变白砖,
+      临时把 backdrop-filter 全摘掉强制重新光栅化, 320ms 后恢复(见 repaintAll) */
+html.gpute *{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
 
 /* ── 顶栏 ── */
 .appbar{position:relative;z-index:20;display:flex;align-items:baseline;gap:10px;
@@ -3421,6 +3517,8 @@ input[type=text]::placeholder{color:var(--tx3)}
   bottom:110px;transform:translateX(-50%)}
 #pthumbImg{width:160px;height:90px;border-radius:8px;background:#000 center no-repeat;
   border:1px solid rgba(255,255,255,.28);box-shadow:0 6px 24px rgba(0,0,0,.55)}
+#pthumbLive{display:none;width:100%;height:100%;border-radius:8px;object-fit:cover}
+#pthumbLive.on{display:block}
 #pthumbT{margin-top:5px;font-size:11px;font-weight:600;background:rgba(0,0,0,.66);color:#fff;
   padding:1px 9px;border-radius:5px;font-variant-numeric:tabular-nums}
 /* Up Next 片尾卡 */
@@ -3805,7 +3903,7 @@ input[type=text]::placeholder{color:var(--tx3)}
       <button class="icbtn" id="pNextGo"><svg class="ic" style="fill:currentColor;stroke:none"><use href="#i-play"/></svg></button>
       <button class="icbtn" id="pNextNo"><svg class="ic"><use href="#i-x"/></svg></button>
     </div>
-    <div id="pthumb"><div id="pthumbImg"></div><span id="pthumbT"></span></div>
+    <div id="pthumb"><div id="pthumbImg"><img id="pthumbLive" alt=""></div><span id="pthumbT"></span></div>
     <div id="pctrl">
       <div class="pbwrap">
         <span id="pTime" class="ptime"><b>0:00</b> <span>/ 0:00</span></span>
@@ -5143,6 +5241,7 @@ function startPart(i) {
   if (thumbURL && thumbURL !== 'pending') URL.revokeObjectURL(thumbURL);
   thumbURL = ''; thumbReady = false;
   $('pthumb').style.display = 'none';
+  $('pthumbLive').classList.remove('on'); $('pthumbLive').dataset.sec = '';
   const myGen = ++_gen;                 // 代次令牌: 旧请求的响应直接丢弃
   loadSubs(rel, myGen);
   loadChapters(rel, 0, myGen);
@@ -5191,6 +5290,54 @@ v.addEventListener('progress', () => {
 const togglePlay = () => v.paused ? v.play().catch(() => {}) : v.pause();
 $('pPlay').onclick = togglePlay;
 let pdrag = false, pRatio = 0;
+/* ── 实时预览帧 (v6.16) ──────────────────────────────────────────────
+   雪碧图是 12 段均布: 一小时的片子每段差 5 分钟, 拖到哪都差好几段 ——
+   用户嫌的就是这个。这里向 /api/frame 要「这一秒」的单帧:
+   同时只有一个请求在路上, 后来的只记住最新一秒(天然防抖, 拖多快都只追最后一次),
+   帧到了就盖在雪碧图那块上; 已经拿到过的秒记在 _frameOk, 回头看同一秒零延迟。 */
+let _frameRel = '', _frameWant = -1, _frameBusy = false, _thumbSec = -1;
+const _frameOk = new Set();
+function frameURL(rel, sec) {
+  return '/api/frame?rel=' + encodeURIComponent(rel) + '&t=' + sec + '&w=200';
+}
+function warmFrame(rel, sec) {
+  if (!rel || sec < 0 || (dur && sec > dur)) return;
+  if (_frameOk.has(rel + '|' + sec)) return;
+  const im = new Image(); im.src = frameURL(rel, sec);      // 只暖浏览器+服务端缓存, 不画
+}
+function paintLive(rel, sec) {
+  const live = $('pthumbLive');
+  if (!live || rel !== _frameRel || sec !== _thumbSec) return;
+  if (live.dataset.sec !== sec + '@' + rel) {
+    live.dataset.sec = sec + '@' + rel;
+    live.src = frameURL(rel, sec);
+  }
+  live.classList.add('on');
+}
+function pumpFrame() {
+  if (_frameBusy || _frameWant < 0) return;
+  const rel = _frameRel, sec = _frameWant;
+  _frameWant = -1;
+  _frameBusy = true;
+  const im = new Image();
+  im.onload = () => {
+    _frameBusy = false;
+    _frameOk.add(rel + '|' + sec);
+    if (_frameOk.size > 800) _frameOk.delete(_frameOk.values().next().value);
+    if (_frameWant < 0) paintLive(rel, sec);       // 还停在这一秒才画, 否则等新的
+    warmFrame(rel, sec + 1);                       // 手往右拖就往右暖一格
+    pumpFrame();
+  };
+  im.onerror = () => { _frameBusy = false; pumpFrame(); };   // 抽帧失败 → 退回雪碧图, 不弹错
+  im.src = frameURL(rel, sec);
+}
+function wantFrame(rel, sec) {
+  if (!rel) return;
+  _frameRel = rel; _frameWant = sec;
+  if (_frameOk.has(rel + '|' + sec)) { paintLive(rel, sec); return; }
+  pumpFrame();
+}
+
 /* 缩略图预览: 在指定时间比例处显示(进度条拖动 + 画面横滑共用) */
 function showThumbAt(ratio) {
   if (!dur) return;
@@ -5203,13 +5350,23 @@ function showThumbAt(ratio) {
   const x = br.left + Math.max(0, Math.min(1, ratio)) * br.width;
   // 夹在 [76, 宽-76]: 缩略图 160px 宽, 中心贴住滑块, 最多露一点点边(比夹死更一致)
   pt.style.left = Math.max(76, Math.min(sr.width - 76, x - sr.left)) + 'px';
-  $('pthumbT').textContent = fmtDur(ratio * dur);
+  const atSec = Math.max(0, ratio * dur);
+  $('pthumbT').textContent = fmtDur(atSec);
+  /* ① 雪碧图打底: 秒回, 屏幕上永不出现空白方块 */
   if (thumbReady) {
     const k = Math.min(thumbN - 1, Math.max(0, Math.floor(ratio * thumbN)));
     const cw = thumbW / thumbCols, ch = thumbH / Math.ceil(thumbN / thumbCols);
     $('pthumbImg').style.backgroundImage = 'url(' + thumbURL + ')';
     $('pthumbImg').style.backgroundSize = thumbW + 'px ' + thumbH + 'px';
     $('pthumbImg').style.backgroundPosition = '-' + (k % thumbCols) * cw + 'px -' + Math.floor(k / thumbCols) * ch + 'px';
+  }
+  /* ② 真帧盖上去: 这一秒的画面, 不是 12 段里的某一段 */
+  const rel = FLAT[FI] && FLAT[FI].rel;
+  _thumbSec = Math.round(atSec);
+  if (rel && !AUDIO_RE.test(rel)) {
+    const live = $('pthumbLive');
+    if (live && !_frameOk.has(rel + '|' + _thumbSec)) live.classList.remove('on');  // 先把旧帧收起来
+    wantFrame(rel, _thumbSec);
   }
 }
 
@@ -5236,6 +5393,7 @@ pbar.addEventListener('click', e => { if (v.duration) { pSeekTo(e.clientX); v.cu
 /* 桌面: hover 进度条即预览, 移出隐藏 */
 pbar.addEventListener('mousemove', e => {
   if (pdrag || !v.duration || matchMedia('(pointer: coarse)').matches) return;
+  poke();                        // 鼠标还在进度条上就别让它 6 秒后自己收掉(缩略图会跟着没)
   pSeekTo(e.clientX);
 });
 pbar.addEventListener('mouseleave', () => { if (!pdrag) $('pthumb').style.display = 'none'; });
@@ -5531,9 +5689,97 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'Escape' && !document.fullscreenElement) closePlayer();
 });
 
-/* 切后台/回前台: PiP 尝试 + Android Chromium 黑屏修复 */
+/* ═══ 切后台 / 回前台: PiP + 渲染表面修复(黑屏有声 / 整页白屏) ═══
+   Android Chromium 有两个已知的"回前台就废"的毛病, 表现完全不同, 根因都是
+   GPU 那边丢了东西:
+     A. video 的渲染表面(surface)被回收 → **黑屏但有声音**; 声音走音频线程, 完全正常。
+        用户点一下小窗(PiP)就好了 —— 因为 PiP 会新建一个表面。
+     B. 整页合成层丢 GPU context → **整页白屏**, 划一下(触发重绘)就好。
+   老代码的两处坑:
+     · `insertBefore(v, v.nextSibling)` 是**原地插入**, DOM 根本没变 → 表面不重建,
+       所谓"第一层修复"是死代码, 一直靠第二层整个重载流兜着(断流+跳秒, 很重)。
+     · 重载流在 250ms 就干, 那时候系统可能还没把页面还回来, 重载本身也会失败。
+   现在: 用 webkitDecodedFrameCount 判断"帧还在不在解", 只在真卡住时才动手,
+   一层层加码, 最后一层才重载流; 白屏那条走单独的一次全页重绘。 */
+let _resumeTk = 0, _frameSeen = -1, _wasHidden = false;
+
+function decodedFrames() {
+  const n = v.webkitDecodedFrameCount ?? v.mozParsedFrames;
+  return typeof n === 'number' ? n : -1;     // 拿不到 = 不瞎判(-1), Safari 走兜底
+}
+
+/* 白屏: 临时摘掉所有 backdrop-filter 再挂回去, 强制整棵合成树重新光栅化。
+   实测这条最管用 —— 模糊层在 GPU context 丢了之后就是白砖一块。 */
+function repaintAll() {
+  const r = document.documentElement;
+  r.classList.add('gpute');
+  void r.offsetHeight;
+  setTimeout(() => { r.classList.remove('gpute'); void r.offsetHeight; }, 320);
+}
+
+/* 黑屏有声 · 第一层: 把元素真的从 DOM 里摘下来再插回去 → 表面重建 */
+function reattachVideo() {
+  const p = v.parentNode; if (!p) return;
+  const next = v.nextSibling;
+  p.removeChild(v);
+  v.style.transform = 'translateZ(0)';
+  p.insertBefore(v, next);
+  void v.offsetHeight;
+}
+
+/* 第二层: 捅一下解码器, 逼它重出一帧(表面活着但画面冻住时用) */
+function nudgeDecoder() {
+  const at = v.currentTime || 0;
+  try { v.currentTime = Math.min((v.duration || at + 1) - 0.05, at + 0.04); } catch (e) {}
+}
+
+/* 第三层: 真重载流(会断流, 保位置保播放, 倍速也保住) */
+function hardReloadStream() {
+  const src = v.getAttribute('src'); if (!src) return;
+  const at = v.currentTime || 0, wasPaused = v.paused;
+  try {
+    v.setAttribute('src', src);
+    v.playbackRate = RATES[RATE_I];
+    v.addEventListener('loadedmetadata', () => {
+      try { v.currentTime = at; } catch (e) {}
+      if (!wasPaused) v.play().catch(() => {});
+    }, {once: true});
+    v.load();
+  } catch (e) {
+    if (!wasPaused) v.play().catch(() => {});
+  }
+}
+
+function repairSurface(step) {
+  if (!$('pmodal').classList.contains('open') || !v.getAttribute('src')) return;
+  if (v.paused || v.ended || $('pstage').classList.contains('audio')) { repaintAll(); return; }
+  const now = decodedFrames();
+  const stuck = now >= 0 && now === _frameSeen;    // 一帧都没多 = 表面死了
+  _frameSeen = now;
+  if (!stuck) return;                              // 画面还在动, 别动它
+  if (step === 0) reattachVideo();
+  else if (step === 1) { reattachVideo(); nudgeDecoder(); }
+  else if (step === 2) hardReloadStream();
+  else { repaintAll(); return; }
+  setTimeout(() => repairSurface(step + 1), 800);  // 给浏览器 0.8s 自己缓过来
+}
+
+function onForeground() {
+  clearTimeout(_resumeTk);
+  repaintAll();                                    // 白屏那条: 先整页重画一次
+  _resumeTk = setTimeout(() => {
+    if (!$('pmodal').classList.contains('open') || !v.getAttribute('src')) return;
+    if (v.paused || v.ended) return;
+    if ($('pstage').classList.contains('audio')) return;
+    _frameSeen = decodedFrames();
+    if (_frameSeen < 0) { reattachVideo(); return; }   // Safari: 没有帧计数, 直接轻修一次
+    setTimeout(() => repairSurface(0), 600);           // 再等 0.6s 看帧有没有在涨
+  }, 500);
+}
+
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    _wasHidden = true;
     if (HAS_PIP && !v.paused && !v.ended && $('pmodal').classList.contains('open')) {
       if (v.webkitSetPresentationMode && v.webkitSupportsPresentationMode
           && v.webkitSupportsPresentationMode('picture-in-picture')) {
@@ -5544,34 +5790,14 @@ document.addEventListener('visibilitychange', () => {
     }
     return;
   }
-  /* Android Chromium 已知 bug: 切后台回来 video 渲染表面(surface)被系统回收 →
-     黑屏有声, 换 src 也无效。
-     **老代码栽在 requestAnimationFrame 上**: 刚回前台时页面还没开始渲染,
-     rAF 可能**根本不触发** → 整段修复代码没跑 → 黑屏照旧(用户实测回归)。
-     现在: setTimeout 兜底 + 两层修复(挪位置 → 还不行就 load() 重载, 保位置保播放)。 */
-  if (!$('pmodal').classList.contains('open') || !v.getAttribute('src')) return;
-  setTimeout(() => {
-    const src = v.getAttribute('src');
-    const at = v.currentTime, wasPaused = v.paused;
-    /* ① 在 DOM 里挪一下位, 强制重建渲染表面 */
-    const p = v.parentNode, n = v.nextSibling;
-    if (p) p.insertBefore(v, n);
-    if (v.ended) return;
-    /* ② 挪位置不够就彻底重载(Android 有时就是不给 surface) */
-    try {
-      v.removeAttribute('src');
-      v.load();                        // 复位
-      v.setAttribute('src', src);      // 源原样放回
-      v.load();                        // 重新拉流
-      v.addEventListener('loadedmetadata', () => {
-        try { v.currentTime = at; } catch (e) {}
-        if (!wasPaused) v.play().catch(() => {});
-      }, {once: true});
-    } catch (e) {
-      if (!wasPaused) v.play().catch(() => {});
-    }
-  }, 250);
+  _wasHidden = false;
+  onForeground();
 });
+/* Page Lifecycle: 安卓上有时不走 visibilitychange, 只发 freeze/resume */
+document.addEventListener('resume', onForeground);
+window.addEventListener('pageshow', e => { if (e.persisted) onForeground(); });
+/* focus 兜底: 只在"刚才确实被藏起来过"时修, 否则点一下地址栏都闪一下没必要 */
+window.addEventListener('focus', () => { if (_wasHidden) { _wasHidden = false; onForeground(); } });
 
 /* ═══ 启动 ═══ */
 async function checkVer() {
@@ -6374,7 +6600,7 @@ sys.exit(0 if ok else 1)
 PYEOF2
 
 cat > "$APP"/HANDOVER.md <<'MDEOF'
-# decache · AI 交接书 (HANDOVER) · v6.13
+# decache · AI 交接书 (HANDOVER) · v6.16
 
 > 本文档写给接手本项目的 AI 或人类维护者。读完第 0/5/6 节即可安全动手。
 
@@ -6498,6 +6724,25 @@ each non-obvious decision, plus the bugs that are easy to reintroduce
   ② **站点凭据管理**：按域名分组存 cookie（`cookies` 键 + `cookies/<hash>.txt` jar），
      域名留空 = 通用凭据；UI 有列表/掩码显示/删除/添加；下载时按链接域名自动挑。
   ③ **端到端真机测试** `e2e_real_test.py`：用本机真 yt-dlp 解析真实短链，断言分P 数。
+- **v6.16 实时预览帧 + 回前台黑屏/白屏真修（2026-10-23 用户实测驱动）**：
+  ① **缩略图从"12 段"改成"这一秒"**：老雪碧图 12 帧均布，一小时的片子每段差 5 分钟，
+     拖到哪看到的都是别处的画面。新增 `GET /api/frame?rel=&t=&w=` 按需抽单帧
+     （`-ss` 在 `-i` 前 = 输入侧 seek，实测 5 分钟片子冷启 350ms、缓存命中 46ms），
+     按 (文件, mtime, 秒, 宽) 存 `thumbs/frames/`，全局上限 3000 张（约 30MB）自动删最旧。
+     前端**雪碧图先垫底秒回，真帧到了再盖上**；同一时刻只允许一个请求在路上、
+     后来的只记最新一秒（拖动天然防抖）；命中过的秒零延迟，并顺手预暖相邻一秒。
+     实测：拖到 60% → 请求 `t=180`、画面时间码对得上；20% → `t=60`。
+  ② **回前台黑屏有声（真因 + 老代码的死代码）**：Android Chromium 切后台会销毁
+     video 的渲染表面，声音走音频线程所以照常。
+     **老代码 `p.insertBefore(v, v.nextSibling)` 是原地插入 = DOM 没变 = 表面不重建**，
+     "第一层修复"从来没生效过，全靠第二层整个重载流兜着（断流+跳秒）。
+     现在：`webkitDecodedFrameCount` 判断帧有没有在涨（真卡住才动手）→
+     ① 从 DOM 真摘下来再插回去 ② 捅一下解码器(currentTime 微移)逼重出一帧
+     ③ 都不行才重载流（保位置/播放/倍速）。三层之间各等 0.8s，只在播放中才修。
+  ③ **回前台整页白屏**：同一个根因的另一副面孔——GPU context 丢了，`backdrop-filter`
+     的模糊层直接变白砖。`repaintAll()` 临时把全站 backdrop-filter 摘掉再挂回去
+     （320ms）强制重新光栅化。`visibilitychange` / `resume` / `pageshow` / `focus` 四条路都兜。
+  ④ 顺带：鼠标停在进度条上时不再被 6 秒自动隐藏连缩略图一起收掉。
 - **v6.14 三路审计 + 全面加固（2026-10-21 用户要求"整体审一遍 + 别有覆盖/删除的 bug"）**：
   开了三路并行审计（后端数据完整性 / 前端功能健壮性 / 跨平台兼容），挑真问题修：
   **数据安全（最高优先）**：
@@ -6704,7 +6949,7 @@ each non-obvious decision, plus the bugs that are easy to reintroduce
 | `cookies.txt` | 引擎用的 Netscape cookie（**域名按链接自动推断**，每次下载前重写） | 自动维护 |
 | `start.sh` / `start.bat` | 启动脚本（开 wake-lock → 起服务 → 开浏览器） | 低 |
 | `playlist.json` | 播放队列（独立存储，不塞 library.json） | 用户数据 |
-| `thumbs/` | 进度条缩略图雪碧图（mtime 哈希缓存，永不重抽） | 自动维护 |
+| `thumbs/` | 缩略图雪碧图 + `frames/` 实时预览帧（都按 mtime+时间哈希缓存，永不重抽） | 自动维护 |
 | `sync_install.mjs` | **重新生成 install.sh**（node 一键内嵌全部文件） | 改任何文件后跑 `node sync_install.mjs`，别再手工粘贴 |
 | `selftest.py` | **自测脚本**（70 项断言，Python 跑，零污染） | 改后端后必跑 `python3 selftest.py` |
 | `install.sh` | 一键安装/升级器（自包含 heredoc，内嵌全部文件） | 改任何文件后必须重新同步它 |
@@ -6754,7 +6999,8 @@ exclude_dirs =         # 扫描排除（逗号分隔的路径片段，命中即�
 | `/api/tags` | GET | 标签计数 + 收藏数（前端筛选条） |
 | `/api/queue` | GET/POST | 播放队列；POST `{op:add/remove/up/down/move/clear/set, i, item}` |
 | `/api/diagnostics` | GET | 平台/ffmpeg 路径/Python 版本/兼容提示 |
-| `/api/thumbs?rel=&dur=` | GET | 进度条缩略图雪碧图（12 帧，mtime 哈希缓存） |
+| `/api/thumbs?rel=&dur=` | GET | 进度条缩略图雪碧图（12 帧，mtime 哈希缓存；章节切片也用它） |
+| `/api/frame?rel=&t=&w=` | GET | **实时预览帧**：指定秒的单帧 JPEG（拖进度条的实时画面，mtime+秒 哈希缓存，上限 3000 张） |
 | `/api/chapters?rel=&dur=` | GET | 章节：容器真章节，无则 12 段等距伪章节（`real` 标记真假） |
 | `/api/marks` | POST | 手动章节标记（`{bvid,rel,t,title}` / `op=del`），存 library 不改原文件 |
 | `/api/queue/import` | POST | m3u 导入 → 队列（逐行校验路径白名单） |

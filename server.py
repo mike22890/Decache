@@ -24,7 +24,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "6.13"         # 版本号: 显示在界面顶栏, 排查新旧用(改代码顺手改这里)
+VERSION = "6.16"         # 版本号: 显示在界面顶栏, 排查新旧用(改代码顺手改这里)
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.ini"
 # 下载目录/扫描目录的默认值**按平台给不同值**:
@@ -1135,6 +1135,76 @@ def make_thumb_sheet(target: Path, dur: float, n=12, cols=4, w=160):
             except OSError:
                 pass
     return sheet if sheet.exists() and sheet.stat().st_size > 200 else None
+
+
+# ---------------- 实时帧预览 (v6.16) ----------------
+# 雪碧图是 12 段均布 —— 一小时的片子每段差 5 分钟, 拖到 12:34 看到的是第 2 段的画面,
+# 用户说的"分段缩略图"就是这个。这里按需抽「你指的那一秒」的单帧, 结果按
+# (文件, mtime, 秒, 宽) 缓存, 同一次拖动里同一秒只抽一次。
+FRAME_DIR = THUMB_DIR / "frames"
+FRAME_DIR.mkdir(exist_ok=True)
+_frame_sem = threading.Semaphore(2)      # 手机同时跑 >2 个 ffmpeg 互相拖慢, 不如排队
+_frame_count = 0
+FRAME_MAX = 3000                         # 全局帧缓存上限(约 30MB), 超了删最旧的
+
+def _prune_frames():
+    """帧缓存按数量封顶: 删最旧的, 别让一次长片全扫把手机塞满。"""
+    try:
+        files = list(FRAME_DIR.glob("*.jpg"))
+    except OSError:
+        return
+    if len(files) <= FRAME_MAX:
+        return
+    try:
+        files.sort(key=lambda p: p.stat().st_mtime)
+    except OSError:
+        return
+    for f in files[:len(files) - FRAME_MAX]:
+        try:
+            f.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+def make_frame(target: Path, t: float, w=200):
+    """在 t 秒处抽 1 帧 JPEG(实时预览用)。失败返回 None, 前端自动退回雪碧图。"""
+    global _frame_count
+    try:
+        if t < 0 or not target.is_file():
+            return None
+        st = target.stat()
+        key = hashlib.md5(f"{target}|{st.st_mtime_ns}|{t:.2f}|{w}".encode()).hexdigest()[:20]
+    except OSError:
+        return None
+    out = FRAME_DIR / f"{key}.jpg"
+    if out.exists() and out.stat().st_size > 200:
+        return out
+    lock = None
+    with _frame_sem:                       # 限并发: 拖得快时排队, 不 OOM 也不互相踩
+        if out.exists() and out.stat().st_size > 200:
+            return out
+        with _thumb_locks_guard:
+            lock = _thumb_locks.setdefault(key, threading.Lock())
+        with lock:                         # 同一秒被连点两次只抽一次
+            if out.exists() and out.stat().st_size > 200:
+                return out
+            tmp = FRAME_DIR / f"_p_{key}.jpg"
+            ok, _err = run_ffmpeg(
+                ["-ss", f"{t:.2f}", "-i", str(target), "-frames:v", "1",
+                 "-vf", f"scale={w}:-2", "-q:v", "4", str(tmp)], timeout=25)
+            if not ok or not (tmp.exists() and tmp.stat().st_size > 200):
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return None
+            try:
+                os.replace(tmp, out)
+            except OSError:
+                return None
+            _frame_count += 1
+            if _frame_count % 50 == 0:
+                _prune_frames()
+    return out
 
 SUB_EXTS = {".srt", ".vtt"}
 
@@ -2490,6 +2560,29 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Cache-Control", "max-age=604800, immutable")   # 内容寻址, 可永久缓存
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
+        if u.path == "/api/frame":                     # 实时预览帧: 指定秒的那一帧(v6.16)
+            target = safe_media_path(q.get("rel", [""])[0])
+            try:
+                t = float(q.get("t", ["0"])[0])
+            except ValueError:
+                t = -1
+            try:
+                fw = int(float(q.get("w", ["200"])[0]))
+            except ValueError:
+                fw = 200
+            fw = max(120, min(320, fw))
+            if target is None or not target.exists() or t < 0:
+                return self._json({"error": "路径不允许"}, 404)
+            img = make_frame(target, t, fw)
+            if not img:
+                return self._json({"error": "抽帧失败"}, 500)
+            body = img.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "max-age=604800, immutable")   # 内容寻址
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             return self.wfile.write(body)

@@ -1,4 +1,4 @@
-# decache · AI 交接书 (HANDOVER) · v6.13
+# decache · AI 交接书 (HANDOVER) · v6.16
 
 > 本文档写给接手本项目的 AI 或人类维护者。读完第 0/5/6 节即可安全动手。
 
@@ -122,6 +122,25 @@ each non-obvious decision, plus the bugs that are easy to reintroduce
   ② **站点凭据管理**：按域名分组存 cookie（`cookies` 键 + `cookies/<hash>.txt` jar），
      域名留空 = 通用凭据；UI 有列表/掩码显示/删除/添加；下载时按链接域名自动挑。
   ③ **端到端真机测试** `e2e_real_test.py`：用本机真 yt-dlp 解析真实短链，断言分P 数。
+- **v6.16 实时预览帧 + 回前台黑屏/白屏真修（2026-10-23 用户实测驱动）**：
+  ① **缩略图从"12 段"改成"这一秒"**：老雪碧图 12 帧均布，一小时的片子每段差 5 分钟，
+     拖到哪看到的都是别处的画面。新增 `GET /api/frame?rel=&t=&w=` 按需抽单帧
+     （`-ss` 在 `-i` 前 = 输入侧 seek，实测 5 分钟片子冷启 350ms、缓存命中 46ms），
+     按 (文件, mtime, 秒, 宽) 存 `thumbs/frames/`，全局上限 3000 张（约 30MB）自动删最旧。
+     前端**雪碧图先垫底秒回，真帧到了再盖上**；同一时刻只允许一个请求在路上、
+     后来的只记最新一秒（拖动天然防抖）；命中过的秒零延迟，并顺手预暖相邻一秒。
+     实测：拖到 60% → 请求 `t=180`、画面时间码对得上；20% → `t=60`。
+  ② **回前台黑屏有声（真因 + 老代码的死代码）**：Android Chromium 切后台会销毁
+     video 的渲染表面，声音走音频线程所以照常。
+     **老代码 `p.insertBefore(v, v.nextSibling)` 是原地插入 = DOM 没变 = 表面不重建**，
+     "第一层修复"从来没生效过，全靠第二层整个重载流兜着（断流+跳秒）。
+     现在：`webkitDecodedFrameCount` 判断帧有没有在涨（真卡住才动手）→
+     ① 从 DOM 真摘下来再插回去 ② 捅一下解码器(currentTime 微移)逼重出一帧
+     ③ 都不行才重载流（保位置/播放/倍速）。三层之间各等 0.8s，只在播放中才修。
+  ③ **回前台整页白屏**：同一个根因的另一副面孔——GPU context 丢了，`backdrop-filter`
+     的模糊层直接变白砖。`repaintAll()` 临时把全站 backdrop-filter 摘掉再挂回去
+     （320ms）强制重新光栅化。`visibilitychange` / `resume` / `pageshow` / `focus` 四条路都兜。
+  ④ 顺带：鼠标停在进度条上时不再被 6 秒自动隐藏连缩略图一起收掉。
 - **v6.14 三路审计 + 全面加固（2026-10-21 用户要求"整体审一遍 + 别有覆盖/删除的 bug"）**：
   开了三路并行审计（后端数据完整性 / 前端功能健壮性 / 跨平台兼容），挑真问题修：
   **数据安全（最高优先）**：
@@ -328,7 +347,7 @@ each non-obvious decision, plus the bugs that are easy to reintroduce
 | `cookies.txt` | 引擎用的 Netscape cookie（**域名按链接自动推断**，每次下载前重写） | 自动维护 |
 | `start.sh` / `start.bat` | 启动脚本（开 wake-lock → 起服务 → 开浏览器） | 低 |
 | `playlist.json` | 播放队列（独立存储，不塞 library.json） | 用户数据 |
-| `thumbs/` | 进度条缩略图雪碧图（mtime 哈希缓存，永不重抽） | 自动维护 |
+| `thumbs/` | 缩略图雪碧图 + `frames/` 实时预览帧（都按 mtime+时间哈希缓存，永不重抽） | 自动维护 |
 | `sync_install.mjs` | **重新生成 install.sh**（node 一键内嵌全部文件） | 改任何文件后跑 `node sync_install.mjs`，别再手工粘贴 |
 | `selftest.py` | **自测脚本**（70 项断言，Python 跑，零污染） | 改后端后必跑 `python3 selftest.py` |
 | `install.sh` | 一键安装/升级器（自包含 heredoc，内嵌全部文件） | 改任何文件后必须重新同步它 |
@@ -378,7 +397,8 @@ exclude_dirs =         # 扫描排除（逗号分隔的路径片段，命中即�
 | `/api/tags` | GET | 标签计数 + 收藏数（前端筛选条） |
 | `/api/queue` | GET/POST | 播放队列；POST `{op:add/remove/up/down/move/clear/set, i, item}` |
 | `/api/diagnostics` | GET | 平台/ffmpeg 路径/Python 版本/兼容提示 |
-| `/api/thumbs?rel=&dur=` | GET | 进度条缩略图雪碧图（12 帧，mtime 哈希缓存） |
+| `/api/thumbs?rel=&dur=` | GET | 进度条缩略图雪碧图（12 帧，mtime 哈希缓存；章节切片也用它） |
+| `/api/frame?rel=&t=&w=` | GET | **实时预览帧**：指定秒的单帧 JPEG（拖进度条的实时画面，mtime+秒 哈希缓存，上限 3000 张） |
 | `/api/chapters?rel=&dur=` | GET | 章节：容器真章节，无则 12 段等距伪章节（`real` 标记真假） |
 | `/api/marks` | POST | 手动章节标记（`{bvid,rel,t,title}` / `op=del`），存 library 不改原文件 |
 | `/api/queue/import` | POST | m3u 导入 → 队列（逐行校验路径白名单） |

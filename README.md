@@ -35,7 +35,7 @@
 | 功能 / Feature | 说明 / Details |
 |---|---|
 | 下载视频 / Download | 大多数视频站都能下（含 B站），清晰度自己挑 / Most video sites (including Chinese ones), you pick the quality |
-| 本地播放器 / Player | 进度条缩略图、章节、A-B 循环、播放列表、画中画、倍速、字幕 / Seek-bar thumbnails, chapters, A-B loop, playlist, PiP, speed control, subtitles |
+| 本地播放器 / Player | 进度条**实时画面**预览、章节、A-B 循环、播放列表、画中画、倍速、字幕 / Live seek-bar frame preview, chapters, A-B loop, playlist, PiP, speed control, subtitles |
 | 媒体库 / Library | 文件夹浏览、彩色标签、收藏、多选删除、查重、磁盘统计 / Folder browsing, colour tags, favourites, multi-select delete, dedupe, disk stats |
 | 清晰度可选 / Quality cap | 自动(最优)，或 2160 / 1440 / 1080 / 720 / 480 / 360 / 240 上限 / Auto (best), or cap it from 2160 down to 240 |
 | 仅音频 / Audio only | 直接下成 m4a，省空间 / Grab just the audio as m4a to save space |

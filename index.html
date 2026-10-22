@@ -115,6 +115,9 @@ button{font:inherit;color:inherit}
 /* 4) 安全区: env() 在非刘海屏恒为 0 → 永远保底 12px */
 .safeb{padding-bottom:max(12px, env(safe-area-inset-bottom))}
 .safet{padding-top:max(12px, env(safe-area-inset-top))}
+/* 5) 回前台白屏急救: 安卓 Chromium 丢 GPU context 时模糊层会变白砖,
+      临时把 backdrop-filter 全摘掉强制重新光栅化, 320ms 后恢复(见 repaintAll) */
+html.gpute *{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
 
 /* ── 顶栏 ── */
 .appbar{position:relative;z-index:20;display:flex;align-items:baseline;gap:10px;
@@ -530,6 +533,8 @@ input[type=text]::placeholder{color:var(--tx3)}
   bottom:110px;transform:translateX(-50%)}
 #pthumbImg{width:160px;height:90px;border-radius:8px;background:#000 center no-repeat;
   border:1px solid rgba(255,255,255,.28);box-shadow:0 6px 24px rgba(0,0,0,.55)}
+#pthumbLive{display:none;width:100%;height:100%;border-radius:8px;object-fit:cover}
+#pthumbLive.on{display:block}
 #pthumbT{margin-top:5px;font-size:11px;font-weight:600;background:rgba(0,0,0,.66);color:#fff;
   padding:1px 9px;border-radius:5px;font-variant-numeric:tabular-nums}
 /* Up Next 片尾卡 */
@@ -914,7 +919,7 @@ input[type=text]::placeholder{color:var(--tx3)}
       <button class="icbtn" id="pNextGo"><svg class="ic" style="fill:currentColor;stroke:none"><use href="#i-play"/></svg></button>
       <button class="icbtn" id="pNextNo"><svg class="ic"><use href="#i-x"/></svg></button>
     </div>
-    <div id="pthumb"><div id="pthumbImg"></div><span id="pthumbT"></span></div>
+    <div id="pthumb"><div id="pthumbImg"><img id="pthumbLive" alt=""></div><span id="pthumbT"></span></div>
     <div id="pctrl">
       <div class="pbwrap">
         <span id="pTime" class="ptime"><b>0:00</b> <span>/ 0:00</span></span>
@@ -2252,6 +2257,7 @@ function startPart(i) {
   if (thumbURL && thumbURL !== 'pending') URL.revokeObjectURL(thumbURL);
   thumbURL = ''; thumbReady = false;
   $('pthumb').style.display = 'none';
+  $('pthumbLive').classList.remove('on'); $('pthumbLive').dataset.sec = '';
   const myGen = ++_gen;                 // 代次令牌: 旧请求的响应直接丢弃
   loadSubs(rel, myGen);
   loadChapters(rel, 0, myGen);
@@ -2300,6 +2306,54 @@ v.addEventListener('progress', () => {
 const togglePlay = () => v.paused ? v.play().catch(() => {}) : v.pause();
 $('pPlay').onclick = togglePlay;
 let pdrag = false, pRatio = 0;
+/* ── 实时预览帧 (v6.16) ──────────────────────────────────────────────
+   雪碧图是 12 段均布: 一小时的片子每段差 5 分钟, 拖到哪都差好几段 ——
+   用户嫌的就是这个。这里向 /api/frame 要「这一秒」的单帧:
+   同时只有一个请求在路上, 后来的只记住最新一秒(天然防抖, 拖多快都只追最后一次),
+   帧到了就盖在雪碧图那块上; 已经拿到过的秒记在 _frameOk, 回头看同一秒零延迟。 */
+let _frameRel = '', _frameWant = -1, _frameBusy = false, _thumbSec = -1;
+const _frameOk = new Set();
+function frameURL(rel, sec) {
+  return '/api/frame?rel=' + encodeURIComponent(rel) + '&t=' + sec + '&w=200';
+}
+function warmFrame(rel, sec) {
+  if (!rel || sec < 0 || (dur && sec > dur)) return;
+  if (_frameOk.has(rel + '|' + sec)) return;
+  const im = new Image(); im.src = frameURL(rel, sec);      // 只暖浏览器+服务端缓存, 不画
+}
+function paintLive(rel, sec) {
+  const live = $('pthumbLive');
+  if (!live || rel !== _frameRel || sec !== _thumbSec) return;
+  if (live.dataset.sec !== sec + '@' + rel) {
+    live.dataset.sec = sec + '@' + rel;
+    live.src = frameURL(rel, sec);
+  }
+  live.classList.add('on');
+}
+function pumpFrame() {
+  if (_frameBusy || _frameWant < 0) return;
+  const rel = _frameRel, sec = _frameWant;
+  _frameWant = -1;
+  _frameBusy = true;
+  const im = new Image();
+  im.onload = () => {
+    _frameBusy = false;
+    _frameOk.add(rel + '|' + sec);
+    if (_frameOk.size > 800) _frameOk.delete(_frameOk.values().next().value);
+    if (_frameWant < 0) paintLive(rel, sec);       // 还停在这一秒才画, 否则等新的
+    warmFrame(rel, sec + 1);                       // 手往右拖就往右暖一格
+    pumpFrame();
+  };
+  im.onerror = () => { _frameBusy = false; pumpFrame(); };   // 抽帧失败 → 退回雪碧图, 不弹错
+  im.src = frameURL(rel, sec);
+}
+function wantFrame(rel, sec) {
+  if (!rel) return;
+  _frameRel = rel; _frameWant = sec;
+  if (_frameOk.has(rel + '|' + sec)) { paintLive(rel, sec); return; }
+  pumpFrame();
+}
+
 /* 缩略图预览: 在指定时间比例处显示(进度条拖动 + 画面横滑共用) */
 function showThumbAt(ratio) {
   if (!dur) return;
@@ -2312,13 +2366,23 @@ function showThumbAt(ratio) {
   const x = br.left + Math.max(0, Math.min(1, ratio)) * br.width;
   // 夹在 [76, 宽-76]: 缩略图 160px 宽, 中心贴住滑块, 最多露一点点边(比夹死更一致)
   pt.style.left = Math.max(76, Math.min(sr.width - 76, x - sr.left)) + 'px';
-  $('pthumbT').textContent = fmtDur(ratio * dur);
+  const atSec = Math.max(0, ratio * dur);
+  $('pthumbT').textContent = fmtDur(atSec);
+  /* ① 雪碧图打底: 秒回, 屏幕上永不出现空白方块 */
   if (thumbReady) {
     const k = Math.min(thumbN - 1, Math.max(0, Math.floor(ratio * thumbN)));
     const cw = thumbW / thumbCols, ch = thumbH / Math.ceil(thumbN / thumbCols);
     $('pthumbImg').style.backgroundImage = 'url(' + thumbURL + ')';
     $('pthumbImg').style.backgroundSize = thumbW + 'px ' + thumbH + 'px';
     $('pthumbImg').style.backgroundPosition = '-' + (k % thumbCols) * cw + 'px -' + Math.floor(k / thumbCols) * ch + 'px';
+  }
+  /* ② 真帧盖上去: 这一秒的画面, 不是 12 段里的某一段 */
+  const rel = FLAT[FI] && FLAT[FI].rel;
+  _thumbSec = Math.round(atSec);
+  if (rel && !AUDIO_RE.test(rel)) {
+    const live = $('pthumbLive');
+    if (live && !_frameOk.has(rel + '|' + _thumbSec)) live.classList.remove('on');  // 先把旧帧收起来
+    wantFrame(rel, _thumbSec);
   }
 }
 
@@ -2345,6 +2409,7 @@ pbar.addEventListener('click', e => { if (v.duration) { pSeekTo(e.clientX); v.cu
 /* 桌面: hover 进度条即预览, 移出隐藏 */
 pbar.addEventListener('mousemove', e => {
   if (pdrag || !v.duration || matchMedia('(pointer: coarse)').matches) return;
+  poke();                        // 鼠标还在进度条上就别让它 6 秒后自己收掉(缩略图会跟着没)
   pSeekTo(e.clientX);
 });
 pbar.addEventListener('mouseleave', () => { if (!pdrag) $('pthumb').style.display = 'none'; });
@@ -2640,9 +2705,97 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'Escape' && !document.fullscreenElement) closePlayer();
 });
 
-/* 切后台/回前台: PiP 尝试 + Android Chromium 黑屏修复 */
+/* ═══ 切后台 / 回前台: PiP + 渲染表面修复(黑屏有声 / 整页白屏) ═══
+   Android Chromium 有两个已知的"回前台就废"的毛病, 表现完全不同, 根因都是
+   GPU 那边丢了东西:
+     A. video 的渲染表面(surface)被回收 → **黑屏但有声音**; 声音走音频线程, 完全正常。
+        用户点一下小窗(PiP)就好了 —— 因为 PiP 会新建一个表面。
+     B. 整页合成层丢 GPU context → **整页白屏**, 划一下(触发重绘)就好。
+   老代码的两处坑:
+     · `insertBefore(v, v.nextSibling)` 是**原地插入**, DOM 根本没变 → 表面不重建,
+       所谓"第一层修复"是死代码, 一直靠第二层整个重载流兜着(断流+跳秒, 很重)。
+     · 重载流在 250ms 就干, 那时候系统可能还没把页面还回来, 重载本身也会失败。
+   现在: 用 webkitDecodedFrameCount 判断"帧还在不在解", 只在真卡住时才动手,
+   一层层加码, 最后一层才重载流; 白屏那条走单独的一次全页重绘。 */
+let _resumeTk = 0, _frameSeen = -1, _wasHidden = false;
+
+function decodedFrames() {
+  const n = v.webkitDecodedFrameCount ?? v.mozParsedFrames;
+  return typeof n === 'number' ? n : -1;     // 拿不到 = 不瞎判(-1), Safari 走兜底
+}
+
+/* 白屏: 临时摘掉所有 backdrop-filter 再挂回去, 强制整棵合成树重新光栅化。
+   实测这条最管用 —— 模糊层在 GPU context 丢了之后就是白砖一块。 */
+function repaintAll() {
+  const r = document.documentElement;
+  r.classList.add('gpute');
+  void r.offsetHeight;
+  setTimeout(() => { r.classList.remove('gpute'); void r.offsetHeight; }, 320);
+}
+
+/* 黑屏有声 · 第一层: 把元素真的从 DOM 里摘下来再插回去 → 表面重建 */
+function reattachVideo() {
+  const p = v.parentNode; if (!p) return;
+  const next = v.nextSibling;
+  p.removeChild(v);
+  v.style.transform = 'translateZ(0)';
+  p.insertBefore(v, next);
+  void v.offsetHeight;
+}
+
+/* 第二层: 捅一下解码器, 逼它重出一帧(表面活着但画面冻住时用) */
+function nudgeDecoder() {
+  const at = v.currentTime || 0;
+  try { v.currentTime = Math.min((v.duration || at + 1) - 0.05, at + 0.04); } catch (e) {}
+}
+
+/* 第三层: 真重载流(会断流, 保位置保播放, 倍速也保住) */
+function hardReloadStream() {
+  const src = v.getAttribute('src'); if (!src) return;
+  const at = v.currentTime || 0, wasPaused = v.paused;
+  try {
+    v.setAttribute('src', src);
+    v.playbackRate = RATES[RATE_I];
+    v.addEventListener('loadedmetadata', () => {
+      try { v.currentTime = at; } catch (e) {}
+      if (!wasPaused) v.play().catch(() => {});
+    }, {once: true});
+    v.load();
+  } catch (e) {
+    if (!wasPaused) v.play().catch(() => {});
+  }
+}
+
+function repairSurface(step) {
+  if (!$('pmodal').classList.contains('open') || !v.getAttribute('src')) return;
+  if (v.paused || v.ended || $('pstage').classList.contains('audio')) { repaintAll(); return; }
+  const now = decodedFrames();
+  const stuck = now >= 0 && now === _frameSeen;    // 一帧都没多 = 表面死了
+  _frameSeen = now;
+  if (!stuck) return;                              // 画面还在动, 别动它
+  if (step === 0) reattachVideo();
+  else if (step === 1) { reattachVideo(); nudgeDecoder(); }
+  else if (step === 2) hardReloadStream();
+  else { repaintAll(); return; }
+  setTimeout(() => repairSurface(step + 1), 800);  // 给浏览器 0.8s 自己缓过来
+}
+
+function onForeground() {
+  clearTimeout(_resumeTk);
+  repaintAll();                                    // 白屏那条: 先整页重画一次
+  _resumeTk = setTimeout(() => {
+    if (!$('pmodal').classList.contains('open') || !v.getAttribute('src')) return;
+    if (v.paused || v.ended) return;
+    if ($('pstage').classList.contains('audio')) return;
+    _frameSeen = decodedFrames();
+    if (_frameSeen < 0) { reattachVideo(); return; }   // Safari: 没有帧计数, 直接轻修一次
+    setTimeout(() => repairSurface(0), 600);           // 再等 0.6s 看帧有没有在涨
+  }, 500);
+}
+
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    _wasHidden = true;
     if (HAS_PIP && !v.paused && !v.ended && $('pmodal').classList.contains('open')) {
       if (v.webkitSetPresentationMode && v.webkitSupportsPresentationMode
           && v.webkitSupportsPresentationMode('picture-in-picture')) {
@@ -2653,34 +2806,14 @@ document.addEventListener('visibilitychange', () => {
     }
     return;
   }
-  /* Android Chromium 已知 bug: 切后台回来 video 渲染表面(surface)被系统回收 →
-     黑屏有声, 换 src 也无效。
-     **老代码栽在 requestAnimationFrame 上**: 刚回前台时页面还没开始渲染,
-     rAF 可能**根本不触发** → 整段修复代码没跑 → 黑屏照旧(用户实测回归)。
-     现在: setTimeout 兜底 + 两层修复(挪位置 → 还不行就 load() 重载, 保位置保播放)。 */
-  if (!$('pmodal').classList.contains('open') || !v.getAttribute('src')) return;
-  setTimeout(() => {
-    const src = v.getAttribute('src');
-    const at = v.currentTime, wasPaused = v.paused;
-    /* ① 在 DOM 里挪一下位, 强制重建渲染表面 */
-    const p = v.parentNode, n = v.nextSibling;
-    if (p) p.insertBefore(v, n);
-    if (v.ended) return;
-    /* ② 挪位置不够就彻底重载(Android 有时就是不给 surface) */
-    try {
-      v.removeAttribute('src');
-      v.load();                        // 复位
-      v.setAttribute('src', src);      // 源原样放回
-      v.load();                        // 重新拉流
-      v.addEventListener('loadedmetadata', () => {
-        try { v.currentTime = at; } catch (e) {}
-        if (!wasPaused) v.play().catch(() => {});
-      }, {once: true});
-    } catch (e) {
-      if (!wasPaused) v.play().catch(() => {});
-    }
-  }, 250);
+  _wasHidden = false;
+  onForeground();
 });
+/* Page Lifecycle: 安卓上有时不走 visibilitychange, 只发 freeze/resume */
+document.addEventListener('resume', onForeground);
+window.addEventListener('pageshow', e => { if (e.persisted) onForeground(); });
+/* focus 兜底: 只在"刚才确实被藏起来过"时修, 否则点一下地址栏都闪一下没必要 */
+window.addEventListener('focus', () => { if (_wasHidden) { _wasHidden = false; onForeground(); } });
 
 /* ═══ 启动 ═══ */
 async function checkVer() {
