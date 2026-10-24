@@ -99,7 +99,7 @@ for (const [name, eof] of files) {
 if (icons.length) {
   out.push(`mkdir -p "$APP/icons"`);
   for (const ic of icons) {
-    out.push(`cat > "$APP/icons/${ic.name}.b64" <<'I${ic.name}B64'\n${ic.b64}I${ic.name}B64\nbase64 -d "$APP/icons/${ic.name}.b64" > "$APP/icons/${ic.name}" 2>/dev/null && rm -f "$APP/icons/${ic.name}.b64"`);
+    out.push(`cat > "$APP/icons/${ic.name}.b64" <<'I${ic.name}B64'\n${ic.b64}\nI${ic.name}B64\nbase64 -d "$APP/icons/${ic.name}.b64" > "$APP/icons/${ic.name}" 2>/dev/null && rm -f "$APP/icons/${ic.name}.b64"`);
   }
 }
 out.push(tail);

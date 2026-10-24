@@ -51,7 +51,22 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "6.17"         # 版本号: 显示在界面顶栏, 排查新旧用(改代码顺手改这里)
+VERSION = "15.1"
+
+# v17: 观看进度记忆 (前端每10s心跳上报; key=相对路径)
+PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_progress.json")
+PROGRESS = {}
+try:
+    if os.path.exists(PROGRESS_FILE):
+        PROGRESS = json.load(open(PROGRESS_FILE, "r", encoding="utf-8"))
+except Exception:
+    PROGRESS = {}
+
+def save_progress():
+    try:
+        json.dump(PROGRESS, open(PROGRESS_FILE, "w", encoding="utf-8"), ensure_ascii=False)
+    except Exception:
+        pass   # UI 已走到 v15.1, 别再让这数拖后腿(前端顶栏显示,排查新旧用)         # 版本号: 显示在界面顶栏, 排查新旧用(改代码顺手改这里)
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.ini"
 # 下载目录/扫描目录的默认值**按平台给不同值**:
@@ -2275,6 +2290,8 @@ def cancel_task(tid):
 
 # ---------------- HTTP ----------------
 class Handler(BaseHTTPRequestHandler):
+    # v7: HTTP/1.1 keep-alive — 面板轮询密集, 省掉每次新建 TCP(全部出口已核过 Content-Length, 304 无体符合 RFC)
+    protocol_version = "HTTP/1.1"
     def log_message(self, *a):
         pass
 
@@ -2522,26 +2539,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             return self.wfile.write(body)
-        if u.path == "/api/chapters":                   # 章节: 容器真章节 or 等距伪章节
-            target = safe_media_path(q.get("rel", [""])[0])
-            if target is None or not target.exists():
-                return self._json({"error": "路径不允许"}, 404)
-            try:
-                dur = float(q.get("dur", ["0"])[0])
-            except ValueError:
-                dur = 0
-            meta = probe_meta(target)
-            if meta.get("duration"):
-                dur = meta["duration"]
-            chs = meta.get("chapters") or []
-            real = bool(chs)
-            if not real and dur > 0:
-                # 无章节: 按缩略图同样的 12 段等距切(中点取帧) → 图能直接对��
-                n = 12
-                chs = [{"start": round(dur * i / n, 3), "end": round(dur * (i + 1) / n, 3),
-                        "title": f"片段 {i + 1}"} for i in range(n)]
-            return self._json({"chapters": chs, "real": real, "duration": dur,
-                                "thumb_index": {str(i): i for i in range(len(chs))}})
         if u.path == "/api/health":                     # 坏文件体检(单个视频)
             bvid = q.get("bvid", [""])[0]
             lib = load_library()
@@ -2680,16 +2677,6 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
             return
-        if u.path == "/api/open":
-            target = safe_media_path(q.get("rel", [""])[0])
-            if target is None:
-                return self._json({"error": "路径不合法"}, 403)
-            if target.exists():
-                r = open_external(target)       # 跨平台: os.startfile/open/xdg-open/termux-open
-                if r is True:
-                    return self._json({"ok": True})
-                return self._json({"error": f"外部打开失败: {r}"}, 500)
-            return self._json({"error": "文件不存在"}, 404)
         if u.path == "/api/diagnostics":
             return self._json(diagnostics())
         self._json({"error": "not found"}, 404)
@@ -2733,6 +2720,21 @@ class Handler(BaseHTTPRequestHandler):
             t["_replace_orig"] = str(old)
             log_op(f"重新下载: {e.get('title', '')[:40]} P{p}")
             return self._json({"id": t["id"]})
+        if u.path == "/api/progress":                   # v17 观看进度
+            if method == "POST":
+                ln = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(ln).decode("utf-8", "ignore") if ln else ""
+                try:
+                    d = json.loads(body)
+                    if d.get("path"):
+                        PROGRESS[str(d["path"])] = {"pos": float(d.get("pos") or 0), "dur": float(d.get("dur") or 0)}
+                        save_progress()
+                except Exception:
+                    pass
+                self._json({})
+            else:
+                self._json(PROGRESS)
+            return
         if u.path == "/api/credentials":               # 凭据: 增/删/改(POST)
             dom = str(body.get("domain", "")).strip().lower()
             cv = str(body.get("cookie", "")).strip()
@@ -2773,6 +2775,9 @@ class Handler(BaseHTTPRequestHandler):
             tag = str(body.get("tag", ""))[:16]
             if not bvid or not tag:
                 return self._json({"error": "缺 bvid 或 tag"}, 400)
+            # v7: 标签会原样回显进前端 innerHTML, 这里挡掉注入字符(前端另有 esc 兜底)
+            if any(c in tag for c in '<>"\'&'):
+                return self._json({"error": "标签含非法字符"}, 400)
             tags = toggle_tag(bvid, tag)
             if tags is None:
                 return self._json({"error": "库里没这个视频"}, 404)
@@ -2851,28 +2856,6 @@ class Handler(BaseHTTPRequestHandler):
             if not items:
                 return self._json({"error": "没解析出可用文件(路径必须在允许目录内)"}, 400)
             return self._json(queue_ops({"op": "set", "items": items}))
-        if u.path == "/api/marks":                      # 手动章节标记(存 library, 不改原文件)
-            bvid = str(body.get("bvid", ""))
-            rel = str(body.get("rel", ""))
-            lib = load_library()
-            e = lib.get(bvid)
-            if not e:
-                return self._json({"error": "库里没这个视频"}, 404)
-            marks = e.get("marks") or []
-            if body.get("op") == "del":
-                marks = [m for m in marks if abs(float(m.get("t", 0)) - float(body.get("t", 0))) > 0.01]
-            else:
-                t = float(body.get("t", 0))
-                title = str(body.get("title", ""))[:60] or f"标记 {fmt_sec(t)}"
-                marks.append({"t": round(t, 2), "title": title})
-                marks.sort(key=lambda m: m["t"])
-            def _set_marks(lib):
-                e = lib.get(bvid)
-                if e is not None:
-                    e["marks"] = marks
-                return lib
-            mutate_library(_set_marks)
-            return self._json({"ok": True, "marks": marks})
         if u.path == "/api/download":
             parts = [int(p) for p in body.get("parts", [])]
             if not parts:
@@ -2992,10 +2975,13 @@ cat > "$APP"/index.html <<'HTMLEOF'
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Decache">
 <link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Orbitron:wght@600;800&display=swap" rel="stylesheet">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="icon" type="image/png" href="/icons/icon-192.png">
 <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-<title>Decache</title>
+<title>Decache v15.1</title>
 <style>
 /* ═══════════════ Decache UI v6 · timeless mono ═══════════════
    设计原则: UI 单色退后, 封面是唯一的彩色; 排版层级拉大;
@@ -3144,12 +3130,12 @@ h2{font-size:11px;color:var(--tx3);font-weight:600;margin:22px 0 10px;letter-spa
 /* ── 播放列表面板(缩略图+名称, 点一下就切) ── */
 #listPanel{position:fixed;right:12px;top:calc(var(--pTop,118px) + env(safe-area-inset-top));bottom:calc(96px + env(safe-area-inset-bottom));
   z-index:150;width:min(340px,calc(100% - 24px));display:none;flex-direction:column;
-  background:rgba(16,16,20,.97);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+  background:color-mix(in srgb, var(--srf3) 96%, transparent);ba   /* v18: 播放器面板跟主题 */ckdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
   border:1px solid rgba(255,255,255,.13);border-radius:14px;overflow:hidden;
   box-shadow:0 16px 50px rgba(0,0,0,.5);touch-action:pan-y}
 #listPanel.show{display:flex}
 #listPanel .qh{display:flex;align-items:center;gap:8px;padding:12px 14px;
-  border-bottom:1px solid rgba(255,255,255,.1);font-size:12px;font-weight:700;color:#fff}
+  border-bottom:1px solid var(--line);font-size:12px;font-weight:700;color:var(--tx)}
 #listPanel .qh .spacer{flex:1}
 .plist2{flex:1;overflow:auto;padding:4px 0}
 .plrow{display:flex;align-items:center;gap:9px;padding:7px 12px;cursor:pointer}
@@ -3199,7 +3185,7 @@ h2{font-size:11px;color:var(--tx3);font-weight:600;margin:22px 0 10px;letter-spa
 /* ── 媒体库多选 ── */
 .selbar{position:fixed;left:0;right:0;bottom:0;z-index:60;display:none;align-items:center;gap:8px;
   padding:10px 14px calc(10px + env(safe-area-inset-bottom));
-  background:rgba(16,16,20,.97);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  background:color-mix(in srgb, var(--srf3) 96%, transparent);ba   /* v18: 播放器面板跟主题 */ckdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
   border-top:1px solid rgba(255,255,255,.12);box-shadow:0 -8px 30px rgba(0,0,0,.5)}
 .selbar.show{display:flex}
 .btn.on{background:rgba(251,114,153,.16);border-color:rgba(251,114,153,.5);color:#FB7299}
@@ -3379,11 +3365,11 @@ input[type=text]::placeholder{color:var(--tx3)}
   background:rgba(16,16,20,.96);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
   border:1px solid rgba(255,255,255,.13);border-radius:14px;overflow:hidden}
 #qpanel.show{display:flex}
-#qpanel .qh{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.1);
-  font-size:12px;font-weight:700;letter-spacing:.5px;color:#fff}
+#qpanel .qh{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line);
+  font-size:12px;font-weight:700;letter-spacing:.5px;color:var(--tx)}
 #qpanel .qh .spacer{flex:1}
 #qpanel .qlist{flex:1;overflow:auto;padding:4px 0}
-#qpanel .qitem{display:flex;align-items:center;gap:8px;padding:9px 12px;font-size:12.5px;color:#EDEDF2}
+#qpanel .qitem{display:flex;align-items:center;gap:8px;padding:9px 12px;font-size:12.5px;color:var(--tx2)}
 #qpanel .qitem.cur{background:rgba(251,114,153,.13)}
 #qpanel .qn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #qpanel .qops{display:flex;gap:3px;flex:none}
@@ -3391,21 +3377,7 @@ input[type=text]::placeholder{color:var(--tx3)}
   color:#ccc;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
 #qpanel .qops button:active{background:rgba(255,255,255,.18)}
 #qpanel .qops svg.ic{width:12px;height:12px}
-#qpanel .qempty{padding:26px 14px;text-align:center;color:var(--tx3);font-size:12px}
-
-/* ── 章节面板 ── */
-#chapPanel{position:absolute;right:12px;top:calc(var(--pTop,118px) + env(safe-area-inset-top));bottom:calc(96px + env(safe-area-inset-bottom));
-  z-index:150;
-  touch-action:pan-y;
-  z-index:150;width:min(310px,calc(100% - 24px));display:none;flex-direction:column;
-  background:rgba(16,16,20,.96);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
-  border:1px solid rgba(255,255,255,.13);border-radius:14px;overflow:hidden}
-#chapPanel.show{display:flex}
-#chapPanel .qh{display:flex;align-items:center;gap:8px;padding:12px 14px;
-  border-bottom:1px solid rgba(255,255,255,.1);font-size:12px;font-weight:700;letter-spacing:.5px;color:#fff}
-#chapPanel .qh .spacer{flex:1}
-.chlist{flex:1;overflow:auto;padding:4px 0}
-.chitem{display:flex;align-items:center;gap:9px;padding:8px 12px;cursor:pointer;font-size:12.5px;color:#EDEDF2}
+#qpanel .qempty{padding:26px 14px;text-align:center;color:var(--tx3);font-size:12px}.chitem{display:flex;align-items:center;gap:9px;padding:8px 12px;cursor:pointer;font-size:12.5px;color:#EDEDF2}
 .chitem:active{background:rgba(255,255,255,.07)}
 .chitem.cur{background:rgba(251,114,153,.13)}
 .chitem .cthumb{width:52px;height:32px;flex:none;border-radius:5px;background:#26262B center no-repeat;
@@ -3414,13 +3386,7 @@ input[type=text]::placeholder{color:var(--tx3)}
 .chitem .ct{font-size:11px;color:var(--tx3);font-variant-numeric:tabular-nums;flex:none}
 .chitem .cdel{width:22px;height:22px;flex:none;border:0;background:rgba(255,255,255,.08);color:#bbb;
   border-radius:5px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
-.chitem .cdel svg.ic{width:11px;height:11px}
-#chapMarks{position:absolute;left:0;right:0;top:0;height:100%;pointer-events:none;z-index:1}
-#chapMarks i{position:absolute;top:50%;transform:translate(-50%,-50%);width:2px;height:14px;
-  background:rgba(255,255,255,.62);border-radius:1px}
-#chapMarks i.mk{background:#FFD166;height:18px;width:3px}
-
-/* ── 工具面板 ── */
+.chitem .cdel svg.ic{width:11px;height:11px}/* ── 工具面板 ── */
 #sheet{position:fixed;left:50%;bottom:78px;transform:translateX(-50%) translateY(12px);z-index:120;
   width:min(560px,calc(100% - 24px));max-height:72vh;display:none;flex-direction:column;
   background:var(--srf);border:1px solid var(--line);border-radius:16px;overflow:hidden;
@@ -3451,12 +3417,12 @@ input[type=text]::placeholder{color:var(--tx3)}
 
 /* ═══ 播放器(恒暗 · 沉浸式) ═══ */
 #pmodal{display:none;position:fixed;inset:0;z-index:100;background:#000;flex-direction:column;
-  color:#FAFAFA;--tx:#FAFAFA;--tx2:#A1A1AA;--tx3:#5C5C64;--srf2:#1A1A1E;--srf3:#26262B;
+  color:var(--tx);--tx:#FAFAFA;   /* v15: color写死#FAFAFA盖了主题映射, 按钮继承才全白 */--tx2:#A1A1AA;--tx3:#5C5C64;--srf2:#1A1A1E;--srf3:#26262B;
   --line:#2E2E34;--line2:#3A3A42}
 #pmodal.open{display:flex}
 #pstage{position:relative;flex:1;min-height:0;width:100%;background:#000;
   display:flex;align-items:center;justify-content:center;touch-action:none;overflow:hidden}
-#pvideo{width:100%;height:100%;object-fit:contain;background:#000;display:block}
+#pvideo{width:100%;height:100%;object-fit:contain;background:#000;display:block;transform:translateZ(0)}   /* v19.8: 合成层快路径(实测+35%) */
 /* 顶栏两行: 第一行 = 标题(整行, 不用挤在按钮中间), 第二行 = 交互按钮 */
 #phead{position:absolute;top:0;left:0;right:0;z-index:7;display:flex;flex-direction:column;gap:10px;
   padding:14px 16px calc(14px + env(safe-area-inset-top));
@@ -3534,8 +3500,9 @@ input[type=text]::placeholder{color:var(--tx3)}
 #pnext .icbtn{width:32px;height:32px}
 /* 音频模式 */
 #partCover{position:absolute;inset:0;z-index:1;display:none;flex-direction:column;align-items:center;justify-content:center;gap:26px;
-  background:radial-gradient(120% 90% at 50% 0%, #1b1b26, #000)}
+  background:radial-gradient(120% 90% at 50% 0%, var(--srf2), var(--bg))}   /* v18: 封面底板跟主题 */
 #pstage.audio #partCover{display:flex}
+#pstage.audio #fxCv{display:none!important}   /* v15: 纯音频视频隐藏video, fx画布别对着黑纹理画(全黑有声) */
 #pstage.audio #pvideo{visibility:hidden}
 #pErr{position:absolute;inset:0;z-index:20;display:none;flex-direction:column;align-items:center;
   justify-content:center;gap:14px;background:rgba(0,0,0,.9);color:#fff;text-align:center;padding:24px}
@@ -3563,7 +3530,7 @@ input[type=text]::placeholder{color:var(--tx3)}
   pointer-events:none;opacity:0;transition:opacity .4s}
 #phint.show{opacity:1}
 #phint span{display:flex;align-items:center;gap:6px;font-size:11px;color:rgba(255,255,255,.85);
-  background:rgba(0,0,0,.55);padding:6px 12px;border-radius:999px;backdrop-filter:blur(6px)}
+  background:rgba(0,0,0,.55);padding:6px 12px;border-radius:999px}
 
 /* ═══════════════ 动效 v6.17 ═══════════════
    规矩只有三条:
@@ -3646,9 +3613,614 @@ input[type=text]::placeholder{color:var(--tx3)}
 .resume .rprog{height:3px;border-radius:2px;background:var(--line2);margin-top:7px;overflow:hidden}
 .resume .rprog i{display:block;height:100%;border-radius:2px;background:var(--tx);
   transition:width var(--d3) var(--e-out)}
+
+/* ═══════════════ UI v8 · 主题系统 (2026-10-24) ═══════════════
+   设计依据: 2026 趋势调研 —
+   · 玻璃拟态2.0/液态玻璃(Apple 系, 需可访问降级)
+   · Catppuccin/Tokyo Night (程序员社区人气配色)
+   · Synthwave 复古未来 (StyleShift 流派规范: 深紫黑底/≤3霓虹/发光只给主元素)
+   · Vercel Geist 纪律 (shadow-as-border/6-8-12圆角/字重≤600/宽字距大写标签)
+   机制: <html data-ui> 换肤, data-theme 照旧管明暗。
+   每主题 = ① 令牌(色/圆角/阴影/字体) ② 组件语言 ③ 场景层(body::before)。
+   加主题 = 抄一个块改值。 */
+
+:root{
+  --acc:var(--tx); --acc-tx:var(--bg);
+  --ring:color-mix(in srgb, var(--tx) 20%, transparent);
+  --sh:none; --edge:transparent;             /* --edge: shadow-as-border 描边 */
+  --font:-apple-system,"MiSans","Noto Sans CJK SC",system-ui,sans-serif;
+}
+
+/* ── geist · Vercel 式极简 ── */
+html[data-ui="geist"]{
+  --bg:#0A0A0A; --srf:#111111; --srf2:#191919; --srf3:#212121;
+  --line:#2A2A2A; --line2:#3D3D3D;
+  --tx:#FAFAFA; --tx2:#A1A1A1; --tx3:#6F6F6F;
+  --ok:#3ECF8E; --bad:#FF5B4F; --pink:#0072F5;
+  --acc:#0072F5; --acc-tx:#FFFFFF; --r:8px; --rs:6px;
+  --edge:rgba(255,255,255,.09);
+  --sh:0 8px 24px rgba(0,0,0,.45);
+  --font:"Geist Sans",Inter,-apple-system,"Segoe UI","MiSans","Noto Sans CJK SC",system-ui,sans-serif;
+}
+html[data-ui="geist"][data-theme="light"]{
+  --bg:#FAFAFA; --srf:#FFFFFF; --srf2:#F5F5F5; --srf3:#EFEFEF;
+  --line:#EBEBEB; --line2:#D4D4D4;
+  --tx:#171717; --tx2:#666666; --tx3:#8A8A8A;
+  --ok:#0A996E; --bad:#D92D20; --pink:#0072F5;
+  --edge:rgba(0,0,0,.08);
+  --sh:0 8px 24px rgba(0,0,0,.06);
+}
+@media (prefers-color-scheme:light){
+  html[data-ui="geist"]:not([data-theme="dark"]):not([data-theme="light"]){
+    --bg:#FAFAFA; --srf:#FFFFFF; --srf2:#F5F5F5; --srf3:#EFEFEF;
+    --line:#EBEBEB; --line2:#D4D4D4;
+    --tx:#171717; --tx2:#666666; --tx3:#8A8A8A;
+    --ok:#0A996E; --bad:#D92D20; --pink:#E11D74;
+    --edge:rgba(0,0,0,.08);
+    --sh:0 8px 24px rgba(0,0,0,.06);
+  }
+}
+html[data-ui="geist"] .btn{border-radius:6px}
+html[data-ui="geist"] .meta{letter-spacing:.06em;font-weight:600;font-size:11px}
+html[data-ui="geist"] .tabbar button.on{color:var(--tx)}
+html[data-ui="geist"] .tabbar button.on{box-shadow:inset 0 -2px 0 var(--tx)}
+
+/* ── catppuccin · 柔和护眼 (Mocha 暗 / Latte 亮) ── */
+html[data-ui="catppuccin"]{
+  --bg:#181825; --srf:#1E1E2E; --srf2:#313244; --srf3:#45475A;
+  --line:#45475A; --line2:#585B70;
+  --tx:#CDD6F4; --tx2:#A6ADC8; --tx3:#7F849C;
+  --ok:#A6E3A1; --bad:#F38BA8; --pink:#F5C2E7;
+  --acc:#CBA6F7; --acc-tx:#11111B; --r:12px; --rs:10px;
+  --sh:0 6px 20px rgba(0,0,0,.30);
+}
+html[data-ui="catppuccin"][data-theme="light"]{
+  --bg:#E6E9EF; --srf:#EFF1F5; --srf2:#CCD0DA; --srf3:#BCC0CC;
+  --line:#CCD0DA; --line2:#ACB0BE;
+  --tx:#4C4F69; --tx2:#6C6F85; --tx3:#8C8FA1;
+  --ok:#40A02B; --bad:#D20F39; --pink:#EA76CB;
+  --acc:#8839EF; --acc-tx:#FFFFFF;
+  --sh:0 6px 20px rgba(76,79,105,.12);
+}
+@media (prefers-color-scheme:light){
+  html[data-ui="catppuccin"]:not([data-theme="dark"]):not([data-theme="light"]){
+    --bg:#E6E9EF; --srf:#EFF1F5; --srf2:#CCD0DA; --srf3:#BCC0CC;
+    --line:#CCD0DA; --line2:#ACB0BE;
+    --tx:#4C4F69; --tx2:#6C6F85; --tx3:#8C8FA1;
+    --ok:#40A02B; --bad:#D20F39; --pink:#EA76CB;
+    --acc:#8839EF; --acc-tx:#FFFFFF;
+    --sh:0 6px 20px rgba(76,79,105,.12);
+  }
+}
+html[data-ui="catppuccin"] .chip{border-radius:999px}
+
+/* ── synthwave · 复古未来 (StyleShift 流派规范) ── */
+html[data-ui="synthwave"]{
+  --bg:#0C0221; --srf:#170838; --srf2:#1F0A4A; --srf3:#28115E;
+  --line:#3D1D78; --line2:#4E2699;
+  --tx:#E4D9F7; --tx2:#A68CCF; --tx3:#7A5FA8;   /* 薰衣草紫灰, 绝不纯白 */
+  --ok:#00F0A8; --bad:#FF3864; --pink:#FF2D95;
+  --acc:#FF2D95; --acc-tx:#12031F; --r:2px; --rs:2px;   /* 锐角 */
+  --font:"Avenir Next",Futura,"Segoe UI",-apple-system,"MiSans","Noto Sans CJK SC",system-ui,sans-serif;
+}
+html[data-ui="synthwave"][data-theme="light"]{
+  --bg:#F1E9FF; --srf:#FAF6FF; --srf2:#EADFF0; --srf3:#E3D4F8;
+  --line:#D3BFF2; --line2:#BCA0E8;
+  --tx:#241145; --tx2:#4E2E86; --tx3:#6B4BA3;
+  --ok:#00856B; --bad:#C81E5B; --pink:#D1008F;
+  --acc:#D1008F; --acc-tx:#FFFFFF;
+}
+@media (prefers-color-scheme:light){
+  html[data-ui="synthwave"]:not([data-theme="dark"]):not([data-theme="light"]){
+    --bg:#F1E9FF; --srf:#FAF6FF; --srf2:#EADFF0; --srf3:#E3D4F8;
+    --line:#D3BFF2; --line2:#BCA0E8;
+    --tx:#241145; --tx2:#4E2E86; --tx3:#6B4BA3;
+    --ok:#00856B; --bad:#C81E5B; --pink:#D1008F;
+    --acc:#D1008F; --acc-tx:#FFFFFF;
+  }
+}
+/* 场景: 落日 + 地平线辉光 + 透视网格 (纯渐变, 合成层, 不随滚动重绘) */
+html[data-ui="synthwave"] body::before{
+  content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background:
+    linear-gradient(to top, rgba(255,120,50,.22), rgba(255,150,80,.08) 34%, transparent 55%),
+    conic-gradient(from 165deg at 50% 104px, transparent 0deg, rgba(255,185,95,.12) 11deg, rgba(255,228,160,.26) 17deg, rgba(255,185,95,.12) 23deg, transparent 34deg),
+    linear-gradient(180deg, rgba(255,140,60,.15), rgba(255,90,120,.05) 28%, transparent 46%),
+    radial-gradient(circle 210px at 50% 104px, rgba(255,180,80,.35), rgba(255,100,140,.16) 50%, transparent 74%),
+    radial-gradient(circle 64px at 50% 104px, #FFD319 0 34%, #FF2975 62%, #B967FF 82%, transparent 83%),
+    linear-gradient(180deg, transparent 129px, rgba(255,45,149,.55) 130px, transparent 131px),
+    radial-gradient(ellipse 90% 55% at 50% 130px, rgba(185,103,255,.28), transparent 70%),
+    repeating-linear-gradient(90deg, rgba(0,240,255,.06) 0 1px, transparent 1px 56px),
+    repeating-linear-gradient(0deg, rgba(255,45,149,.05) 0 1px, transparent 1px 56px),
+    linear-gradient(180deg, #170633 0%, #0C0221 55%);
+}
+/* 组件语言: 霓虹只给主元素; 标题宽字距大写; 主按钮品红+辉光; 进度条青色 */
+html[data-ui="synthwave"] h2,html[data-ui="synthwave"] .t,html[data-ui="synthwave"] .vt,
+html[data-ui="synthwave"] .logo{text-transform:uppercase;letter-spacing:.1em;
+  text-shadow:0 0 12px rgba(255,45,149,.5),0 0 34px rgba(185,103,255,.3)}
+html[data-ui="synthwave"] .btn{border-radius:2px;font-weight:700;letter-spacing:.05em;
+  box-shadow:0 0 14px rgba(255,45,149,.45)}
+html[data-ui="synthwave"] .btn.ghost{border-color:var(--line2);
+  box-shadow:inset 0 0 10px rgba(0,240,255,.12)}
+html[data-ui="synthwave"] .chip.on{box-shadow:0 0 10px rgba(255,45,149,.5)}
+html[data-ui="synthwave"] .tabbar button.on{color:#00F0FF;
+  text-shadow:0 0 10px rgba(0,240,255,.7);box-shadow:inset 0 -2px 0 #00F0FF}
+html[data-ui="synthwave"] .card{border:1px solid var(--line);
+  background:color-mix(in srgb, var(--srf) 82%, transparent)}
+html[data-ui="synthwave"] .cur{box-shadow:0 0 10px var(--pink)}
+html[data-ui="synthwave"][data-theme="light"] body::before{display:none}
+@media (prefers-color-scheme:light){
+  html[data-ui="synthwave"]:not([data-theme="dark"]) body::before{display:none}
+}
+
+/* ── retro · Win95 (保留) ── */
+html[data-ui="retro"]{
+  --bg:#1F1E1B; --srf:#2A2925; --srf2:#33322D; --srf3:#3C3A34;
+  --line:#4B4941; --line2:#5C594F;
+  --tx:#EDEAE2; --tx2:#A8A498; --tx3:#7E7B70;
+  --ok:#7BC96F; --bad:#E06C5B; --pink:#7FB3FF;
+  --acc:#7FB3FF; --acc-tx:#10131A; --r:0px; --rs:0px;
+  --sh:4px 4px 0 rgba(0,0,0,.45);
+  --font:Tahoma,"MS Sans Serif","Segoe UI","Noto Sans CJK SC",sans-serif;
+}
+html[data-ui="retro"][data-theme="light"]{
+  --bg:#D3CFC4; --srf:#F2F0E9; --srf2:#E7E4DA; --srf3:#DCD9CE;
+  --line:#8B877B; --line2:#6B675C;
+  --tx:#191813; --tx2:#55524A; --tx3:#6E6A5F;
+  --ok:#1F7A33; --bad:#B3261E;
+  --acc:#1F3FBF; --acc-tx:#FFFFFF;
+}
+@media (prefers-color-scheme:light){
+  html[data-ui="retro"]:not([data-theme="dark"]):not([data-theme="light"]){
+    --bg:#D3CFC4; --srf:#F2F0E9; --srf2:#E7E4DA; --srf3:#DCD9CE;
+    --line:#8B877B; --line2:#6B675C;
+    --tx:#191813; --tx2:#55524A; --tx3:#6E6A5F;
+    --ok:#1F7A33; --bad:#B3261E;
+    --acc:#1F3FBF; --acc-tx:#FFFFFF;
+  }
+}
+html[data-ui="retro"] .btn,html[data-ui="retro"] .chip{
+  box-shadow:inset -2px -2px 0 rgba(0,0,0,.35),inset 2px 2px 0 rgba(255,255,255,.28)}
+html[data-ui="retro"] .btn:active,html[data-ui="retro"] .chip:active{transform:none;
+  box-shadow:inset 2px 2px 0 rgba(0,0,0,.35),inset -2px -2px 0 rgba(255,255,255,.14)}
+html[data-ui="retro"] .tabbar button.on{color:var(--acc)}
+
+/* ── pipboy · 辐射终端 (保留+微调) ── */
+html[data-ui="mauto"]{--acc:#7C8CF8;--edge:rgba(124,140,248,.35);--srf2:rgba(124,140,248,.14)}   /* v17 自适应主题: JS 定时取视频主色覆盖这三个变量 */
+html[data-ui="pipboy"]{
+  --bg:#050905; --srf:#0A120A; --srf2:#0E180E; --srf3:#121F12;
+  --line:#1D331D; --line2:#2B4A2B;
+  --tx:#6CFF7E; --tx2:#3FA34F; --tx3:#2C7A3A;
+  --ok:#4AFF77; --bad:#FF7A5C; --pink:#2AFF5F;
+  --acc:#22FF55; --acc-tx:#031203; --r:2px; --rs:2px;
+  --sh:0 0 12px rgba(34,255,85,.12);
+  --font:ui-monospace,Menlo,Consolas,"Courier New","Noto Sans Mono CJK SC",monospace;
+}
+html[data-ui="pipboy"][data-theme="light"]{
+  --bg:#E9F5E9; --srf:#F6FBF6; --srf2:#EAF4EA; --srf3:#DDEEDD;
+  --line:#B5D6B5; --line2:#8FBE8F;
+  --tx:#0C3A16; --tx2:#3E7A4C; --tx3:#5A9167;
+  --ok:#0B7A2E; --bad:#C2401F; --pink:#0B8A2E;
+  --acc:#0B8A2E; --acc-tx:#FFFFFF; --sh:none;
+}
+@media (prefers-color-scheme:light){
+  html[data-ui="pipboy"]:not([data-theme="dark"]):not([data-theme="light"]){
+    --bg:#E9F5E9; --srf:#F6FBF6; --srf2:#EAF4EA; --srf3:#DDEEDD;
+    --line:#B5D6B5; --line2:#8FBE8F;
+    --tx:#0C3A16; --tx2:#3E7A4C; --tx3:#5A9167;
+    --ok:#0B7A2E; --bad:#C2401F; --pink:#0B8A2E;
+    --acc:#0B8A2E; --acc-tx:#FFFFFF; --sh:none;
+  }
+}
+/* v10.1: 场景层压到 70 — 高于界面(60)低于播放器(100), 视频画面归着色器独占 */
+html[data-ui="pipboy"] body::after{content:"";position:fixed;inset:0;z-index:70;pointer-events:none;
+  background:repeating-linear-gradient(0deg,rgba(0,0,0,.17) 0 1px,transparent 1px 3px)}
+html[data-ui="pipboy"] .btn,html[data-ui="pipboy"] .chip.on,html[data-ui="pipboy"] .logo,
+html[data-ui="pipboy"] .tabbar button.on{text-shadow:0 0 7px rgba(60,255,110,.6)}
+html[data-ui="pipboy"] .tabbar button.on{color:var(--acc)}
+html[data-ui="pipboy"] .logo b::after{content:"▮";margin-left:3px;font-weight:400}
+@keyframes uiblink{50%{opacity:0}}
+
+/* v13: 播放器头部/面板主题化 — pmodal 原硬重置一套 mono 变量, 上半截吃不到主题; 逐主题映射恒暗色板 */
+html[data-ui="geist"] #pmodal{--tx:#FAFAFA;--tx2:#A1A1A1;--tx3:#6F6F6F;--srf2:#191919;--srf3:#212121;--line:#2A2A2A;--line2:#3D3D3D}
+html[data-ui="catppuccin"] #pmodal{--tx:#CDD6F4;--tx2:#A6ADC8;--tx3:#7F849C;--srf2:#313244;--srf3:#45475A;--line:#45475A;--line2:#585B70}
+html[data-ui="synthwave"] #pmodal{--tx:#E4D9F7;--tx2:#A68CCF;--tx3:#7A5FA8;--srf2:#1F0A4A;--srf3:#28115E;--line:#3D1D78;--line2:#4E2699}
+html[data-ui="retro"] #pmodal{--tx:#EDEAE2;--tx2:#A8A498;--tx3:#7E7B70;--srf2:#33322D;--srf3:#3C3A34;--line:#4B4941;--line2:#5C594F}
+html[data-ui="pipboy"] #pmodal{--tx:#6CFF7E;--tx2:#3FA34F;--tx3:#2C7A3A;--srf2:#0E180E;--srf3:#121F12;--line:#1D331D;--line2:#2B4A2B}
+html[data-ui="geist"] #phead{background:linear-gradient(rgba(10,10,10,.85),rgba(10,10,10,.4) 60%,transparent)}
+html[data-ui="catppuccin"] #phead{background:linear-gradient(rgba(24,24,37,.85),rgba(24,24,37,.4) 60%,transparent)}
+html[data-ui="synthwave"] #phead{background:linear-gradient(rgba(12,2,33,.85),rgba(12,2,33,.4) 60%,transparent)}
+html[data-ui="retro"] #phead{background:linear-gradient(rgba(31,30,27,.85),rgba(31,30,27,.4) 60%,transparent)}
+html[data-ui="pipboy"] #phead{background:linear-gradient(rgba(5,9,5,.88),rgba(5,9,5,.45) 60%,transparent)}
+#phead .ttl{color:var(--tx)}   /* v13: 原来继承写死的 #FAFAFA, 主题进不来 */
+#phead .icbtn{color:var(--tx)}
+/* ═══════ v14 · 主题性格化: 每个主题有自己的语言, 不只是换色 ═══════ */
+
+/* ── retro · 像素庄园(星露谷×MC×WinXP 融合) ── */
+/* 星露谷: 暖木纸感面板; MC: 物品栏格硬边+内阴影; WinXP: 凸起按钮已有, 补像素云+草地天际线 */
+html[data-ui="retro"] body::before{content:"";position:fixed;left:0;right:0;bottom:0;height:120px;z-index:-1;pointer-events:none;
+  background:
+    radial-gradient(circle 7px at 12% 34%, #E8E4DA 98%, transparent),
+    radial-gradient(circle 10px at 15.5% 31%, #E8E4DA 98%, transparent),
+    radial-gradient(circle 7px at 19.5% 35%, #E8E4DA 98%, transparent),
+    radial-gradient(circle 8px at 61% 21%, #E8E4DA 98%, transparent),
+    radial-gradient(circle 11px at 64.5% 18%, #E8E4DA 98%, transparent),
+    radial-gradient(circle 7px at 68.5% 22%, #E8E4DA 98%, transparent),
+    radial-gradient(circle 6px at 85% 42%, #E8E4DA 98%, transparent),
+    radial-gradient(circle 9px at 88% 39%, #E8E4DA 98%, transparent),
+    linear-gradient(transparent 0 60px, rgba(94,157,52,.16) 60px 78px, rgba(74,130,40,.20) 78px 96px, rgba(56,102,32,.24) 96px 120px)}
+html[data-ui="retro"] .card{border:2px solid #0F0E0C;border-radius:0;
+  box-shadow:inset 0 0 0 2px #4B4941, inset 0 0 0 4px rgba(15,14,12,.55), 4px 4px 0 rgba(0,0,0,.4);
+  background-image:linear-gradient(rgba(255,248,230,.035), rgba(0,0,0,.07))}
+html[data-ui="retro"][data-theme="light"] .card{background-image:linear-gradient(rgba(255,252,240,.6), rgba(240,232,210,.45))}
+html[data-ui="retro"] .logo{font-family:"Press Start 2P","VT323",var(--font);letter-spacing:1px;line-height:1.7}
+html[data-ui="retro"] .tabbar button{font-size:10px;letter-spacing:1px;text-transform:uppercase}
+html[data-ui="retro"] .tabbar button.on{text-decoration:underline 2px;text-underline-offset:4px;color:var(--acc)}
+html[data-ui="retro"] h2::before{content:"\25C6  ";color:#7BC96F;font-size:.8em}   /* 星露谷菱形符 */
+
+/* ── pipboy · 终端大融合(辐射×TUI×打字机) ── */
+/* TUI 边框卡 + $ 提示符 + [] 选中态 + 打字机 logo + [按钮] 括号语汇; 扫描线/辉光/光标已有 */
+html[data-ui="pipboy"] .card{border:1px solid #2B4A2B;border-radius:2px;box-shadow:inset 0 0 26px rgba(34,255,85,.035)}
+html[data-ui="pipboy"] .logo{clip-path:inset(-12% 105% -12% 0);animation:pipType 2.2s steps(28) both}
+@keyframes pipType{to{clip-path:inset(-12% -2% -12% -2%)}}   /* v15: width动画会把.logo拉成全宽, flex下文字被拉散 */
+html[data-ui="pipboy"] h2::before{content:"$ ";color:#3FA34F;font-weight:400}
+html[data-ui="pipboy"] .tabbar button.on::before{content:"[";opacity:.7;margin-right:1px}
+html[data-ui="pipboy"] .tabbar button.on::after{content:"]";opacity:.7;margin-left:1px}
+html[data-ui="pipboy"] .btn{text-transform:uppercase;letter-spacing:1px;font-size:12px;border:1px solid #2B4A2B;
+  box-shadow:inset 0 0 0 1px #0A120A}
+html[data-ui="pipboy"] .btn::before{content:"[ ";opacity:.55}
+html[data-ui="pipboy"] .btn::after{content:" ]";opacity:.55}
+
+/* ── synthwave · 霓虹之夜增强: 铬字落日 + 星闪 ── */
+html[data-ui="synthwave"] .logo{font-family:"Orbitron",var(--font);letter-spacing:.16em;text-shadow:none;
+  background:linear-gradient(180deg,#FFF 18%,#8BE9FD 42%,#FF2D95 72%,#B967FF);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 0 14px rgba(255,45,149,.5))}
+html[data-ui="synthwave"] .page::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background:
+    radial-gradient(circle 1px at 6% 10%, #FFF 98%, transparent),
+    radial-gradient(circle 1.5px at 14% 22%, #FFF 98%, transparent),
+    radial-gradient(circle 1px at 22% 8%, #8BE9FD 98%, transparent),
+    radial-gradient(circle 2px at 31% 16%, #FFF 98%, transparent),
+    radial-gradient(circle 1px at 40% 6%, #FFF 98%, transparent),
+    radial-gradient(circle 1.5px at 48% 19%, #FFD319 98%, transparent),
+    radial-gradient(circle 1px at 57% 9%, #FFF 98%, transparent),
+    radial-gradient(circle 2px at 66% 14%, #FFF 98%, transparent),
+    radial-gradient(circle 1px at 74% 5%, #8BE9FD 98%, transparent),
+    radial-gradient(circle 1.5px at 83% 18%, #FFF 98%, transparent),
+    radial-gradient(circle 1px at 91% 8%, #FFF 98%, transparent),
+    radial-gradient(circle 2px at 96% 24%, #FFD319 98%, transparent);
+  animation:synTwk 3.6s ease-in-out infinite alternate}
+@keyframes synTwk{from{opacity:.3}to{opacity:1}}
+html[data-ui="synthwave"][data-theme="light"] .page::before{display:none}
+@media (prefers-color-scheme:light){
+  html[data-ui="synthwave"]:not([data-theme="dark"]) .page::before{display:none}}
+
+/* ── catppuccin · 奶油玻璃: 毛玻璃卡 + 粉彩渐变按钮 ── */
+html[data-ui="catppuccin"] .card{background:color-mix(in srgb, var(--srf) 84%, transparent);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border:1px solid rgba(205,214,244,.10);border-radius:var(--r)}
+html[data-ui="catppuccin"] .btn{background:linear-gradient(135deg,#89B4FA,#CBA6F7);color:#11111B;border:none;
+  box-shadow:0 2px 12px rgba(137,180,250,.28)}
+html[data-ui="catppuccin"] .btn.ghost{background:transparent;color:var(--tx);border:1px solid var(--line)}
+html[data-ui="catppuccin"] .chip{border-radius:999px}
+html[data-ui="catppuccin"] .tabbar button.on{color:#89B4FA}
+
+/* ── geist · 工程网格: 蓝图纪律, 阴影即边框 ── */
+html[data-ui="geist"] .page::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background-image:linear-gradient(rgba(120,120,128,.07) 1px,transparent 1px),
+                   linear-gradient(90deg,rgba(120,120,128,.07) 1px,transparent 1px);
+  background-size:44px 44px;
+  -webkit-mask-image:radial-gradient(85% 70% at 50% 26%, #000 22%, transparent 100%);
+  mask-image:radial-gradient(85% 70% at 50% 26%, #000 22%, transparent 100%)}
+html[data-ui="geist"] .tabbar button{letter-spacing:.05em;font-weight:500}
+html[data-ui="geist"] .tabbar button.on{box-shadow:inset 0 -2px 0 var(--acc)}
+html[data-ui="geist"] .card{border:1px solid var(--line);box-shadow:0 1px 2px rgba(0,0,0,.18)}
+
+@media (prefers-reduced-motion:reduce){
+  html[data-ui="pipboy"] .logo,html[data-ui="synthwave"] .page::before{animation:none}
+  #pfill::after,.browsecard,.vcard,.tcard,.page{animation:none}
+  .btn,.icbtn,.chip,.tabbar button{transition:none}
+}
+
+/* v17.1: 播放器内特效快切面板 */
+#fxPop{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%) translateY(-6px);min-width:158px;
+  background:var(--srf);border:1px solid var(--line);border-radius:12px;padding:6px;z-index:6;
+  box-shadow:0 10px 34px rgba(0,0,0,.5);display:none;opacity:0;transition:opacity .18s,transform .18s}
+#fxPop.open{display:block;opacity:1;transform:translateX(-50%) translateY(0)}
+#fxPop>div{padding:9px 14px;border-radius:8px;font-size:13px;color:var(--tx2);cursor:pointer;white-space:nowrap}
+#fxPop>div.on{background:var(--srf2);color:var(--acc);font-weight:600}
+
+/* ═══════ v18.2 · 全局 UI 融合层 ═══════ */
+/* 顶面主题光: 卡片顶部 7% 主题色渐变, 像被场景光源照亮 (background-image 叠加, 不动现有 background/box-shadow)
+   retro 排除 — 纸片风格不要渐变软化 */
+html:not([data-ui="retro"]) .card,
+.qpanel,.tcard,.dgroup,.browsecard{background-image:linear-gradient(180deg, color-mix(in srgb, var(--acc) 7%, transparent), transparent 42%)}
+/* 环境辉光: drop-shadow 不碰 box-shadow, 卡片被主题色氛围光包裹 (retro 排除) */
+html:not([data-ui="retro"]):not([data-ui="pipboy"]) .card{box-shadow:0 4px 16px rgba(0,0,0,.3),0 0 18px var(--cardglow)}   .rebuild .vcard{animation:none!important}   /* v19.1: 轮询重建不播入场动画 */
+
+/* v19.4: 下载历史 chip 防溢出(JS截短之外的CSS双保险) */
+#urlHist .chip{max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto}
+
+/* v19: drop-shadow(合成层大户)→box-shadow多层 */
+/* 场景浓厚三主题: 毛玻璃透出背景 */
+html[data-ui="synthwave"] .card{background:color-mix(in srgb, var(--srf) 90%, transparent);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}   /* v19.3: 底调实, 落日透出含蓄点 */
+html[data-ui="geist"] .card{background:color-mix(in srgb, var(--srf) 87%, transparent);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+html[data-ui="retro"] .card{background-color:color-mix(in srgb, #24231F 94%, transparent)}   /* 微透无 blur, 保像素锐度 */
+html[data-ui="mono"]{--cardglow:rgba(255,45,120,.06)}   /* mono 也来一点淡淡的粉光 */
+
+/* ═══════ v18.1 · 封面融合层: 封面底部融入底板 + 主题色环境辉光, 治"纸片感" ═══════ */
+:root{--cardglow:transparent}
+.vcard{box-shadow:0 4px 18px rgba(0,0,0,.35), 0 0 22px var(--cardglow)}
+.vcard .cov::after{content:"";position:absolute;left:0;right:0;bottom:0;height:32%;z-index:1;pointer-events:none;
+  background:linear-gradient(transparent, var(--srf))}   /* 封面→底板 渐变熔接 */
+html[data-ui="synthwave"]{--cardglow:rgba(255,45,149,.16)}
+html[data-ui="catppuccin"]{--cardglow:rgba(203,166,247,.14)}
+html[data-ui="pipboy"]{--cardglow:rgba(34,255,85,.12)}
+html[data-ui="geist"]{--cardglow:rgba(255,255,255,.05)}
+html[data-ui="mauto"]{--cardglow:rgba(124,140,248,.14)}
+
+/* ═══════ v18 · 播放器主题深融合 ═══════ */
+html[data-ui="catppuccin"] #pfill{background:linear-gradient(90deg,#CBA6F7,#89B4FA);box-shadow:0 0 14px rgba(203,166,247,.6)}
+html[data-ui="geist"] #pfill{background:#EDEDED;box-shadow:0 0 10px rgba(255,255,255,.3)}
+html[data-ui="geist"] #pctrl{background:rgba(16,16,16,.92);border-color:#2E2E2E}
+html[data-ui="geist"] #pctrl .icbtn{color:#C9C9C9}
+html[data-ui="geist"] #pctrl .icbtn.on{color:#fff;background:#262626}
+html[data-ui="pipboy"] #pCPlay{border-color:rgba(34,255,85,.45);background:rgba(4,14,5,.35)}
+html[data-ui="synthwave"] #pCPlay{border-color:rgba(255,45,149,.55);background:rgba(16,6,40,.35);box-shadow:0 0 18px rgba(255,45,149,.35)}
+html[data-ui="catppuccin"] #pCPlay{border-color:rgba(203,166,247,.55);background:rgba(30,30,46,.4)}
+html[data-ui="retro"] #pCPlay{border-radius:0;border:2px solid #0F0E0C;box-shadow:inset 0 0 0 2px #4B4941;background:rgba(24,23,19,.4)}
+html[data-ui="retro"] #pfill{background:repeating-linear-gradient(90deg,#7BC96F 0 9px,#5E9D34 9px 11px);box-shadow:none}
+
+/* v17.2: 睡眠面板(同 fxPop 模式, 顶部弹出) */
+#sleepPop{position:absolute;top:calc(100% + 10px);left:50%;transform:translateX(-50%) translateY(-6px);min-width:130px;
+  background:var(--srf);border:1px solid var(--line);border-radius:12px;padding:6px;z-index:6;
+  box-shadow:0 10px 34px rgba(0,0,0,.5);display:none;opacity:0;transition:opacity .18s,transform .18s}
+#sleepPop.open{display:block;opacity:1;transform:translateX(-50%) translateY(0)}
+#sleepPop>div{padding:9px 14px;border-radius:8px;font-size:13px;color:var(--tx2);cursor:pointer;white-space:nowrap}
+#sleepPop>div.on{background:var(--srf2);color:var(--acc);font-weight:600}
+
+/* v17.2: 中央播放键 */
+#pCPlay{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:68px;height:68px;border-radius:50%;
+  background:rgba(10,10,14,.22);border:1px solid rgba(255,255,255,.12);color:#fff;z-index:4;   /* v17.4: 常显状态灯, 透明度再降 */
+  display:flex;align-items:center;justify-content:center;background-clip:padding-box;
+  transition:opacity .25s,transform .18s}
+#pCPlay:active{transform:translate(-50%,-50%) scale(.9)}
+#pCPlay .ic{width:32px;height:32px}
+#pCPlay.hide{opacity:0;pointer-events:none}
+#pmodal:has(#pctrl.hide) #pCPlay{opacity:0;pointer-events:none}   /* v17.5: 显隐100%跟随控制条, 单击/pause等野路径也罩 */
+
+/* v17.4: 播放器打开期间直接隐藏场景层 — 全屏被不透明 pmodal 盖死本就看不清; fixed 层(video 解码层冲突黑屏的元凶, retro 静态层也中招)一律摘除 */
+body.pm-open::before,body.pm-open::after,body.pm-open .page::before{display:none!important}
+
+/* v15: 窄屏紧凑 — 控制条/头部按钮缩小, pipboy括号收起, 最大化不再被挤出屏 */
+@media (max-width:560px){
+  #pctrl{padding:6px 8px calc(8px + env(safe-area-inset-bottom));gap:2px}
+  #pctrl .icbtn{width:32px;height:32px;min-width:32px;border-radius:8px}
+  #pctrl .icbtn.txt{font-size:10px;padding:0 4px}
+  #phead .icbtn{width:32px;height:32px;min-width:32px}
+  html[data-ui="pipboy"] .btn::before,html[data-ui="pipboy"] .btn::after{content:none}
+}
+@media (max-width:380px){
+  #pctrl .icbtn{width:28px;height:28px;min-width:28px}
+  #phead .icbtn{width:28px;height:28px;min-width:28px}
+}
+
+/* ═══════ v16 · 微交互炫酷包 (2026 趋势: 即时反馈/spring按压/分层入场; 全 transform+opacity, GPU合成) ═══════ */
+
+/* 按压反馈: 橡皮筋弹簧 */
+.btn,.icbtn,.chip,.tabbar button{transition:transform .18s cubic-bezier(.34,1.56,.64,1),box-shadow .2s,background .2s,color .2s,border-color .2s,filter .2s}
+.btn:active,.icbtn:active,.chip:active,.tabbar button:active{transform:scale(.93)}
+.tabbar button:active{transform:scale(.9)}
+
+/* 页面切换: 淡入+上浮(覆盖旧 fadein) */
+@keyframes pageIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.page{animation:pageIn .32s cubic-bezier(.22,1,.36,1)}
+
+/* 输入框聚焦: 主题色光环 */
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--acc)!important;box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 22%,transparent)}
+
+/* 播放器进度条: 流光扫过(元素稳定, 动画不随重绘重启) */
+#pfill{overflow:hidden}
+#pfill::after{content:"";position:absolute;top:0;bottom:0;width:60%;left:0;
+  background:linear-gradient(100deg,transparent 15%,rgba(255,255,255,.55) 50%,transparent 85%);
+  transform:translateX(-110%);animation:pShine 2.6s cubic-bezier(.4,0,.2,1) infinite}
+@keyframes pShine{55%,100%{transform:translateX(280%)}}
+
+/* 低频列表 stagger 入场: 用户主动触发的目录/媒体库刷新 */
+@keyframes riseIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+.browsecard,.vcard,.tcard{animation:riseIn .4s cubic-bezier(.22,1,.36,1) both}
+.browsecard:nth-child(2),.vcard:nth-child(2),.tcard:nth-child(2){animation-delay:.04s}
+.browsecard:nth-child(3),.vcard:nth-child(3),.tcard:nth-child(3){animation-delay:.08s}
+.browsecard:nth-child(4),.vcard:nth-child(4),.tcard:nth-child(4){animation-delay:.12s}
+.browsecard:nth-child(5),.vcard:nth-child(5),.tcard:nth-child(5){animation-delay:.16s}
+.browsecard:nth-child(6),.vcard:nth-child(6),.tcard:nth-child(6){animation-delay:.2s}
+
+/* ── 组件层(全主题; mono 的 --acc/--edge 默认值使其视觉不变) ── */
+.btn{background:var(--acc);color:var(--acc-tx)}
+.btn.ghost{background:transparent;color:var(--tx);border:1px solid var(--line)}
+.chip.on{background:var(--acc);border-color:var(--acc);color:var(--acc-tx)}
+.card{box-shadow:var(--sh),0 0 0 1px var(--edge)}
+::selection{background:var(--acc);color:var(--acc-tx)}
+input:focus-visible,select:focus-visible,button:focus-visible{outline:none;
+  border-color:var(--acc)!important;box-shadow:0 0 0 3px var(--ring)}
+.tabbar button{transition:transform .12s,color var(--dur),opacity var(--dur)}
+.tabbar button.on{color:var(--acc);font-weight:600}
+.cur{background:var(--pink)}
+
+/* ── 动效层: 只动 transform/opacity, reduce 一刀切 ── */
+@media (prefers-reduced-motion:no-preference){
+  .page.active{animation:pgIn .24s cubic-bezier(.2,.7,.3,1) both}
+  @keyframes pgIn{from{opacity:0;transform:translateY(10px)}}
+  .vcard,.qitem,.plrow,.dfile,.tcard,.chitem,.credrow,.logrow{animation:rise .26s ease both}
+  @keyframes rise{from{opacity:0;transform:translateY(12px)}}
+  .btn{transition:transform .12s,box-shadow var(--dur),opacity var(--dur)}
+  .btn:hover{transform:translateY(-1px)}
+  .btn:active{transform:translateY(1px) scale(.98);transition-duration:.05s}
+  .chip{transition:transform .12s,background var(--dur),color var(--dur)}
+  .chip:active{transform:scale(.94)}
+  .tabbar button:active{transform:scale(.9)}
+  .cov img,.pv img{background:linear-gradient(100deg,var(--srf2) 40%,var(--srf3) 50%,var(--srf2) 60%);
+    background-size:200% 100%;animation:shim 1.3s linear infinite}
+  @keyframes shim{to{background-position:-200% 0}}
+  #gtoast.show{animation:tin .22s ease both}
+  @keyframes tin{from{opacity:0;transform:translate(-50%,12px)}}
+  html[data-ui="pipboy"] .logo b::after{animation:uiblink 1.1s steps(1) infinite}
+  .track:hover{height:8px}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+}
+
+
+/* ═══════ 播放器 v8.2 · 全面重设计 (纯样式层, JS 逻辑零改动) ═══════ */
+body{font-family:var(--font)}
+#fxCanvas{position:absolute;z-index:2;pointer-events:none;display:none;background:#000}
+#pctrl{left:10px;right:10px;bottom:calc(10px + env(safe-area-inset-bottom));
+  background:rgba(10,10,14,.72);backdrop-filter:blur(16px) saturate(1.4);-webkit-backdrop-filter:blur(16px) saturate(1.4);
+  border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:10px 12px 8px;
+  box-shadow:0 8px 30px rgba(0,0,0,.5)}
+#pctrl .icbtn{width:38px;height:38px;border-radius:10px;transition:background .15s,transform .1s,color var(--dur)}
+#pctrl .icbtn:hover{background:rgba(255,255,255,.1)}
+#pctrl .icbtn:active{transform:scale(.86)}
+#pctrl .icbtn.txt{font-size:11px;font-weight:700}
+#pctrl .icbtn.on{color:var(--pink)}
+#pfill{background:linear-gradient(90deg,var(--pink),color-mix(in srgb,var(--pink) 55%,#fff));
+  box-shadow:0 0 10px color-mix(in srgb,var(--pink) 70%,transparent)}
+#pknob{width:16px;height:16px;border:3px solid var(--pink);
+  box-shadow:0 2px 10px rgba(0,0,0,.6),0 0 8px color-mix(in srgb,var(--pink) 60%,transparent)}
+#pbar:hover #pfill,#pbar:hover #pbuf{height:8px}
+#pnext{background:rgba(14,14,20,.85);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border:1px solid rgba(255,255,255,.12);border-radius:14px;box-shadow:0 10px 34px rgba(0,0,0,.5)}
+#pthumbImg{border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,.2);
+  box-shadow:0 8px 26px rgba(0,0,0,.55)}
+.eq i{background:var(--pink)}
+html[data-ui="synthwave"] #pctrl{border-color:rgba(0,240,255,.28);box-shadow:0 8px 30px rgba(0,0,0,.5),0 0 18px rgba(255,45,149,.18)}
+html[data-ui="synthwave"] #pfill{box-shadow:0 0 16px var(--pink)}
+html[data-ui="pipboy"] #pctrl{border-color:rgba(60,255,110,.28)}html[data-ui="catppuccin"] #pctrl,#pnext{border-radius:18px}
+
+
+/* ═══ 封面/缩略图主题自适应 (v9.1: 除视频画面外皆归主题) ═══ */
+.cov img,.pv img,#pthumbImg img{transition:transform .3s ease,filter .3s ease}
+.vcard:hover .cov img,.pv:hover img{transform:scale(1.045)}
+html[data-ui="synthwave"] .cov img,html[data-ui="synthwave"] .pv img,
+html[data-ui="synthwave"] .cthumb,html[data-ui="synthwave"] #pthumbImg img{
+  filter:saturate(1.22) contrast(1.07)}
+html[data-ui="synthwave"] .vcard:hover .cov img{filter:saturate(1.35) contrast(1.1) brightness(1.05)}
+html[data-ui="pipboy"] .cov img,html[data-ui="pipboy"] .pv img,html[data-ui="pipboy"] .cthumb{
+  filter:sepia(1) hue-rotate(55deg) saturate(2.2) brightness(.82) contrast(1.05)}
+html[data-ui="retro"] .cov img,html[data-ui="retro"] .pv img,html[data-ui="retro"] .cthumb{
+  filter:contrast(.96) sepia(.2) saturate(.9)}
+html[data-ui="catppuccin"] .cov img,html[data-ui="catppuccin"] .pv img,html[data-ui="catppuccin"] .cthumb{
+  filter:saturate(1.09) brightness(1.03)}
+html[data-ui="geist"] .cov img,html[data-ui="geist"] .pv img,html[data-ui="geist"] .cthumb{
+  filter:saturate(1.05) contrast(1.02)}
+
+/* ═══ 播放列表折叠分组 (v8.5, 与媒体库同款交互) ═══ */
+.plgrp{cursor:pointer}
+.plchev{display:inline-block;margin-left:auto;padding:0 4px;color:var(--tx3);
+  font-size:12px;transition:transform var(--dur);align-self:center}
+.plgrp.open .plchev{transform:rotate(180deg)}
+.plparts{display:none}
+.plparts.open{display:block}
+.plparts .plrow:first-child{margin-top:2px}
+.plsub{padding-left:34px}
+.plsub .plth{width:36px;height:22px}
+.plgrp .plp{flex:none}
+
+
+/* ═══════ v9.1 · 主题动态场景(仅 transform/opacity, 合成器路径) ═══════ */
+/* synthwave: 前景网格滚动层(body::after, z 与 pipboy 扫描线错开使用) */
+html[data-ui="synthwave"] body::after{content:"";position:fixed;left:0;right:0;top:0;
+  height:calc(100% + 112px);z-index:-1;pointer-events:none;
+  background:repeating-linear-gradient(0deg,rgba(255,45,149,.07) 0 1px,transparent 1px 56px)}
+@media (prefers-reduced-motion:no-preference){
+  html[data-ui="synthwave"] body::after{animation:synRoll 3.2s linear infinite}
+  @keyframes synRoll{to{transform:translateY(56px)}}
+  html[data-ui="synthwave"] body::before{animation:synPulse 5.5s ease-in-out infinite}
+  @keyframes synPulse{50%{opacity:.82}}
+  html[data-ui="synthwave"] .btn{animation:synBtn 2.8s ease-in-out infinite}
+  @keyframes synBtn{50%{box-shadow:0 0 22px rgba(255,45,149,.65)}}
+
+  /* geist: 三色极光漂移 + 主按钮扫光 */
+  html[data-ui="geist"] body::before{content:"";position:fixed;inset:-20%;z-index:-1;pointer-events:none;
+    background:
+      radial-gradient(38% 30% at 22% 18%,rgba(0,114,245,.16),transparent 70%),
+      radial-gradient(34% 28% at 82% 78%,rgba(255,77,141,.10),transparent 70%),
+      radial-gradient(30% 26% at 65% 25%,rgba(62,207,142,.08),transparent 70%)}
+  html[data-ui="geist"] body::before{animation:geistDrift 26s ease-in-out infinite alternate}
+  @keyframes geistDrift{to{transform:translate3d(4%,3%,0) scale(1.06)}}
+  html[data-ui="geist"] .btn{background-image:linear-gradient(110deg,transparent 40%,rgba(255,255,255,.22) 50%,transparent 60%);
+    background-size:250% 100%;background-position:130% 0;transition:background-position .7s ease,transform .12s}
+  html[data-ui="geist"] .btn:hover{background-position:-130% 0}
+
+  /* catppuccin:  pastel 云雾慢漂 */
+  html[data-ui="catppuccin"] body::before{content:"";position:fixed;inset:-20%;z-index:-1;pointer-events:none;
+    background:
+      radial-gradient(36% 30% at 25% 22%,rgba(203,166,247,.14),transparent 70%),
+      radial-gradient(32% 26% at 78% 72%,rgba(245,194,231,.12),transparent 70%),
+      radial-gradient(28% 24% at 60% 30%,rgba(166,227,161,.09),transparent 70%)}
+  html[data-ui="catppuccin"] body::before{animation:catDrift 30s ease-in-out infinite alternate}
+  @keyframes catDrift{to{transform:translate3d(-4%,4%,0) scale(1.08)}}
+
+  /* pipboy: 扫描线微闪 + 慢滚 */
+  html[data-ui="pipboy"] body::after{animation:pipFlick 4s steps(12) infinite,pipRoll 9s linear infinite}
+  @keyframes pipFlick{0%,100%{opacity:1}50%{opacity:.94}}
+  @keyframes pipRoll{to{transform:translateY(3px)}}
+}
+
+
+/* ═══ v10 主题抛光: 卡片悬浮/输入过渡 ═══ */
+@media (prefers-reduced-motion:no-preference){
+  .card,.vcard{transition:transform .18s ease,box-shadow var(--dur)}
+  .card:hover{transform:translateY(-2px)}
+  .vcard:hover{transform:translateY(-3px)}
+  input,select{transition:border-color var(--dur),box-shadow var(--dur)}
+}
+
+
+/* ═══════ v11 · 播放器主题深化(只染界面层, 视频画面依旧归着色器) ═══════ */
+/* synthwave: 霓虹操作台 */
+html[data-ui="synthwave"] #pctrl{border-color:rgba(0,240,255,.35);background:rgba(16,6,40,.8)}
+html[data-ui="synthwave"] #pfill{background:linear-gradient(90deg,#FF2D95,#00F0FF);box-shadow:0 0 14px rgba(255,45,149,.6)}
+html[data-ui="synthwave"] #pknob{border-color:#00F0FF;box-shadow:0 0 12px rgba(0,240,255,.85)}
+html[data-ui="synthwave"] #pctrl .icbtn.on{color:#00F0FF;text-shadow:0 0 8px rgba(0,240,255,.8)}
+html[data-ui="synthwave"] .ptime{text-shadow:0 0 6px rgba(185,103,255,.55)}
+html[data-ui="synthwave"] #ptitle{text-shadow:0 0 10px rgba(255,45,149,.5)}html[data-ui="synthwave"] #pnext{border:1px solid rgba(0,240,255,.35)}
+
+/* pipboy: 终端绿 */
+html[data-ui="pipboy"] #pctrl{background:rgba(4,14,5,.85);border-color:rgba(60,255,110,.4);border-radius:2px}
+html[data-ui="pipboy"] #pfill{background:linear-gradient(90deg,#22FF55,#4AFF77);box-shadow:0 0 12px rgba(34,255,85,.7)}
+html[data-ui="pipboy"] #pknob{border-color:#22FF55;box-shadow:0 0 10px rgba(34,255,85,.9)}
+html[data-ui="pipboy"] #pctrl .icbtn{border-radius:2px}
+html[data-ui="pipboy"] #pctrl .icbtn.on{color:#22FF55;text-shadow:0 0 8px rgba(34,255,85,.8)}
+html[data-ui="pipboy"] .ptime,#pTime{text-shadow:0 0 6px rgba(60,255,110,.5)}
+html[data-ui="pipboy"] #ptitle{text-shadow:0 0 8px rgba(60,255,110,.55)}html[data-ui="pipboy"] #pnext{border:1px solid rgba(60,255,110,.35)}
+
+/* retro: Win95 媒体播放器(斜面浮雕) */
+html[data-ui="retro"] #pctrl{background:var(--srf);border-radius:0;box-shadow:none;
+  backdrop-filter:none;-webkit-backdrop-filter:none;border:2px solid;
+  border-color:color-mix(in srgb,var(--tx) 50%,transparent) var(--line2) var(--line2) color-mix(in srgb,var(--tx) 50%,transparent)}
+html[data-ui="retro"] #pctrl .icbtn{border-radius:0;box-shadow:inset -2px -2px 0 rgba(0,0,0,.35),inset 2px 2px 0 rgba(255,255,255,.28)}
+html[data-ui="retro"] #pctrl .icbtn:active{transform:none;box-shadow:inset 2px 2px 0 rgba(0,0,0,.35),inset -2px -2px 0 rgba(255,255,255,.14)}
+html[data-ui="retro"] #pctrl .icbtn.on{color:var(--acc);background:rgba(0,0,0,.14)}
+html[data-ui="retro"] #pbar{border:2px solid;border-color:var(--line2) rgba(255,255,255,.32) rgba(255,255,255,.32) var(--line2);border-radius:0;background:rgba(0,0,0,.22)}
+html[data-ui="retro"] #pfill{background:var(--acc);box-shadow:none;border-radius:0}
+html[data-ui="retro"] #pknob{width:10px;height:20px;border-radius:0;border:2px solid;background:var(--srf);
+  border-color:rgba(255,255,255,.5) var(--line2) var(--line2) rgba(255,255,255,.5);box-shadow:none}html[data-ui="retro"] #pnext{border:2px solid;border-radius:0;
+  border-color:color-mix(in srgb,var(--tx) 40%,transparent) var(--line2) var(--line2) color-mix(in srgb,var(--tx) 40%,transparent)}html[data-ui="geist"] #pctrl .icbtn.on{color:var(--acc)}
+html[data-ui="geist"] #pfill{box-shadow:0 0 8px rgba(0,114,245,.4)}
+
+/* catppuccin: 奶油圆角 + 薰衣草悬停 */
+html[data-ui="catppuccin"] #pctrl{border-radius:20px;background:rgba(24,24,37,.72)}
+html[data-ui="catppuccin"] #pctrl .icbtn{border-radius:12px}
+html[data-ui="catppuccin"] #pctrl .icbtn:hover{background:rgba(203,166,247,.16)}
+html[data-ui="catppuccin"] #pctrl .icbtn.on{color:#CBA6F7}
+html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"] #pnext{border-radius:18px}
+
 </style>
 </head>
-<body>
+<body data-ver="v15.1-20261024">
 
 <!-- SVG 图标库(内联 · 零外部资源) -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -3702,13 +4274,15 @@ input[type=text]::placeholder{color:var(--tx3)}
   <button class="on" data-tab="dl"><svg class="ic"><use href="#i-down"/></svg><span data-i18n="tabDl">下载</span></button>
   <button data-tab="task"><svg class="ic"><use href="#i-inbox"/></svg><span data-i18n="tabTask">任务</span></button>
   <button data-tab="lib"><svg class="ic"><use href="#i-lib"/></svg><span data-i18n="tabLib">媒体库</span></button>
-  <button data-tab="folder"><svg class="ic"><use href="#i-folder"/></svg><span data-i18n="tabFolder">文件夹</span></button>
+  <button data-tab="settings"><svg class="ic"><use href="#i-gear"/></svg><span data-i18n="tabSet">设置</span></button>
+      <button data-tab="folder"><svg class="ic"><use href="#i-folder"/></svg><span data-i18n="tabFolder">文件夹</span></button>
 </nav>
 
 <!-- 下载 -->
 <section class="page active" id="page-dl">
   <div class="card">
-    <input type="text" id="url" data-i18n-ph="urlPh" placeholder="粘贴视频链接" autocomplete="off">
+    <textarea id="url" rows="2" data-i18n-ph="dlBatchTip" placeholder="支持多行批量: 每行一个链接" style="width:100%;padding:9px 12px;border-radius:var(--r);border:1px solid var(--line);background:var(--srf2);color:var(--tx);font-size:13px;resize:vertical"></textarea>
+  <div id="urlHist" style="flex-wrap:wrap;gap:6px;margin-top:8px;display:none"></div>
     <div class="row">
       <button class="btn" style="flex:1" onclick="parse()" data-i18n="parse">解析</button>
       <button class="btn ghost" onclick="pasteFromClipboard()" title="粘贴">
@@ -3750,29 +4324,8 @@ input[type=text]::placeholder{color:var(--tx3)}
     <div class="row"><button class="btn" style="width:100%" onclick="download()" id="dlBtn" data-i18n="dl">下载所选</button></div>
   </div>
   <h2 style="margin-top:26px"><svg class="ic" style="width:12px;height:12px;vertical-align:-1px"><use href="#i-gear"/></svg> <span data-i18n="settings">设置</span></h2>
-  <div class="card">
-    <div class="meta" style="margin-bottom:8px" data-i18n="sessHint">站点登录 cookie（可选）</div>
-    <input type="text" id="cfgCookie" data-i18n-ph="sessPh" placeholder="粘贴 cookie" autocomplete="off" style="-webkit-text-security:disc">
-    <div class="row">
-      <button class="btn sm" onclick="saveSess()" data-i18n="save">保存</button>
-      <span class="meta" id="sessState"></span>
-    </div>
-    <div class="meta" style="margin-top:12px;word-break:break-all;overflow-wrap:anywhere" id="cfgMeta"></div>
-    <div class="row">
-      <button class="btn ghost sm" onclick="importM3u()" data-i18n="m3uImport">导入 m3u 队列</button>
-      <input type="file" id="m3uFile" accept=".m3u,.m3u8" style="display:none" onchange="importM3uFile(this)">
-    </div>
-    <div class="meta" style="margin-top:12px" id="diagMeta"></div>
-  </div>
-  <h2 style="margin-top:26px"><span data-i18n="access">手机访问与安装</span></h2>
-  <div class="card">
-    <div class="meta" id="lanMeta"></div>
-    <div class="row">
-      <button class="btn ghost sm" onclick="showInstall()"><span data-i18n="install">装到桌面</span></button>
-      <span class="meta" id="installHint"></span>
-    </div>
-  </div>
-  <h2 style="margin-top:26px"><span data-i18n="creds">站点凭据</span></h2>
+    <h2 style="margin-top:26px"><span data-i18n="access">手机访问与安装</span></h2>
+    <h2 style="margin-top:26px"><span data-i18n="creds">站点凭据</span></h2>
   <div class="card">
     <div class="meta" style="margin-bottom:8px" data-i18n="credHint">每条 = 一个站点的 cookie。域名留空 = 对所有站生效。填 "KEY=VALUE; KEY2=V2" 或整串 cookie。</div>
     <div id="credList"></div>
@@ -3786,39 +4339,11 @@ input[type=text]::placeholder{color:var(--tx3)}
       <span class="meta" id="credMeta"></span>
     </div>
   </div>
-  <h2 style="margin-top:26px"><span data-i18n="logs">运行日志</span></h2>
-  <div class="card">
-    <div class="row" style="margin-top:0">
-      <button class="btn ghost sm" onclick="showLog()"><span data-i18n="refresh">刷新</span></button>
-      <span class="meta" id="logMeta"></span>
-    </div>
-    <div id="logBox" class="logbox"></div>
-  </div>
-  <h2 style="margin-top:26px"><span data-i18n="subStyle">字幕样式</span></h2>
-  <div class="card">
-    <div class="row" style="margin-top:0">
-      <span class="meta" style="width:62px;flex:none" data-i18n="subSize">字号</span>
-      <input type="range" id="subSize" min="12" max="36" step="1" style="flex:1;min-width:0;accent-color:currentColor" oninput="setSubStyle()">
-      <span class="meta" id="subSizeVal" style="width:34px;flex:none;text-align:right"></span>
-    </div>
-    <div class="row">
-      <span class="meta" style="width:62px;flex:none" data-i18n="subBg">背景</span>
-      <span class="chips" style="flex:1;min-width:0;padding:0;flex-wrap:wrap">
-        <span class="chip" data-subbg="shadow" data-i18n="subBgShadow">描边</span>
-        <span class="chip" data-subbg="solid" data-i18n="subBgSolid">黑底</span>
-        <span class="chip" data-subbg="white" data-i18n="subBgWhite">白底</span>
-      </span>
-    </div>
-    <div class="row">
-      <span class="meta" style="width:62px;flex:none" data-i18n="subPos">位置</span>
-      <span class="chips" style="flex:1;min-width:0;padding:0;flex-wrap:wrap">
-        <span class="chip" data-subpos="top" data-i18n="subPosTop">顶部</span>
-        <span class="chip" data-subpos="middle" data-i18n="subPosMid">居中</span>
-        <span class="chip" data-subpos="bottom" data-i18n="subPosBottom">底部</span>
-      </span>
-    </div>
-  </div>
-</section>
+  
+    
+  
+  <h2 style="margin-top:26px"><span data-i18n="fxTitle">画质特效</span></h2>
+  </section>
 
 <!-- 任务 -->
 <section class="page" id="page-task">
@@ -3879,7 +4404,118 @@ input[type=text]::placeholder{color:var(--tx3)}
 <!-- 文件夹浏览 -->
 <section class="page" id="page-folder">
   <div class="crumbs" id="crumbs"></div>
+  <input id="foldFilter" data-i18n-ph="bFilter" placeholder="过滤文件…"
+         style="width:100%;margin:6px 0 2px;padding:9px 12px;border-radius:var(--r);border:1px solid var(--line);background:var(--srf2);color:var(--tx);outline:none;font-size:13px">
   <div id="browseList"></div>
+</section>
+
+<section class="page" id="page-settings">
+  <h2 style="margin:4px 0 10px" data-i18n="tabSet">设置</h2>
+<h2 style="margin-top:26px"><span data-i18n="uiStyle">界面风格</span></h2>
+  <div class="card">
+    <div class="row" style="margin-top:0">
+      <span class="chips" style="flex:1;min-width:0;padding:0;flex-wrap:wrap">
+        <span class="chip" data-uiopt="mono" data-i18n="uiMono">单色</span>
+        <span class="chip" data-uiopt="geist" data-i18n="uiGeist">极简</span>
+        <span class="chip" data-uiopt="catppuccin" data-i18n="uiCat">柔和</span>
+        <span class="chip" data-uiopt="synthwave" data-i18n="uiSynth">复古未来</span>
+        <span class="chip" data-uiopt="retro" data-i18n="uiRetro">复古</span>
+        <span class="chip" data-uiopt="pipboy" data-i18n="uiPip">终端</span>
+        <span class="chip" data-uiopt="mauto" data-i18n="uiMauto" title="跟随视频主色实时换色">自适应</span>
+      </span>
+    </div>
+    <div class="meta" style="margin-top:8px" data-i18n="uiHint">界面皮肤, 明暗跟随右上角主题按钮。</div>
+  </div>
+  
+<div class="card">
+    <div class="meta" style="margin-bottom:8px" data-i18n="sessHint">站点登录 cookie（可选）</div>
+    <input type="text" id="cfgCookie" data-i18n-ph="sessPh" placeholder="粘贴 cookie" autocomplete="off" style="-webkit-text-security:disc">
+    <div class="row">
+      <button class="btn sm" onclick="saveSess()" data-i18n="save">保存</button>
+      <span class="meta" id="sessState"></span>
+    </div>
+    <div class="meta" style="margin-top:12px;word-break:break-all;overflow-wrap:anywhere" id="cfgMeta"></div>
+    <div class="row">
+      <button class="btn ghost sm" onclick="importM3u()" data-i18n="m3uImport">导入 m3u 队列</button>
+      <input type="file" id="m3uFile" accept=".m3u,.m3u8" style="display:none" onchange="importM3uFile(this)">
+    </div>
+    <div class="meta" style="margin-top:12px" id="diagMeta"></div>
+  </div>
+
+<div class="card">
+    <div class="meta" id="lanMeta"></div>
+    <div class="row">
+      <button class="btn ghost sm" onclick="showInstall()"><span data-i18n="install">装到桌面</span></button>
+      <span class="meta" id="installHint"></span>
+    </div>
+  </div>
+
+<div class="card">
+    <div class="row" style="margin-top:0">
+      <span class="meta" style="width:62px;flex:none" data-i18n="subSize">字号</span>
+      <input type="range" id="subSize" min="12" max="36" step="1" style="flex:1;min-width:0;accent-color:currentColor" oninput="setSubStyle()">
+      <span class="meta" id="subSizeVal" style="width:34px;flex:none;text-align:right"></span>
+    </div>
+    <div class="row">
+      <span class="meta" style="width:62px;flex:none" data-i18n="subBg">背景</span>
+      <span class="chips" style="flex:1;min-width:0;padding:0;flex-wrap:wrap">
+        <span class="chip" data-subbg="shadow" data-i18n="subBgShadow">描边</span>
+        <span class="chip" data-subbg="solid" data-i18n="subBgSolid">黑底</span>
+        <span class="chip" data-subbg="white" data-i18n="subBgWhite">白底</span>
+      </span>
+    </div>
+    <div class="row">
+      <span class="meta" style="width:62px;flex:none" data-i18n="subPos">位置</span>
+      <span class="chips" style="flex:1;min-width:0;padding:0;flex-wrap:wrap">
+        <span class="chip" data-subpos="top" data-i18n="subPosTop">顶部</span>
+        <span class="chip" data-subpos="middle" data-i18n="subPosMid">居中</span>
+        <span class="chip" data-subpos="bottom" data-i18n="subPosBottom">底部</span>
+      </span>
+    </div>
+  </div>
+
+<div class="card">
+    <div class="row" style="margin-top:0">
+      <span class="meta" style="width:62px;flex:none" data-i18n="fxLabel">特效</span>
+      <select id="fxSel" class="qsel" style="flex:1;min-width:0">
+        <option value="off" data-i18n="fxOff">关闭</option>
+        <option value="crt" data-i18n="fxCrt">CRT 电视</option>
+        <option value="vhs" data-i18n="fxVhs">VHS 录像</option>
+        <option value="film" data-i18n="fxFilm">胶片颗粒</option>
+        <option value="neon" data-i18n="fxNeon">霓虹辉光</option>
+      </select>
+    </div>
+    <div class="meta" style="margin-top:8px" data-i18n="fxHint">GPU 后处理, 发热或卡顿请关闭。</div>
+  </div>
+
+<div class="card">
+    <div class="row" style="margin-top:0">
+      <button class="btn ghost sm" onclick="showLog()"><span data-i18n="refresh">刷新</span></button>
+      <span class="meta" id="logMeta"></span>
+    </div>
+    <div id="logBox" class="logbox"></div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <div class="qh" style="border:none;padding-bottom:4px"><span data-i18n="setSleep">睡眠定时</span></div>
+    <div style="opacity:.65;font-size:12px;margin:2px 0 8px" data-i18n="setSleepHint">到点自动暂停</div>
+    <div class="row" id="sleepRow" style="gap:6px;flex-wrap:wrap">
+      <button class="chip" data-min="0" data-i18n="sOff">关</button>
+      <button class="chip" data-min="15">15分钟</button>
+      <button class="chip" data-min="30">30分钟</button>
+      <button class="chip" data-min="45">45分钟</button>
+      <button class="chip" data-min="60">60分钟</button>
+      <span id="sleepState" style="font-size:12px;opacity:.7;align-self:center"></span>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <div class="qh" style="border:none;padding-bottom:4px"><span data-i18n="setRecent">最近播放</span></div>
+    <div id="recentList"></div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <div class="qh" style="border:none;padding-bottom:4px"><span data-i18n="setStats">统计</span></div>
+    <div id="statsBody"></div>
+  </div>
 </section>
 
 <div id="gtoast"></div>
@@ -3932,7 +4568,8 @@ input[type=text]::placeholder{color:var(--tx3)}
 
 <!-- 播放器(沉浸式恒暗) -->
 <div id="pmodal">
-  <div id="pstage">
+  <button id="pCPlay" aria-label="播放/暂停"><svg class="ic"><use id="pCPlayUse" href="#i-play"/></svg></button>
+<div id="pstage">
     <video id="pvideo" playsinline autoplay></video>
     <button id="pTap" style="display:none;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
       z-index:6;width:72px;height:72px;border-radius:50%;border:1px solid rgba(255,255,255,.3);
@@ -3956,23 +4593,12 @@ input[type=text]::placeholder{color:var(--tx3)}
       </div>
       <div class="hrow hrow2">
         <button class="icbtn lbl" id="pCC" style="display:none" title="字幕">CC</button>
-        <button class="icbtn lbl" id="pChap" title="章节"><svg class="ic"><use href="#i-mark"/></svg><span>章节</span></button>
         <button class="icbtn lbl" id="pList" title="播放列表"><svg class="ic"><use href="#i-clist"/></svg><span>列表</span></button>
         <button class="icbtn lbl" id="pQueue" title="队列"><svg class="ic"><use href="#i-queue"/></svg><span>队列</span></button>
-      </div>
-    </div>
-    <div id="chapPanel">
-      <div class="qh"><span data-i18n="chapters">章节</span><span class="spacer"></span>
-        <span id="chapMeta" style="font-weight:400;opacity:.6"></span>
-        <button class="icbtn" id="chapClose" style="width:28px;height:28px;background:rgba(255,255,255,.1)">
-          <svg class="ic"><use href="#i-x"/></svg></button>
-      </div>
-      <div class="chlist" id="chapList"></div>
-      <div style="padding:9px 12px;border-top:1px solid rgba(255,255,255,.1);display:flex;gap:7px">
-        <button class="btn ghost sm" id="chapAdd" style="flex:1;border-color:rgba(255,255,255,.16);color:#bbb"
-                data-i18n="chAdd">在当前位置标记</button>
-        <button class="btn ghost sm" id="chapM3u" style="border-color:rgba(255,255,255,.16);color:#bbb"
-                data-i18n="chExport">导出 m3u</button>
+        <button class="icbtn lbl" id="pSleep" title="睡眠定时"><svg class="ic"><use href="#i-moon"/></svg><span>Zz</span></button>
+        <div id="sleepPop"></div>
+        <button class="icbtn txt" id="pFx" title="画质特效"><svg class="ic" style="width:15px;height:15px"><use href="#i-theme"/></svg>FX</button>
+        <div id="fxPop"></div>
       </div>
     </div>
     <div id="phint">
@@ -3991,15 +4617,15 @@ input[type=text]::placeholder{color:var(--tx3)}
         <span id="pTime" class="ptime"><b>0:00</b> <span>/ 0:00</span></span>
         <div id="pbar"><div class="track"></div><div id="pbuf"></div><div id="pfill"></div><div id="pknob"></div>
           <span class="abmark" id="abA"></span><span class="abmark" id="abB"></span>
-          <span id="chapMarks"></span></div>
+          </div>
       </div>
       <div class="prow">
         <button class="icbtn" id="pPrev"><svg class="ic"><use href="#i-prev"/></svg></button>
         <button class="icbtn" id="pNextB"><svg class="ic"><use href="#i-next"/></svg></button>
-        <button class="icbtn" id="pPlay"><svg class="ic"><use href="#i-pause" id="pPlayIc"/></svg></button>
         <button class="icbtn txt" id="pAB">A–B</button>
         <button class="icbtn txt" id="pRate">1x</button>
         <button class="icbtn txt" id="pAuto">∞</button>
+        
         <div class="spacer"></div>
         <button class="icbtn" id="pFS" title="全屏"><svg class="ic"><use href="#i-fs"/></svg></button>
       </div>
@@ -4018,22 +4644,20 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
 
 /* ═══ i18n ═══ */
 const I18N = {
-  zh: { parse:'解析', all:'全选', none:'全不选', audio:'仅音频', dl:'下载所选',
+  zh: {fxFallback:'渲染异常, 已回退原画', tabSet:'设置', setSleep:'睡眠定时', setSleepHint:'到点自动暂停', sOff:'关', sMin:'%d分钟', setRecent:'最近播放', setRecentEmpty:'还没有播放记录', setStats:'统计', stTotal:'文件', stSize:'总大小', stFav:'收藏', uiMauto:'自适应', uiAdaptiveHint:'跟随视频主色实时换色', dlBatchTip:'支持多行批量: 每行一个链接', bFilter:'过滤文件…', agoNow:'刚刚', agoS:'%d秒前', agoM:'%d分钟前', agoH:'%d小时前', agoD:'%d天前', agoW:'%d周前', fxTitle:'画质特效',fxVhs:'VHS 录像',fxHint:'GPU 后处理, 发热或卡顿请关闭。',fxLabel:'特效',fxOff:'关闭',fxCrt:'CRT 电视',fxFilm:'胶片颗粒',fxNeon:'霓虹辉光',uiStyle:'界面风格',uiMono:'单色',uiGeist:'极简',uiCat:'柔和',uiSynth:'复古未来',uiRetro:'复古',uiPip:'终端',uiHint:'界面皮肤, 明暗跟随右上角主题按钮。', parse:'解析', all:'全选', none:'全不选', audio:'仅音频', dl:'下载所选',
     tasks:'下载任务', noTask:'暂无任务', library:'媒体库', scan:'扫描全盘', export:'导出备份',
     loose:'散文件', sNew:'最新', sSeq:'下载顺序', sOld:'最早', sName:'名称',
-    tabDl:'下载', tabTask:'任务', tabLib:'媒体库', prev:'上P', next:'下P',
-    searchPh:'搜索标题', emptyLib:'库里还空着', emptySearch:'没搜到', resume:'继续观看',
+    tabDl:'下载', tabTask:'任务', tabLib:'媒体库', searchPh:'搜索标题', emptyLib:'库里还空着', emptySearch:'没搜到', resume:'继续观看',
     hints:['⟷ 横滑进度','右滑音量 · 左滑亮度','双击±10s · 单击暂停'],
     del:'删除', expand:'分P', up:'UP主', partsN:'个分P',
     st:{'排队中':'排队中','下载中':'下载中','完成':'完成','部分失败':'部分失败','失败':'失败','已取消':'已取消'},
     confirmDelVideo:'删掉这部视频?\n\n它会连同磁盘上的所有分P文件一起永久删除, 找不回来。\n\n确定要删吗?',
     confirmDelFile:'删掉这个文件? 永久删除, 找不回来。', confirmRedl:'重新下载 P',
-    scanAdded:'新导入', scanFail:'扫描失败', exportFail:'导出失败',
-    exportOk1:'备份已生成', exportOk2:'换机: 解压覆盖到 decache 文件夹即可',
+    scanAdded:'新导入', exportOk1:'备份已生成', exportOk2:'换机: 解压覆盖到 decache 文件夹即可',
     pipNo:'此浏览器不支持画中画', fsNo:'这个浏览器不支持全屏', offline:'离线', submitFail:'提交失败', pasteFail:'剪贴板不可用',
     seqMode:'顺序', loopAll:'全部循环', loopOne:'单集循环', shuffle:'随机',
     settings:'设置', sessHint:'站点登录 cookie（可选）：从浏览器开发者工具复制 "KEY=VALUE; ..."；域名按链接自动推断',
-    save:'保存', saved:'已保存 ✓', sessOn:'已配置', sessOff:'未配置',
+    save:'保存', sessOn:'已配置', sessOff:'未配置',
     dlDone:'下载完成', dlFail:'有下载失败', nextOff:'本集不自动连播',
     fAll:'全部', fFav:'收藏', queue:'播放队列', qClear:'清空队列', qEmpty:'队列是空的',
     quality:'清晰度', qAuto:'自动(最优)', qHint:'上限, 省空间',
@@ -4044,24 +4668,19 @@ const I18N = {
     bRoot:'根目录', bEmpty:'这个文件夹里没有视频',
     bGone:'这个目录已经不存在了(可能刚被删掉)', bNoAccess:'没有权限访问这个目录',
     bBackRoot:'返回根目录', bMoved:'目录没了, 已自动回到上一级',
-    chapters:'章节', chEmpty:'没有章节', chReal:'真实章节', chAuto:'自动分段', playlist:'播放列表',
-    chAdd:'在当前位置标记', chMarked:'已标记', chExport:'导出 m3u',
-    m3uImport:'导入 m3u 队列', m3uOk:'已导入', ffMissing:'未找到(需安装)',
-    health:'体检(查坏文件)', healthRun:'体检中…', healthOk:'文件都正常', healthBad:'发现损坏',
-    subStyle:'字幕样式', subSize:'字号', subBg:'背景', subPos:'位置',
+    playlist:'播放列表', m3uImport:'导入 m3u 队列', m3uOk:'已导入', ffMissing:'未找到(需安装)',
+    health:'体检(查坏文件)', healthRun:'体检中…', healthOk:'文件都正常', healthBad:'发现损坏', subSize:'字号', subBg:'背景', subPos:'位置',
     subBgShadow:'描边', subBgSolid:'黑底', subBgWhite:'白底',
     subPosTop:'顶部', subPosMid:'居中', subPosBottom:'底部',
     dupes:'查重', storage:'磁盘', scanning:'扫描中…', noDupes:'没有重复文件',
     waste:'可省', wasteTotal:'共可省', total:'占用', free:'剩余', items:'项',
-    mainPart:'正片', segment:'片段', delPart:'删除这个分P', confirmDelPart:'只删掉这个分P的文件, 其他的保留。确定删除 P%s 吗?',
+    mainPart:'正片', delPart:'删除这个分P', confirmDelPart:'只删掉这个分P的文件, 其他的保留。确定删除 P%s 吗?',
     delPartOk:'已删除该分P',
-    qUp:'上移', qDown:'下移', qRemove:'移除',
-    urlPh:'粘贴视频链接', sessPh:'粘贴 cookie (KEY=VALUE; ...)',
+    qUp:'上移', qDown:'下移', qRemove:'移除', sessPh:'粘贴 cookie (KEY=VALUE; ...)',
     themeAuto:'主题: 跟随系统', themeLight:'主题: 亮色', themeDark:'主题: 暗色',
     needUrl:'先粘贴一个链接', parsing:'解析中…', parseFail:'解析失败',
     cookieEmpty:'先粘贴 cookie', cookieBad:'格式不对 —— 应为 KEY=VALUE',
-    cookieOk:'已保存 ✓ 生效中', cookieSaveFail:'保存失败',
-    logs:'运行日志', refresh:'刷新', loading:'加载中…', entries:'条', noLog:'还没有日志',
+    cookieOk:'已保存 ✓ 生效中', cookieSaveFail:'保存失败', refresh:'刷新', loading:'加载中…', entries:'条', noLog:'还没有日志',
     tagSet:'已标记', tagUnset:'已取消标记', favOn:'已收藏 ★', favOff:'已取消收藏', cancelled:'已取消',
     retrying:'正在重新下载…', deleted:'已删除', opening:'正在打开…',
     goDl:'去下载视频', goFolder:'浏览文件夹', goScan:'扫描全盘',
@@ -4081,22 +4700,20 @@ const I18N = {
     installTip:'浏览器菜单 →「添加到主屏幕 / 安装应用」, 之后点桌面图标即可用',
     uniRun:'生成通用版中…', uniOk:'已生成全平台通用版', uniAlready:'已经是 mp4',
     uniFail:'生成失败', uniCompat:'生成通用版(全平台都能播)'},
-  en: { parse:'Parse', all:'All', none:'None', audio:'Audio only', dl:'Download',
+  en: {fxFallback:'Render error, fell back to plain video', tabSet:'Settings', setSleep:'Sleep timer', setSleepHint:'Auto-pause when time is up', sOff:'Off', sMin:'%d min', setRecent:'Recently played', setRecentEmpty:'Nothing played yet', setStats:'Statistics', stTotal:'Files', stSize:'Total size', stFav:'Favorites', uiMauto:'Adaptive', dlBatchTip:'Batch: one URL per line', uiAdaptiveHint:'Follows the video\'s dominant color', bFilter:'Filter files…', agoNow:'just now', agoS:'%ds ago', agoM:'%dm ago', agoH:'%dh ago', agoD:'%dd ago', agoW:'%dw ago', fxTitle:'Video FX',fxVhs:'VHS Tape',fxHint:'GPU post-processing; turn off if hot or laggy.',fxLabel:'Effects',fxOff:'Off',fxCrt:'CRT TV',fxFilm:'Film Grain',fxNeon:'Neon Glow',uiStyle:'UI style',uiMono:'Mono',uiGeist:'Minimal',uiCat:'Soft',uiSynth:'Retro-Future',uiRetro:'Retro',uiPip:'Terminal',uiHint:'Interface skin; light/dark follows the theme button.', parse:'Parse', all:'All', none:'None', audio:'Audio only', dl:'Download',
     tasks:'Tasks', noTask:'No tasks', library:'Library', scan:'Scan videos', export:'Export backup',
     loose:'Loose files', sNew:'Newest', sSeq:'Order', sOld:'Oldest', sName:'Name',
-    tabDl:'Download', tabTask:'Tasks', tabLib:'Library', prev:'Prev', next:'Next',
-    searchPh:'Search titles', emptyLib:'Library is empty', emptySearch:'No results', resume:'Resume',
+    tabDl:'Download', tabTask:'Tasks', tabLib:'Library', searchPh:'Search titles', emptyLib:'Library is empty', emptySearch:'No results', resume:'Resume',
     hints:['⟷ swipe to seek','R: volume · L: brightness','dbl-tap ±10s · tap pause'],
     del:'Delete', expand:'Parts', up:'Uploader', partsN:'parts',
     st:{'排队中':'Queued','下载中':'Downloading','完成':'Done','部分失败':'Partial','失败':'Failed','已取消':'Cancelled'},
     confirmDelVideo:'Delete this video?\n\nAll its part files will be permanently deleted from disk.\n\nAre you sure?',
     confirmDelFile:'Permanently delete this file?', confirmRedl:'Re-download P',
-    scanAdded:'Imported', scanFail:'Scan failed', exportFail:'Export failed',
-    exportOk1:'Backup saved', exportOk2:'New device: extract over the decache folder',
+    scanAdded:'Imported', exportOk1:'Backup saved', exportOk2:'New device: extract over the decache folder',
     pipNo:'PiP not supported', fsNo:'Fullscreen not supported here', offline:'Offline', submitFail:'Submit failed', pasteFail:'Clipboard unavailable',
     seqMode:'Seq', loopAll:'Loop all', loopOne:'Loop one', shuffle:'Shuffle',
     settings:'Settings', sessHint:'Site login cookie (optional): copy "KEY=VALUE; ..." from DevTools; domain inferred from the link',
-    save:'Save', saved:'Saved ✓', sessOn:'Configured', sessOff:'Not set',
+    save:'Save', sessOn:'Configured', sessOff:'Not set',
     dlDone:'Download finished', dlFail:'Some downloads failed', nextOff:'Autoplay off for this one',
     fAll:'All', fFav:'Favorites', queue:'Queue', qClear:'Clear queue', qEmpty:'Queue is empty',
     quality:'Quality', qAuto:'Auto (best)', qHint:'cap, saves space',
@@ -4108,24 +4725,19 @@ const I18N = {
     bGone:'This folder no longer exists (maybe just deleted)',
     bNoAccess:'No permission for this folder',
     bBackRoot:'Back to root', bMoved:'Folder gone, moved up automatically',
-    chapters:'Chapters', chEmpty:'No chapters', chReal:'Real chapters', chAuto:'Auto segments', playlist:'Playlist',
-    chAdd:'Mark here', chMarked:'Marked', chExport:'Export m3u',
-    m3uImport:'Import m3u', m3uOk:'Imported', ffMissing:'not found (install it)',
-    health:'Health check', healthRun:'Checking…', healthOk:'All files OK', healthBad:'Damaged:',
-    subStyle:'Subtitle style', subSize:'Size', subBg:'Background', subPos:'Position',
+    playlist:'Playlist', m3uImport:'Import m3u', m3uOk:'Imported', ffMissing:'not found (install it)',
+    health:'Health check', healthRun:'Checking…', healthOk:'All files OK', healthBad:'Damaged:', subSize:'Size', subBg:'Background', subPos:'Position',
     subBgShadow:'Shadow', subBgSolid:'Solid', subBgWhite:'White',
     subPosTop:'Top', subPosMid:'Middle', subPosBottom:'Bottom',
     dupes:'Duplicates', storage:'Storage', scanning:'Scanning…', noDupes:'No duplicate files',
     waste:'reclaim', wasteTotal:'Total reclaimable', total:'Used', free:'Free', items:'items',
-    mainPart:'Main', segment:'Segment', delPart:'Delete this part', confirmDelPart:'Delete only this part\'s file, keep the others. Delete P%s?',
+    mainPart:'Main', delPart:'Delete this part', confirmDelPart:'Delete only this part\'s file, keep the others. Delete P%s?',
     delPartOk:'Part deleted',
-    qUp:'Move up', qDown:'Move down', qRemove:'Remove',
-    urlPh:'Paste a video link', sessPh:'Paste cookie (KEY=VALUE; ...)',
+    qUp:'Move up', qDown:'Move down', qRemove:'Remove', sessPh:'Paste cookie (KEY=VALUE; ...)',
     themeAuto:'Theme: follow system', themeLight:'Theme: light', themeDark:'Theme: dark',
     needUrl:'Paste a link first', parsing:'Parsing…', parseFail:'Parse failed',
     cookieEmpty:'Paste a cookie first', cookieBad:'Bad format — should be KEY=VALUE',
-    cookieOk:'Saved ✓ active', cookieSaveFail:'Save failed',
-    logs:'Runtime log', refresh:'Refresh', loading:'Loading…', entries:'entries', noLog:'No log yet',
+    cookieOk:'Saved ✓ active', cookieSaveFail:'Save failed', refresh:'Refresh', loading:'Loading…', entries:'entries', noLog:'No log yet',
     tagSet:'Tagged', tagUnset:'Tag removed', favOn:'Favourited ★', favOff:'Unfavourited', cancelled:'Cancelled',
     retrying:'Re-downloading…', deleted:'Deleted', opening:'Opening…',
     goDl:'Go download', goFolder:'Browse folders', goScan:'Scan disk',
@@ -4161,7 +4773,6 @@ function applyLang() {
   $('hintTap').textContent = t('hints')[2];
   renderLib(); renderTasks(); renderMode();
   if (typeof renderFilterChips === 'function') { renderFilterChips(); renderQueue(); }
-  if (typeof renderChapters === 'function') renderChapters();
   if (typeof loadCfg === 'function') loadCfg();          // 配置状态(未配置/已配置)是动态文案
   if ($('sheet').classList.contains('show')) {           // 打开中的工具面板要重渲染
     const t0 = $('sheetTitle').textContent;
@@ -4170,7 +4781,8 @@ function applyLang() {
   }
 }
 $('langBtn').onclick = () => { LANG = LANG === 'zh' ? 'en' : 'zh';
-  localStorage.setItem('take_lang', LANG); applyLang(); };
+  localStorage.setItem('take_lang', LANG); applyLang();
+  location.reload();   /* v15: 动态面板(凭据/队列/SOP)初始化时才插文本, 切语言必须重渲 */ };
 
 /* ═══ 基础 ═══ */
 let current = null, LIB = {videos:[], loose:[]}, SORT = 'time_desc', LIB_SHOW = 60;
@@ -4245,6 +4857,8 @@ function savePos(rel, t, d) {
   const a = histLoad().filter(x => x && x.r !== rel);
   a.unshift({ r: rel, t: Math.round(t || 0), d: Math.round(d || 0), at: Date.now() });
   histSave(a);       // 账本就这么大(≤40 条), 每次整写比"算增量"简单也不会错
+  try { fetch('/api/progress', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: rel, pos: t, dur: d }) }); } catch (e) {}   /* v17: server 备份, 重装/多浏览器不丢 */
 }
 
 /* 进度记录会无限增长, 撑爆 localStorage 配额后进度再也存不上 → 只留最近 200 条 */
@@ -4304,7 +4918,7 @@ document.querySelector('.tabbar').addEventListener('click', e => {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   $('page-' + b.dataset.tab).classList.add('active');
   window.scrollTo({top: 0});
-  if (b.dataset.tab === 'folder' && !BROWSE_PATH) browse('');
+  if (b.dataset.tab === 'folder' && !BROWSE_PATH) browse(sessionStorage.getItem('take_browse') || '');   /* v15.2: 回到上次目录 */
 });
 const switchTab = x => document.querySelector(`.tabbar button[data-tab="${x}"]`).click();
 const pasteFromClipboard = async () => {
@@ -4319,10 +4933,44 @@ const fmtT = t0 => {
 };
 
 /* ═══ 解析/下载 ═══ */
+/* v15.3: 下载历史 — 解析成功记一笔, chips 点击回填再解析 */
+function histAdd(u) {
+  let h = [];
+  try { h = JSON.parse(localStorage.getItem('take_hist') || '[]'); } catch (e) {}
+  h = [u, ...h.filter(x => x !== u)].slice(0, 8);
+  localStorage.setItem('take_hist', JSON.stringify(h));
+  histRender();
+}
+function histRender() {
+  let h = [];
+  try { h = JSON.parse(localStorage.getItem('take_hist') || '[]'); } catch (e) {}
+  const el = $('urlHist');
+  if (!el) return;
+  el.innerHTML = h.map(u2 => `<button class="chip" data-hu="${esc(u2)}" title="${esc(u2)}">${esc(u2.length > 20 ? u2.slice(0, 20) + '…' : u2)}</button>`).join('');
+  el.style.display = h.length ? 'flex' : 'none';
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-hu]');
+  if (!b) return;
+  $('url').value = b.dataset.hu;
+  parse();
+});
+
 async function parse() {
+  /* v17: 支持多行批量, 每行一个链接, 逐个解析排队 */
+  const lines = $('url').value.split(/\n+/).map(s => s.trim()).filter(Boolean);
+  if (!lines.length) { $('perr').textContent = t('needUrl'); return; }
+  if (lines.length === 1) return parseOne(lines[0]);
+  for (let i = 0; i < lines.length; i++) {
+    $('perr').textContent = `${i + 1}/${lines.length}…`;
+    await parseOne(lines[i]);
+    await new Promise(r2 => setTimeout(r2, 350));
+  }
   $('perr').textContent = '';
-  const raw = $('url').value.trim();
-  if (!raw) { $('perr').textContent = t('needUrl'); return; }
+}
+
+async function parseOne(raw) {
+  $('perr').textContent = '';
   const btn = document.querySelector('#page-dl .btn');
   if (btn) { btn.disabled = true; btn.textContent = t('parsing'); }
   try {
@@ -4330,6 +4978,7 @@ async function parse() {
     if (d.error) { $('perr').textContent = d.error; return; }
     current = d;
     current.url = d.url || raw;      // 用解析出来的最终地址(短链已跟完), 不再用短链下载
+    histAdd(raw);
     $('infoCard').style.display = 'block';
     $('cover').src = d.cover ? '/api/thumb?url=' + encodeURIComponent(d.cover) : '';
     $('vtitle').textContent = d.title;
@@ -4418,104 +5067,8 @@ $('tasks').addEventListener('click', e => {
   }
 });
 
-/* ═══ 章节 (v6.4) ═══ */
-let CHAPTERS = [], CHAP_REAL = false, CHAP_MARKS = [];
+/* ═══ v6.4 章节功能已删(2026-10-24), _gen 代次令牌留给字幕/缩略图 ═══ */
 let _gen = 0;
-async function loadChapters(rel, dur, gen) {
-  CHAPTERS = []; CHAP_MARKS = []; CHAP_REAL = false;
-  renderChapters();
-  if (!rel) return;
-  try {
-    const d = await api('/api/chapters?rel=' + encodeURIComponent(rel) + '&dur=' + (dur || 0));
-    if (gen !== undefined && gen !== _gen) return;    // 已经切到别的片了
-    CHAPTERS = d.chapters || [];
-    CHAP_REAL = !!d.real;
-    renderChapters();
-  } catch {}
-  /* 手动标记(存在 library 里的 marks) */
-  const vd = (FLAT[FI] || {}).vd;
-  if (vd && vd.bvid && vd.marks) { CHAP_MARKS = vd.marks; renderChapters(); }
-}
-function renderChapters() {
-  const marks = $('chapMarks');
-  const D = v.duration || 1;
-  let html = CHAPTERS.slice(1).map(c => `<i style="left:${(c.start / D * 100).toFixed(3)}%"></i>`).join('');
-  html += CHAP_MARKS.map(m => `<i class="mk" style="left:${(m.t / D * 100).toFixed(3)}%"></i>`).join('');
-  marks.innerHTML = html;
-  renderChapList();
-}
-function renderChapList() {
-  const list = $('chapList');
-  if (!list) return;
-  // 章节清单 = 容器真章节 + 用户标记, 按时间排序(这行别删, 少了整个脚本会 ReferenceError)
-  const all = [...CHAPTERS.map(c => ({t: c.start, title: c.title || t('segment')})),
-               ...CHAP_MARKS.map(m => ({t: m.t, title: m.title, mark: true}))].sort((a, b) => a.t - b.t);
-  $('chapMeta').textContent = all.length ? (CHAP_REAL ? t('chReal') : t('chAuto')) : '';
-  if (!all.length) { list.innerHTML = `<div class="qempty">${t('chEmpty')}</div>`; return; }
-  const cur = v.currentTime || 0;
-  const sheet = (thumbReady && thumbURL) ? thumbURL : '';
-  const vd = (FLAT[FI] || {}).vd || {};
-  const cover = (vd.bvid && /^BV/i.test(vd.bvid)) ? `/api/cover/${encodeURIComponent(vd.bvid)}?v=${vd.cover_rev||0}` : '';
-  list.innerHTML = all.map((c, i) => {
-    const near = Math.abs(c.t - cur) < 2.5;
-    let style = '', label = '';
-    if (sheet) {
-      // 雪碧图切片(最理想)
-      const gi = CHAPTERS.length
-        ? Math.min(CHAPTERS.length - 1, Math.max(0, Math.floor(c.t / (v.duration || 1) * CHAPTERS.length)))
-        : 0;
-      const cw = thumbW / thumbCols, ch = thumbH / Math.max(1, Math.ceil(CHAPTERS.length / thumbCols));
-      style = `background-image:url(${sheet});background-size:${thumbW}px ${thumbH}px;` +
-              `background-position:-${(gi % thumbCols) * cw}px -${Math.floor(gi / thumbCols) * ch}px`;
-    } else if (cover) {
-      style = `background-image:url(${cover});background-size:cover`;
-    } else {
-      label = String(i + 1);          // 都没就显示序号, 绝不给黑框
-    }
-    return `<div class="chitem${near ? ' cur' : ''}" data-cht="${c.t}">
-      <span class="cthumb" style="${style}">${label}</span>
-      <span class="cn">${esc(c.title)}</span>
-      <span class="ct">${fmtDur(c.t)}</span>
-      ${c.mark ? `<button class="cdel" data-chdel="${c.t}"><svg class="ic"><use href="#i-x"/></svg></button>` : ''}
-    </div>`;
-  }).join('');
-}
-$('chapList').addEventListener('click', e => {
-  const del = e.target.closest('[data-chdel]');
-  if (del) {
-    const vd = (FLAT[FI] || {}).vd;
-    if (!vd || !vd.bvid) return;
-    api('/api/marks', {bvid: vd.bvid, rel: FLAT[FI].rel, op: 'del', t: +del.dataset.chdel})
-      .then(() => { CHAP_MARKS = CHAP_MARKS.filter(m => Math.abs(m.t - +del.dataset.chdel) > 0.01); renderChapters(); });
-    return;
-  }
-  const it = e.target.closest('[data-cht]');
-  if (it) { v.currentTime = +it.dataset.cht; poke(); }
-});
-$('pChap').onclick = () => {
-  const on = $('chapPanel').classList.toggle('show');
-  $('qpanel').classList.remove('show');
-  $('listPanel').classList.remove('show');   // 互斥
-  if (on) { loadChapters(FLAT[FI]?.rel, v.duration); }
-  poke();
-};
-$('chapClose').onclick = () => $('chapPanel').classList.remove('show');
-$('chapAdd').onclick = async () => {
-  const vd = (FLAT[FI] || {}).vd;
-  if (!vd || !vd.bvid) return;
-  // 变量别叫 t —— 它会遮蔽全局的 i18n 函数 t(), 下面 toast(t('chMarked')) 直接 TypeError
-  const pos = v.currentTime || 0;
-  const r = await api('/api/marks', {bvid: vd.bvid, rel: FLAT[FI].rel, t: pos});
-  CHAP_MARKS = r.marks || [];
-  renderChapters();
-  toast(t('chMarked'));
-};
-$('chapM3u').onclick = () => {
-  const a = document.createElement('a');
-  a.href = '/api/playlist.m3u';
-  a.download = 'decache.m3u';
-  a.click();
-};
 
 /* ═══ 字幕样式 (v6.5) ═══ */
 const SUB_DEF = {size: 18, bg: 'shadow', pos: 'bottom'};
@@ -4578,7 +5131,7 @@ async function showDupes() {
     $('sheetBody').innerHTML = `<div class="empty">${t('noDupes')}</div>`;
     return;
   }
-  $('sheetBody').innerHTML = d.groups.map((g, gi) => `
+  $('sheetBody').innerHTML = d.groups.map((g) => `   /* v13: 第二个参数未使用且闸2不追踪多参箭头参数, 顺手清掉 */
     <div class="dgroup">
       <div class="dgh">${g.size_mb}MB × ${g.files.length} <span>${t('waste')} ${g.waste_mb}MB</span></div>
       ${g.files.map(f => `<div class="dfile"><span class="dn">${esc(f.name)}</span>
@@ -4614,6 +5167,349 @@ function applyTheme() {
   if (b) b.title = THEME === 'light' ? t('themeLight') : THEME === 'dark' ? t('themeDark') : t('themeAuto');
   localStorage.setItem('take_theme', THEME);
 }
+/* ═══ UI 主题包 (v8): data-ui 换肤, 明暗照旧归 data-theme ═══ */
+let UI_THEME = localStorage.getItem('take_ui') || 'mono';
+if (UI_THEME === 'refactor') UI_THEME = 'geist';      /* v7 存档迁移 */
+if (UI_THEME === '8bit') UI_THEME = 'synthwave';      /* v7 存档迁移 */
+/* v10.2: 智障保护 — 无效值回退 mono */
+if (['mono','geist','catppuccin','synthwave','retro','pipboy'].indexOf(UI_THEME) < 0) UI_THEME = 'mono';
+/* v17: 第 7 主题「自适应」— 视频帧取主色, 5s 刷新; 切走时清内联变量防污染其他主题 */
+const mautoCv = document.createElement('canvas');
+mautoCv.width = 8; mautoCv.height = 8;
+const mautoCx = mautoCv.getContext('2d', { willReadFrequently: true });
+function mautoTick() {
+  if (UI_THEME !== 'mauto') return;
+  const pv2 = $('pvideo');
+  if (!pv2 || pv2.paused || !pv2.videoWidth) return;
+  try {
+    mautoCx.drawImage(pv2, 0, 0, 8, 8);
+    const dd = mautoCx.getImageData(0, 0, 8, 8).data;
+    let best = null; let bestScore = -1;
+    for (let i = 0; i < dd.length; i += 4) {
+      const r2 = dd[i]; const g2 = dd[i + 1]; const b2 = dd[i + 2];
+      const mx2 = Math.max(r2, g2, b2); const mn2 = Math.min(r2, g2, b2);
+      if (mx2 < 70) continue;
+      const sat = mx2 === mn2 ? 0 : (mx2 - mn2) / mx2;
+      if (sat < 0.22) continue;
+      const score = sat * (mx2 / 255);
+      if (score > bestScore) { bestScore = score; best = [r2, g2, b2]; }
+    }
+    if (!best) return;
+    const cs = v3 => Math.max(0, Math.min(255, Math.round(v3)));
+    const root = document.documentElement.style;
+    root.setProperty('--acc', `rgb(${cs(best[0] * 1.05)},${cs(best[1] * 1.05)},${cs(best[2] * 1.05)})`);
+    root.setProperty('--edge', `rgba(${cs(best[0])},${cs(best[1])},${cs(best[2])},.35)`);
+    root.setProperty('--srf2', `rgba(${cs(best[0] * 0.35)},${cs(best[1] * 0.35)},${cs(best[2] * 0.35)},.16)`);
+  } catch (e2) {}
+}
+setInterval(mautoTick, 5000);
+
+/* v19.9: 着色器定期保养 — 每90秒(播放中)无缝重建纹理对象, Chrome 的 video-texture 路径
+   重走一遍干净初始化, 清掉"越用越卡"的渐进累积(ml5/Chromium 案例: GPU 进程随时长劣化)。
+   零打断: 纹理每帧本来就上传, 换对象只是下一帧多一次常规 texImage2D; program 不动(重编译会卡) */
+window._fxCare = setInterval(() => {
+  if (FX_MODE === 'off' || !fxGl || !fxTex) return;   /* 特效没跑=没累积, 不用清 */
+  if (fxGl.isContextLost()) return;
+  /* v19.12: 暂停时也清 — 暂停不渲染, 此时换纹理零风险零感知, 回来接着看就是干净状态 */
+  try {
+    fxGl.deleteTexture(fxTex);
+    fxTex = fxGl.createTexture();
+    fxGl.bindTexture(fxGl.TEXTURE_2D, fxTex);
+    fxGl.texParameteri(fxGl.TEXTURE_2D, fxGl.TEXTURE_WRAP_S, fxGl.CLAMP_TO_EDGE);
+    fxGl.texParameteri(fxGl.TEXTURE_2D, fxGl.TEXTURE_WRAP_T, fxGl.CLAMP_TO_EDGE);
+    fxGl.texParameteri(fxGl.TEXTURE_2D, fxGl.TEXTURE_MIN_FILTER, fxGl.LINEAR);
+    window._fxTInit = 0;
+  } catch (e) {}
+}, 60000);   /* v19.10: 60s一清 */
+
+function applyUiTheme() {
+  document.documentElement.setAttribute('data-ui', UI_THEME);
+  localStorage.setItem('take_ui', UI_THEME);
+  const rs = document.documentElement.style;
+  if (UI_THEME === 'mauto') { mautoTick(); }   /* 立即取一帧, 不等 5s */
+  else { rs.removeProperty('--acc'); rs.removeProperty('--edge'); rs.removeProperty('--srf2'); }
+  document.querySelectorAll('[data-uiopt]').forEach(c =>
+    c.classList.toggle('on', c.dataset.uiopt === UI_THEME));
+}
+document.querySelectorAll('[data-uiopt]').forEach(c =>
+  c.onclick = () => { UI_THEME = c.dataset.uiopt; applyUiTheme(); });
+applyUiTheme();
+
+/* ═══ 播放器着色器特效 v8.3: WebGL 后处理, 设置里可开关 ═══ */
+/* v10: CRT 按 crt-geom 经典参数 — 细浅扫描线/荫罩/柔焦/微曲率/滚动亮带 */
+const FX_PRESETS = {
+  crt:  { scan: .9,  aberr: .5,  vig: .32, grain: .03, glow: .5,  warp: .18, mask: .8, jit: 0, tint: 0,    roll: .5, flick: .5,  trk: 0, fade: .3, pglow: .5 },
+  vhs:  { scan: 0,   aberr: 1.2, vig: .3,  grain: .08, glow: 0,   warp: .08, mask: 0, jit: 1, tint: .1,   roll: 0,   flick: .3,  trk: .7  },
+  film: { scan: 0,   aberr: .25, vig: .38, grain: .15, glow: 0,   warp: 0,    mask: 0, jit: 0, tint: 0,    roll: 0,   flick: .45, trk: 0   },
+  neon: { scan: .12, aberr: .7,  vig: .26, grain: .02, glow: .85, warp: 0,    mask: 0, jit: 0, tint: 0,    roll: .3,  flick: 0,   trk: 0   },
+};
+let FX_MODE = localStorage.getItem('take_fx') || 'off';
+if (FX_MODE === 'tube') FX_MODE = 'crt';   /* v9: 显像管并入 CRT 全效 */
+/* v10.2: 无效值回退 off, 迁移结果落盘 */
+if (Object.keys(FX_PRESETS).indexOf(FX_MODE) < 0) FX_MODE = 'off';
+localStorage.setItem('take_fx', FX_MODE);
+let fxCv, fxGl, fxPr, fxTex, fxU = {}, fxRaf = 0;
+
+function fxCompile(tp, src) {
+  const sh = fxGl.createShader(tp);
+  fxGl.shaderSource(sh, src);
+  fxGl.compileShader(sh);
+  if (!fxGl.getShaderParameter(sh, fxGl.COMPILE_STATUS)) {   /* v13: 编译失败别静默直出原片 */
+    try { console.warn('fx shader:', fxGl.getShaderInfoLog(sh)); } catch (e) {}
+    return null;
+  }
+  return sh;
+}
+
+function fxEnsure() {
+  /* v12.1: 处理后台切回 — 系统可能回收 GL 上下文, 丢了重建, 防"切回变卡" */
+  if (!fxCv) {
+    fxCv = document.createElement('canvas');
+    fxCv.id = 'fxCanvas';
+    $('pstage').appendChild(fxCv);
+    fxCv.addEventListener('webglcontextlost', e => { e.preventDefault(); fxStop(); });
+    fxCv.addEventListener('webglcontextrestored', () => {
+      fxPr = null; fxTex = null; fxU = {}; fxEnsure(); fxStart();
+    });
+  }
+  if (!fxGl) {
+    fxGl = fxCv.getContext('webgl', { alpha: false, antialias: false, powerPreference: 'high-performance' });   /* v17.3: 省电GPU是顿感元凶之一 */
+    if (!fxGl) { fxCv.remove(); fxCv = null; return false; }
+  }
+  if (fxPr && fxGl.isContextLost()) fxPr = null;
+  if (!fxPr) {
+  const vs = 'attribute vec2 p;varying vec2 vUv;void main(){vUv=vec2(p.x*.5+.5,p.y*.5+.5);gl_Position=vec4(p,0.,1.);}';
+  const fs = `precision mediump float;varying vec2 vUv;uniform sampler2D T;uniform float t;uniform vec2 r;
+uniform float s,a,v,g,w,k,m,j,n,q,f,trk,fd,pg;
+float rnd(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453);}
+void main(){
+  vec2 uv=vUv;
+  float tm=t*0.9;   /* v19.10: 运动幅度-10%, 感知更柔更不暴露不均匀; RVFC已保证帧间隔恒定(均匀>高帧率是人眼流畅主因) */                                                                    /* 连续时间, 全程丝滑 */
+  if(k>0.001){vec2 cc=uv-.5;float dd=dot(cc,cc);uv=cc*(1.0+k*0.5*dd)+.5;}       /* 微曲率 */
+  if(j>0.001){                                                                  /* VHS: 平滑磁带弯波+细撕裂 */
+    uv.x+=0.0018*sin(uv.y*6.0+tm*2.6)*j;
+    float row=floor(uv.y*r.y);
+    uv.x+=(sin(tm*23.7+row*0.71)*0.55+sin(tm*41.3+row*1.13)*0.45)*0.004*j;   /* v13: 连续弯波, 无跳变 */
+  }
+  if(g>0.1&&s<0.1&&j<0.1){                                                      /* 胶片: 放映机片门游移 */
+    uv.x+=0.0012*sin(tm*1.4);
+    uv.y+=0.0009*sin(tm*0.93+1.7);
+  }
+  if(trk>0.001){float band=fract(tm*0.13);if(abs(uv.y-band)<0.02){uv.x+=sin(tm*31.7+floor(uv.y*r.y)*1.618)*0.012*trk;}}
+  float ka=a*0.0015*(1.0+0.3*sin(tm*1.7));                                       /* 色差缓慢呼吸 */
+  vec3 c;
+  if(a>0.001){c.r=texture2D(T,uv+vec2(ka,0.)).r;c.g=texture2D(T,uv).g;c.b=texture2D(T,uv-vec2(ka,0.)).b;}
+  else{c=texture2D(T,uv).rgb;}
+  if(s>0.3){vec2 ox=vec2(1.5/r.x,0.);c=(c+texture2D(T,uv+ox).rgb+texture2D(T,uv-ox).rgb)/3.0;}  /* CRT柔焦 */
+  if(j>0.001){vec2 ox2=vec2(4.0/r.x,0.);c=mix(c,(c+texture2D(T,uv+ox2).rgb+texture2D(T,uv-ox2).rgb)/3.0,0.65);} /* VHS色度涂抹 */
+  if(s>0.001){c*=1.-s*0.18*(0.5+0.5*sin(uv.y*r.y*2.094));}                        /* 3px 静态扫描线 */
+  if(s>0.3){c*=1.0+0.035*sin(tm*37.0+floor(uv.y*r.y*0.5)*2.399)+0.02*sin(tm*61.0+uv.y*r.y*0.7);}  /* v13: 行微闪连续化, 行号只做相位 */
+  if(m>0.001){float x6=uv.x*r.x*2.094;c*=mix(vec3(1.0),0.90+0.10*vec3(sin(x6),sin(x6+2.094),sin(x6+4.189)),m);} /* RGB荫罩 */
+  if(w>0.001){vec3 bl=max(c-0.62,0.);c+=bl*w*(0.85+0.15*sin(tm*2.1));}            /* 柔和高光, 缓慢涨落 */
+  if(q>0.001){float band2=fract(uv.y*0.7-tm*0.06);c*=1.+q*0.10*exp(-pow((band2-0.5)*10.0,2.0));} /* 滚动亮带 */
+  if(trk>0.001){float band3=fract(tm*0.13);c+=trk*0.04*smoothstep(0.02,0.0,abs(uv.y-band3));}
+  float d=distance(uv,vec2(.5));c*=1.-v*smoothstep(.42,.85,d);
+  if(n>0.001){c=mix(c,c*vec3(1.0+n,1.0,1.0-n),0.8);}
+  if(j>0.001&&uv.y>0.93){c+=(rnd(uv*vec2(3.0,1.0)+vec2(tm*71.3,0.))-.5)*0.14*j;} /* v13: 磁头噪带连续漂移 */
+  c*=1.+f*(0.015*sin(tm*47.0)+0.012*sin(tm*3.3));                                 /* 亮度呼吸 */
+  c+=(rnd(uv*r+vec2(tm*61.7,tm*37.3))-.5)*g;
+  if(fd>0.001){float lum=dot(c,vec3(.299,.587,.114));c=mix(c,vec3(lum)*vec3(1.06,1.0,.88)+.045,fd);} /* v13 CRT 褪色+暖绿偏色 */
+  if(pg>0.001){vec2 px=1.0/r;vec3 nb=texture2D(T,uv+vec2(px.x,0.)).rgb+texture2D(T,uv-vec2(px.x,0.)).rgb+texture2D(T,uv+vec2(0.,px.y)).rgb+texture2D(T,uv-vec2(0.,px.y)).rgb;c+=nb*0.25*pg*0.35;} /* v15 像素微发光: 4邻域溢出 */                                      /* 颗粒: 连续时间, 无秒级跳变 */
+  if(w>0.5&&s<0.2){c+=0.025*vec3(sin(tm*0.6),sin(tm*0.6+2.094),sin(tm*0.6+4.189));} /* 霓虹彩虹慢呼吸 */
+  gl_FragColor=vec4(c,1.);
+}`;
+  fxPr = fxGl.createProgram();
+  const fxVsh = fxCompile(fxGl.VERTEX_SHADER, vs);
+  const fxFsh = fxCompile(fxGl.FRAGMENT_SHADER, fs);
+  if (!fxVsh || !fxFsh) { fxPr = null; return false; }       /* v13: 炸了回退 off, 不假装活着 */
+  fxGl.attachShader(fxPr, fxVsh);
+  fxGl.attachShader(fxPr, fxFsh);
+  fxGl.linkProgram(fxPr);
+  if (!fxGl.getProgramParameter(fxPr, fxGl.LINK_STATUS)) {
+    try { console.warn('fx link:', fxGl.getProgramInfoLog(fxPr)); } catch (e) {}
+    fxPr = null; return false;
+  }
+  fxGl.useProgram(fxPr);
+  const buf = fxGl.createBuffer();
+  fxGl.bindBuffer(fxGl.ARRAY_BUFFER, buf);
+  fxGl.bufferData(fxGl.ARRAY_BUFFER, new Float32Array([-1,-1,3,-1,-1,3]), fxGl.STATIC_DRAW);
+  const loc = fxGl.getAttribLocation(fxPr, 'p');
+  fxGl.enableVertexAttribArray(loc);
+  fxGl.vertexAttribPointer(loc, 2, fxGl.FLOAT, false, 0, 0);
+  fxTex = fxGl.createTexture();
+  fxGl.bindTexture(fxGl.TEXTURE_2D, fxTex);
+  fxGl.texParameteri(fxGl.TEXTURE_2D, fxGl.TEXTURE_WRAP_S, fxGl.CLAMP_TO_EDGE);
+  fxGl.texParameteri(fxGl.TEXTURE_2D, fxGl.TEXTURE_WRAP_T, fxGl.CLAMP_TO_EDGE);
+  fxGl.texParameteri(fxGl.TEXTURE_2D, fxGl.TEXTURE_MIN_FILTER, fxGl.LINEAR);
+  fxGl.pixelStorei(fxGl.UNPACK_FLIP_Y_WEBGL, true);
+  window._fxTInit = 0;   /* v19.2: 新纹理首帧须 texImage2D 初始化 */
+  const fxNames = ['T','t','r','s','a','v','g','w','k','m','j','n','q','f','trk','fd','pg'];
+  for (let i = 0; i < fxNames.length; i++) {
+    fxU[fxNames[i]] = fxGl.getUniformLocation(fxPr, fxNames[i]);
+  }
+  }
+  return true;
+}
+
+
+function fxFit() {
+  const st = $('pstage');
+  const vEl = $('pvideo');
+  if (!st || !vEl || !vEl.videoWidth) return;
+  const sw = st.clientWidth;
+  const sh = st.clientHeight;
+  const scale = Math.min(sw / vEl.videoWidth, sh / vEl.videoHeight);
+  const w = Math.max(2, Math.round(vEl.videoWidth * scale));
+  const h = Math.max(2, Math.round(vEl.videoHeight * scale));
+  const dpr = Math.min(window.devicePixelRatio || 1, 2.0);   /* v19.3: 原生清晰度 — 用户点名不降画质, DPR 上限恢复到 2.0 */
+  fxCv.style.transform = 'translateZ(0)';   /* v19.8: 合成层快路径(Android 实测+35%, web_search:269#9) */
+  fxCv.style.left = ((sw - w) / 2) + 'px';
+  fxCv.style.top = ((sh - h) / 2) + 'px';
+  fxCv.style.width = w + 'px';
+  fxCv.style.height = h + 'px';
+  fxCv.width = Math.max(2, Math.round(w * dpr));
+  fxCv.height = Math.max(2, Math.round(h * dpr));
+  fxGl.viewport(0, 0, fxCv.width, fxCv.height);
+}
+
+function fxStop() {
+  cancelAnimationFrame(fxRaf);
+  const pv2 = $('pvideo');
+  if (window._fxVH && pv2 && pv2.cancelVideoFrameCallback) { try { pv2.cancelVideoFrameCallback(window._fxVH); } catch (e) {} }
+  window._fxVH = 0;
+  if (fxCv) fxCv.style.display = 'none';
+}
+
+/* v19.6: 渲染一帧(渲染驱动见 fxVF/fxLoop) — RVFC 视频帧率驱动(25fps视频=25次渲染/秒, 比rAF60省一半),
+   texImage2D 全量(Unity论坛实测 Chrome way faster, texSubImage 方向错误已回退) */
+function fxRender(ts) {
+  const vEl = $('pvideo');
+  const P = FX_PRESETS[FX_MODE] || {};
+  if (FX_MODE === 'off' || !vEl || vEl.paused || document.hidden) { fxStop(); return; }
+  if (fxGl.isContextLost()) { fxStop(); return; }  /* v13: lost 期间别空转画黑帧 */
+  if (vEl.readyState >= 2) {
+    fxGl.texImage2D(fxGl.TEXTURE_2D, 0, fxGl.RGB, fxGl.RGB, fxGl.UNSIGNED_BYTE, vEl);
+    fxGl.uniform1i(fxU.T, 0);
+    fxGl.uniform1f(fxU.t, ts / 1000);
+    fxGl.uniform2f(fxU.r, fxCv.width, fxCv.height);
+    fxGl.uniform1f(fxU.s, P.scan || 0);
+    fxGl.uniform1f(fxU.a, P.aberr || 0);
+    fxGl.uniform1f(fxU.v, P.vig || 0);
+    fxGl.uniform1f(fxU.g, P.grain || 0);
+    fxGl.uniform1f(fxU.w, P.glow || 0);
+    fxGl.uniform1f(fxU.k, P.warp || 0);
+    fxGl.uniform1f(fxU.m, P.mask || 0);
+    fxGl.uniform1f(fxU.j, P.jit || 0);
+    fxGl.uniform1f(fxU.n, P.tint || 0);
+    fxGl.uniform1f(fxU.q, P.roll || 0);
+    fxGl.uniform1f(fxU.f, P.flick || 0);
+    fxGl.uniform1f(fxU.trk, P.trk || 0);
+    fxGl.uniform1f(fxU.fd, P.fade || 0);
+    fxGl.uniform1f(fxU.pg, P.pglow || 0);
+    fxGl.drawArrays(fxGl.TRIANGLES, 0, 3);
+  }
+  /* v19.5: 黑屏自愈 — 不猜根因, 让"看到黑屏"不可能发生。每30帧读回中心像素, 连续3次全黑
+     (阈值5防夜景误伤, ~1.5秒) 且 video 在播非音频 → 重建GL全链路; 重建3次仍黑 → 关特效回退原画 */
+  {
+    const bc = window._fxBC = window._fxBC || { n: 0, black: 0 };
+    bc.n++;
+    if (bc.n >= 30) {
+      bc.n = 0;
+      try {
+        const px = new Uint8Array(4);
+        fxGl.readPixels((fxCv.width >> 1), (fxCv.height >> 1), 1, 1, fxGl.RGBA, fxGl.UNSIGNED_BYTE, px);
+        const dark = px[0] < 5 && px[1] < 5 && px[2] < 5;
+        if (dark && vEl && !vEl.paused && vEl.readyState >= 2 && !($('pstage') || { classList: { contains: () => false } }).classList.contains('audio')) {
+          bc.black++;
+          if (bc.black >= 3) {
+            bc.black = 0;
+            window._fxRecovers = (window._fxRecovers || 0) + 1;
+            if (window._fxRecovers > 3) {
+              FX_MODE = 'off';
+              localStorage.setItem('take_fx', 'off');
+              fxSyncUI();
+              fxStop();
+              if (typeof toast === 'function') toast(t('fxFallback'));
+            } else {
+              fxStop(); fxStart();
+            }
+          }
+        } else { bc.black = 0; }
+      } catch (e) {}
+    }
+  }
+}
+
+/* v19.6: RVFC 主驱动 — 回调绑视频帧率, 新帧才渲染, 与解码器零浪费同步 */
+function fxVF() {
+  const vEl2 = $('pvideo');
+  if (FX_MODE === 'off' || !vEl2 || vEl2.paused || document.hidden) { fxStop(); return; }
+  if (fxGl.isContextLost()) { fxStop(); return; }
+  fxRender(performance.now());
+  if (FX_MODE !== 'off') window._fxVH = vEl2.requestVideoFrameCallback(fxVF);
+}
+/* rAF 回退(老浏览器): 30fps 节流渲染 — 视频源24-30fps, 60fps渲染纯属浪费 */
+let fxLastT = 0;
+function fxLoop(ts) {
+  if (FX_MODE === 'off') return;
+  if (ts - fxLastT >= 33) { fxLastT = ts; fxRender(ts); }
+  fxRaf = requestAnimationFrame(fxLoop);
+}
+
+function fxStart() {
+  window._fxRecovers = 0;   /* v19.5: 新视频给特效重试机会; 连续3个视频都黑才维持关闭 */
+  const vEl = $('pvideo');
+  if (FX_MODE === 'off' || !vEl || vEl.paused || document.hidden) return;
+  if (fxGl && fxGl.isContextLost()) return;      /* v13: 上下文丢着别硬重建, 等 restored 拉起 */
+  if ($('pstage').classList.contains('audio')) return;   /* v15: 纯音频模式不开特效 */
+  if (!fxEnsure()) { FX_MODE = 'off'; localStorage.setItem('take_fx', 'off'); fxSyncUI(); return; }
+  fxFit();
+  fxCv.style.display = 'block';
+  cancelAnimationFrame(fxRaf);
+  if (window._fxVH && vEl.cancelVideoFrameCallback) { try { vEl.cancelVideoFrameCallback(window._fxVH); } catch (e) {} window._fxVH = 0; }
+  if (vEl.requestVideoFrameCallback) { window._fxVH = vEl.requestVideoFrameCallback(fxVF); }
+  else { fxRaf = requestAnimationFrame(fxLoop); }   /* 无RVFC回退 */
+}
+
+function fxSyncUI() {
+  const s = $('fxSel');
+  if (s) s.value = FX_MODE;
+}
+/* v17.1: 统一特效切换入口 — 设置页下拉和播放器面板都走这里 */
+function fxSet(m) {
+  FX_MODE = m;
+  localStorage.setItem('take_fx', m);
+  FX_MODE === 'off' ? fxStop() : fxStart();
+  fxSyncUI();
+  fxPopSync();
+}
+$('fxSel').onchange = e => fxSet(e.target.value);
+
+const FX_NAMES = { off: 'fxOff', crt: 'fxCrt', vhs: 'fxVhs', film: 'fxFilm', neon: 'fxNeon' };
+function fxPopSync() {
+  const el = $('fxPop');
+  if (!el) return;
+  const modes = ['off', 'crt', 'vhs', 'film', 'neon'];
+  el.innerHTML = modes.map(m => `<div data-fx="${m}" class="${FX_MODE === m ? 'on' : ''}">${t(FX_NAMES[m])}</div>`).join('');
+}
+document.addEventListener('click', e => {
+  const fxIt = e.target.closest('#fxPop [data-fx]');
+  if (fxIt) { fxSet(fxIt.dataset.fx); $('fxPop').classList.remove('open'); return; }
+  if (e.target.closest('#pFx')) { $('fxPop').classList.toggle('open'); return; }
+  if (!e.target.closest('#fxPop')) { const fp = $('fxPop'); if (fp) fp.classList.remove('open'); }
+});
+fxPopSync();
+{
+  const vEl = $('pvideo');
+  vEl.addEventListener('play', fxStart);
+  vEl.addEventListener('pause', fxStop);
+  vEl.addEventListener('emptied', fxStop);
+  vEl.addEventListener('loadedmetadata', () => { if (fxCv && fxCv.style.display !== 'none') fxFit(); });
+  window.addEventListener('resize', () => { if (fxCv && fxCv.style.display !== 'none') fxFit(); });
+  document.addEventListener('visibilitychange', () => { fxStop(); fxStart(); });
+}
+fxSyncUI();
+
 $('themeBtn').onclick = () => {
   THEME = THEME === 'auto' ? 'light' : THEME === 'light' ? 'dark' : 'auto';
   applyTheme();
@@ -4621,26 +5517,64 @@ $('themeBtn').onclick = () => {
 };
 
 /* ═══ 播放列表面板(缩略图+名称, 像 MPC-HC 那样边看边切) ═══ */
+function plrowHtml(i, sub) {
+  const x = FLAT[i];
+  const vd = x.vd || {};
+  const bvid = vd.bvid || '';
+  const cov = bvid && /^BV/i.test(bvid)
+    ? `style="background-image:url(/api/cover/${encodeURIComponent(bvid)}?v=${vd.cover_rev||0})"` : '';
+  const title = (vd.title || x.rel || '').slice(0, 60);
+  const pno = x.p && x.p.p ? `P${x.p.p}` : '';
+  return `<div class="plrow${sub ? ' plsub' : ''}${i === FI ? ' cur' : ''}" data-pli="${i}">
+    <span class="plth" ${cov}></span>
+    <span class="pln">${esc(title)}</span>
+    <span class="plp">${esc(pno)}</span>
+  </div>`;
+}
+
+/* v8.5: 播放列表和媒体库同款折叠 — 连续同 bvid 合并为一组, 点击组分P箭头展开/收回 */
 function renderList() {
   const body = $('listBody');
   if (!body) return;
   $('listCount').textContent = FLAT.length + ' ' + (t('items') || '');
   if (!FLAT.length) { body.innerHTML = `<div class="qempty">${t('qEmpty')}</div>`; return; }
-  body.innerHTML = FLAT.map((x, i) => {
-    const vd = x.vd || {};
-    const bvid = (vd.bvid || '');
-    const cov = bvid && /^BV/i.test(bvid)
-      ? `style="background-image:url(/api/cover/${encodeURIComponent(bvid)}?v=${(FLAT[FI]||{}).vd?.cover_rev||0})"` : '';
-    const title = (vd.title || x.rel || '').slice(0, 60);
-    const pno = x.p && x.p.p ? `P${x.p.p}` : '';
-    return `<div class="plrow${i === FI ? ' cur' : ''}" data-pli="${i}">
+  const groups = [];
+  for (let i = 0; i < FLAT.length; i++) {
+    const bv = ((FLAT[i].vd || {}).bvid) || '';
+    const last = groups[groups.length - 1];
+    if (bv && last && last.bvid === bv) last.items.push(i);
+    else groups.push({ bvid: bv, items: [i] });
+  }
+  const html = [];
+  for (const g of groups) {
+    if (g.items.length === 1 || !g.bvid) {
+      for (const i of g.items) html.push(plrowHtml(i, false));
+      continue;
+    }
+    const first = FLAT[g.items[0]];
+    const vd = first.vd || {};
+    const isCur = g.items.indexOf(FI) >= 0;
+    const cov = /^BV/i.test(g.bvid)
+      ? `style="background-image:url(/api/cover/${encodeURIComponent(g.bvid)}?v=${vd.cover_rev||0})"` : '';
+    html.push(`<div class="plrow plgrp${isCur ? ' cur' : ''}" data-plg="${esc(g.bvid)}">
       <span class="plth" ${cov}></span>
-      <span class="pln">${esc(title)}</span>
-      <span class="plp">${esc(pno)}</span>
-    </div>`;
-  }).join('');
+      <span class="pln">${esc((vd.title || '').slice(0, 60))}</span>
+      <span class="plp">${g.items.length}P</span>
+      <span class="plchev">\u25be</span>
+    </div>`);
+    html.push(`<div class="plparts${isCur ? ' open' : ''}">`);
+    for (const i of g.items) html.push(plrowHtml(i, true));
+    html.push('</div>');
+  }
+  body.innerHTML = html.join('');
 }
 $('listBody').addEventListener('click', e => {
+  const g = e.target.closest('[data-plg]');
+  if (g) {
+    g.classList.toggle('open');
+    if (g.nextElementSibling) g.nextElementSibling.classList.toggle('open');
+    return;
+  }
   const r = e.target.closest('[data-pli]');
   if (!r) return;
   startPart(+r.dataset.pli);
@@ -4649,7 +5583,6 @@ $('listBody').addEventListener('click', e => {
 $('pList').onclick = () => {
   const on = $('listPanel').classList.toggle('show');
   $('qpanel').classList.remove('show');
-  $('chapPanel').classList.remove('show');
   if (on) renderList();
   poke();
 };
@@ -4827,8 +5760,8 @@ function renderFilterChips() {
     <span class="chip${FILTER_TAG === '' && !FILTER_FAV ? ' on' : ''}" data-tag="" data-fav="0">${t('fAll')}</span>
     <span class="chip${FILTER_FAV ? ' on' : ''}" data-tag="" data-fav="1">
       <svg class="ic" style="width:11px;height:11px;vertical-align:-1px;fill:currentColor;stroke:none"><use href="#i-star"/></svg>${t('fFav')}${LIB_TAGS.fav ? ' ' + LIB_TAGS.fav : ''}</span>
-    ${all.map(x => `<span class="chip${FILTER_TAG === x.k ? ' on' : ''}" data-tag="${x.k}" data-fav="0">
-      <span class="tagdot" style="background:${x.c}"></span>${x.k}${counts[x.k] ? ' ' + counts[x.k] : ''}</span>`).join('')}`;
+    ${all.map(x => `<span class="chip${FILTER_TAG === x.k ? ' on' : ''}" data-tag="${esc(x.k)}" data-fav="0">
+      <span class="tagdot" style="background:${x.c}"></span>${esc(x.k)}${counts[x.k] ? ' ' + counts[x.k] : ''}</span>`).join('')}`;
 }
 $('filterChips').addEventListener('click', e => {
   const c = e.target.closest('.chip'); if (!c) return;
@@ -4947,7 +5880,6 @@ $('pQueue').onclick = () => { openQueue(); poke(); };
 /* 队列抽屉是全局的 —— 任何页面都能打开, 不必先进播放器 */
 function openQueue() {
   $('qpanel').classList.add('show');
-  $('chapPanel').classList.remove('show');
   $('listPanel').classList.remove('show');   // 三个面板互斥: 否则队列被列表面板整个盖住
   loadQueue();
 }
@@ -4968,8 +5900,25 @@ function toggleListSrc() {
 
 /* ═══ 文件夹浏览 ═══ */
 let BROWSE_PATH = '';
+function sizeText(mb) {
+  if (mb >= 1024) return (mb / 1024).toFixed(1) + 'GB';
+  if (mb >= 1) return mb.toFixed(1) + 'MB';
+  if (mb >= 0.01) return Math.round(mb * 1024) + 'KB';
+  return Math.max(1, Math.round(mb * 1048576)) + 'B';
+}
+function agoText(ts) {
+  if (!ts) return '';
+  const s = Math.floor(Date.now() / 1000 - ts);
+  if (s < 10) return t('agoNow');
+  if (s < 60) return t('agoS').replace('%d', s);
+  if (s < 3600) return t('agoM').replace('%d', Math.floor(s / 60));
+  if (s < 86400) return t('agoH').replace('%d', Math.floor(s / 3600));
+  if (s < 604800) return t('agoD').replace('%d', Math.floor(s / 86400));
+  return t('agoW').replace('%d', Math.floor(s / 604800));
+}
 async function browse(path) {
   BROWSE_PATH = path || '';
+  sessionStorage.setItem('take_browse', BROWSE_PATH);   /* v15.2: 切走再回来还在原目录 */
   let d;
   try {
     d = await api('/api/browse' + (BROWSE_PATH ? '?path=' + encodeURIComponent(BROWSE_PATH) : ''));
@@ -4991,10 +5940,23 @@ async function browse(path) {
     return;
   }
   if (d.moved) toast(t('bMoved'));
-  cr.innerHTML = d.path
-    ? (d.can_up ? `<span class="cb" data-bp="${esc(d.parent)}">..</span><span class="sep">/</span>` : '')
-      + `<span class="cb" data-bp="">${t('bRoot')}</span><span class="sep">/</span><span class="cb" style="color:var(--tx)">${esc(d.path.split(/[\\/]/).filter(Boolean).pop() || d.path)}</span>`
-    : `<span class="cb" style="color:var(--tx)">${t('bRoot')}</span>`;
+  if (d.path) {
+    /* v15.2: 全路径分段可点, 深目录任意层直达; 闸2不追踪多参箭头参数, 用行内声明循环写 */
+    const sep = d.path.includes('\\') ? '\\' : '/';
+    const raw = d.path.split(/[\\/]/).filter(Boolean);
+    let acc = d.path.startsWith(sep) ? sep : '';
+    let crumbHtml = d.can_up ? `<span class="cb" data-bp="${esc(d.parent)}">..</span><span class="sep">/</span>` : '';
+    for (let i = 0; i < raw.length; i++) {
+      const sg = raw[i];
+      const last = i === raw.length - 1;
+      acc = acc === '' ? sg : acc + sep + sg;
+      crumbHtml += `<span class="cb"${last ? ' style="color:var(--tx)"' : ` data-bp="${esc(acc)}"`}>${esc(sg)}</span>`;
+      if (!last) crumbHtml += '<span class="sep">/</span>';
+    }
+    cr.innerHTML = crumbHtml;
+  } else {
+    cr.innerHTML = `<span class="cb" style="color:var(--tx)">${t('bRoot')}</span>`;
+  }
   const dirs = (d.dirs || []).map(x => `
     <div class="browsecard" data-bdir="${esc(x.path)}">
       <span class="bi"><svg class="ic"><use href="#i-folder"/></svg></span>
@@ -5005,7 +5967,8 @@ async function browse(path) {
     <div class="browsecard" data-bfile="${esc(x.rel)}">
       <span class="bi"><svg class="ic"><use href="#i-play"/></svg></span>
       <span class="bn">${esc(x.name)}</span>
-      <span class="bm">${x.size}MB</span>
+      <span class="bm">${sizeText(x.size)}</span>
+      <span class="bm">${agoText(x.mtime)}</span>
       <span class="bops">
         <button class="queuebtn" data-bq="${esc(x.rel)}" data-bname="${esc(x.name)}" title="${t('qAdd')}">
           <svg class="ic"><use href="#i-plus"/></svg></button>
@@ -5017,6 +5980,14 @@ async function browse(path) {
         <div class="emptyActs"><button class="btn ghost sm" onclick="browse('');">${t('bBackRoot')}</button></div>
       </div>`}</div>`;
 }
+document.addEventListener('input', e => {   /* v15.2: 文件夹过滤, 事件委托一次搞定 */
+  if (e.target.id !== 'foldFilter') return;
+  const q = e.target.value.trim().toLowerCase();
+  document.querySelectorAll('#browseList .browsecard').forEach(c => {
+    const n = c.querySelector('.bn');
+    c.style.display = !q || (n && n.textContent.toLowerCase().includes(q)) ? '' : 'none';
+  });
+});
 $('browseList').addEventListener('click', e => {
   const dir = e.target.closest('[data-bdir]');
   if (dir) { browse(dir.dataset.bdir); return; }
@@ -5028,7 +5999,7 @@ $('browseList').addEventListener('click', e => {
     toast(t('opening'));
     FLAT = [{rel, vd:{title: rel.split(/[\\/]/).pop()}, p:{p:1, name:''}}];
     startPart(0);
-    $('pmodal').classList.add('open');
+    $('pmodal').classList.add('open'); document.body.classList.add('pm-open'); setTimeout(() => { if (typeof repairSurface === 'function') repairSurface(); }, 60);
   syncPanelTop();
   }
 });
@@ -5052,6 +6023,7 @@ async function loadLib() {
     const d = await r.json();
     if (d && Array.isArray(d.videos)) LIB = d;
     renderLib(); renderResume();
+    statsRender();   /* v17: 仪表盘跟着媒体库刷新 */
   } catch (e) {
     renderLib();   // 保留上一次的 LIB, 别把界面清空
   }
@@ -5312,7 +6284,7 @@ function openRel(rel) {
   let i = FLAT.findIndex(x => x.rel === rel);
   if (i < 0) { FLAT = [{rel, vd: {title: rel.split(/[\\/]/).pop()}, p: {p: 1, name: ''}}]; i = 0; }
   startPart(i);
-  $('pmodal').classList.add('open');
+  $('pmodal').classList.add('open'); document.body.classList.add('pm-open'); setTimeout(() => { if (typeof repairSurface === 'function') repairSurface(); }, 60);
   syncPanelTop();
   poke();                        // 控制条立刻显示, 别让用户干等
   renderList();                  // 播放列表面板同步刷新
@@ -5360,7 +6332,6 @@ function startPart(i) {
     if (!_seeked && saved > 5 && saved < v.duration - 8) { v.currentTime = saved; _seeked = true; }
     setTime();
     setProg(v.currentTime / (v.duration || 1));
-    loadChapters(rel, v.duration);   // 时长这时才准, 章节分段才对
     // 预热缩略图雪碧图 —— 以前只有"拖进度条"才生成, 章节面板打开时永远是黑的
     ensureThumbs(rel, v.duration);
   };
@@ -5383,17 +6354,25 @@ function startPart(i) {
   $('pthumbLive').classList.remove('on'); $('pthumbLive').dataset.sec = '';
   const myGen = ++_gen;                 // 代次令牌: 旧请求的响应直接丢弃
   loadSubs(rel, myGen);
-  loadChapters(rel, 0, myGen);
   updateMeta();
   poke();
 }
+function hideCtrl() {
+  clearTimeout(barT);
+  bar.classList.add('hide');
+  phead.classList.add('hide');
+  $('pthumb').style.display = 'none';
+  const cpH = $('pCPlay'); if (cpH) cpH.classList.add('hide');   /* v17.5: JS兜底(:has 为主) */
+  /* v17.4: 中央键常显(透明不挡画面), 当播放状态灯 */
+}
 function poke() {
   bar.classList.remove('hide'); phead.classList.remove('hide');
+  const cpS = $('pCPlay'); if (cpS) cpS.classList.remove('hide');
   clearTimeout(barT);
   // 5 秒(原来 3.2 秒太短, 手机上根本来不及点); 暂停时不自动隐藏
   barT = setTimeout(() => { if (!v.paused && !dragging && !pdrag) {
     bar.classList.add('hide'); phead.classList.add('hide');
-    $('pthumb').style.display = 'none'; } }, 6000);   // 6 秒: 手机上手速慢, 3 秒根本来不及点
+    $('pthumb').style.display = 'none'; } }, 3000);   // v17.2: 用户要求 3 秒
 }
 async function keepAwake(on) {
   if (!HAS_WAKELOCK) return;
@@ -5401,7 +6380,7 @@ async function keepAwake(on) {
         else { wl?.release(); wl = null; } } catch {}
 }
 function setPlayIcon() {
-  $('pPlayIc').setAttribute('href', v.paused ? '#i-play' : '#i-pause');
+  const cpu = $('pCPlayUse'); if (cpu) cpu.setAttribute('href', v.paused ? '#i-play' : '#i-pause');
 }
 v.addEventListener('play', () => { setPlayIcon(); poke(); keepAwake(true); $('pTap').style.display = 'none';
   $('pmodal').classList.add('playing'); });
@@ -5439,7 +6418,7 @@ v.addEventListener('progress', () => {
   } catch {}
 });
 const togglePlay = () => v.paused ? v.play().catch(() => {}) : v.pause();
-$('pPlay').onclick = togglePlay;
+if ($('pCPlay')) $('pCPlay').onclick = e => { e.stopPropagation(); togglePlay(); };
 let pdrag = false, pRatio = 0;
 /* ── 实时预览帧 (v6.16) ──────────────────────────────────────────────
    雪碧图是 12 段均布: 一小时的片子每段差 5 分钟, 拖到哪都差好几段 ——
@@ -5603,10 +6582,12 @@ function showMode(txt) {
   clearTimeout(modeT);
   modeT = setTimeout(() => { ov.style.display = 'none'; ov.style.fontSize = ''; }, 1300);
 }
-let baseB = parseFloat(sessionStorage.getItem('take_bright') || '1');
+let baseB = Math.min(1, parseFloat(sessionStorage.getItem('take_bright') || '1'));   /* v15.2: 存量>100%的也拉回 */
 function applyB(b) {
-  baseB = Math.max(0.4, Math.min(1.6, b));
-  v.style.filter = Math.abs(baseB - 1) < 0.02 ? '' : `brightness(${baseB.toFixed(2)})`;
+  baseB = Math.max(0.4, Math.min(1.0, b));          /* v15.2: 上限锁100%, 只调暗; 范围0.6跨度, 同滑程手感细一倍 */
+  baseB = Math.round(baseB * 20) / 20;              /* 5% 步进量化: 手指粗也能精确停档 */
+  if (Math.abs(baseB - 1) < 0.025) baseB = 1;       /* 100% 吸附区放宽到 ±2.5% */
+  v.style.filter = baseB === 1 ? '' : `brightness(${baseB.toFixed(2)})`;
   sessionStorage.setItem('take_bright', baseB);
 }
 stage.addEventListener('touchstart', e => {
@@ -5614,6 +6595,8 @@ stage.addEventListener('touchstart', e => {
   const tt = e.touches[0];
   sx = tt.clientX; sy = tt.clientY;
   baseT = v.currentTime; baseV = v.volume; dur = v.duration || 0; gmode = 0;
+  barPre = bar.classList.contains('hide');
+  barPreSet = true;
   applyB(baseB);
   poke();
 }, {passive: true});
@@ -5642,8 +6625,8 @@ stage.addEventListener('touchmove', e => {
     v.volume = nv; v.muted = nv === 0;
     ovShow(nv === 0 ? '🔇' : Math.round(nv * 100) + '%');
   } else if (gmode === 3) {
-    applyB(baseB - dy / 400);
-    ovShow('☀ ' + Math.round(baseB * 100) + '%');
+    applyB(baseB - dy / 300);
+    ovShow('☀ ' + Math.round(baseB * 100) + '%' + (baseB === 1 ? ' · 原色' : ''));
   }
 }, {passive: false});
 stage.addEventListener('touchend', () => {
@@ -5661,9 +6644,12 @@ function ripple(side, label) {
   stage.appendChild(d);
   setTimeout(() => d.remove(), 520);
 }
+let barPre = true, barPreSet = false;   /* v8.4: 手势开始时控件是否藏着(决定单击是亮还是收) */
 let lastTap = 0, tapTimer = null;
 stage.addEventListener('click', e => {
   if (e.target.closest('#pctrl') || e.target.closest('#phead') || gmode) return;
+  if (!barPreSet) barPre = bar.classList.contains('hide');
+  barPreSet = false;
   const now = Date.now();
   if (now - lastTap < 280) {
     clearTimeout(tapTimer); tapTimer = null; lastTap = 0;
@@ -5677,9 +6663,8 @@ stage.addEventListener('click', e => {
   lastTap = now;
   tapTimer = setTimeout(() => {
     tapTimer = null;
-    // 点一下永远是「显示出来, 停 6 秒」—— 不要再用第二次点击把它秒收,
-    // 那会让按钮只闪一瞬(旧 bug: touchstart 先显示, 这里再藏一次)
-    poke();
+    /* v8.4: 单击 = 切换。藏着→亮出来停6秒; 亮着→秒收 */
+    if (barPre) poke(); else hideCtrl();
   }, 280);
 });
 
@@ -5691,11 +6676,10 @@ function ensureThumbs(rel, dur) {
   fetch('/api/thumbs?rel=' + encodeURIComponent(rel) + '&dur=' + dur)
     .then(r => r.ok ? r.blob() : null)
     .then(b => {
-      if (!b) { thumbURL = ''; renderChapters(); return; }
+      if (!b) { thumbURL = ''; return; }
       thumbURL = URL.createObjectURL(b);
       const im = new Image();
       im.onload = () => { thumbW = im.naturalWidth; thumbH = im.naturalHeight; thumbReady = true;
-                          renderChapters();
                           if ($('pthumb').style.display === 'flex') showThumbAt(pRatio); };
       im.onerror = () => { thumbURL = ''; };
       im.src = thumbURL;
@@ -5824,7 +6808,7 @@ function closePlayer() {
   if (FLAT[FI] && v.duration) savePos(FLAT[FI].rel, v.currentTime, v.duration);  // 关之前把这集钉成"最近观看"
   setBuf(0);
   v.pause(); v.removeAttribute('src'); v.load();
-  $('pmodal').classList.remove('open', 'playing');
+  $('pmodal').classList.remove('open', 'playing'); document.body.classList.remove('pm-open');
   keepAwake(false);
   if (document.fullscreenElement) document.exitFullscreen();
   renderResume();          // 旧 bug: 关掉播放器回媒体库, 卡片还是老样子, 不刷新
@@ -5933,14 +6917,7 @@ function onForeground() {
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     _wasHidden = true;
-    if (HAS_PIP && !v.paused && !v.ended && $('pmodal').classList.contains('open')) {
-      if (v.webkitSetPresentationMode && v.webkitSupportsPresentationMode
-          && v.webkitSupportsPresentationMode('picture-in-picture')) {
-        try { v.webkitSetPresentationMode('picture-in-picture'); } catch (e) {}
-      } else {
-        v.requestPictureInPicture?.().catch(() => {});
-      }
-    }
+    /* v6.19 待办#4: 禁用自动小窗 — 切后台不再自动进 PiP; 手动 PiP 按钮(pPip)不受影响 */
     return;
   }
   _wasHidden = false;
@@ -6001,15 +6978,112 @@ async function pollTick() {
   if (_pollBusy || document.hidden) return;   // 隐藏时不轮询(省电) + 不堆积
   _pollBusy = true;
   try {
+    const onTask = !!document.querySelector('#page-task.active');
+    const onLib = !!document.querySelector('#page-lib.active');
     await refreshTasks();
-    await loadLib();
+    if (onTask || onLib) {          /* v19.1: 媒体库全量重建只在看它时做, 别的时候3秒白烧60卡渲染 */
+      const libEl = $('lib');
+      if (libEl) libEl.classList.add('rebuild');
+      await loadLib();
+      if (libEl) setTimeout(() => libEl.classList.remove('rebuild'), 150);
+    }
     if (_pollFail) { _pollFail = 0; toast(t('reconnected')); }
   } catch (e) {
     if (++_pollFail === 1) toast(t('lostConn'));   // 只在第一次断时提示
   } finally { _pollBusy = false; }
 }
 setInterval(pollTick, 3000);
-applyLang();
+applyLang(); histRender();
+
+/* ── v17 功能包 ── */
+function recentRender() {
+  const el = $('recentList');
+  if (!el) return;
+  const seen = new Set();
+  const h = histLoad().filter(x2 => { if (seen.has(x2.r)) return false; seen.add(x2.r); return true; }).slice(0, 10);   /* v17.2: 同文件只留最新一条 */
+  if (!h.length) { el.innerHTML = `<div style="opacity:.6;font-size:12px;padding:6px 0">${t('setRecentEmpty')}</div>`; return; }
+  el.innerHTML = h.map(x2 => {
+    const name = String(x2.r || '').split('/').pop() || x2.r;
+    return `<div class="qitem" data-open="${esc(x2.r)}" style="cursor:pointer">
+      <svg class="ic"><use href="#i-play"/></svg>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(name)}</span>
+      <span class="bm">${agoText((x2.at || 0) / 1000)}</span></div>`;
+  }).join('');
+}
+function statsRender() {
+  const el = $('statsBody');
+  if (!el) return;
+  const vs = (typeof LIB !== 'undefined' && LIB && LIB.videos) ? LIB.videos : [];
+  if (!vs.length) { el.innerHTML = '<div style="opacity:.6;font-size:12px">—</div>'; return; }
+  let parts = 0; let fav = 0; let sz = 0;
+  for (let i = 0; i < vs.length; i++) {
+    const v2 = vs[i];
+    const ps = v2.parts || [];
+    parts += ps.length;
+    if (v2.fav) fav++;
+    for (let j = 0; j < ps.length; j++) { sz += ps[j].size || 0; }   /* v17.2: part 字段是 size 不是 size_mb */
+  }
+  const gb = sz >= 1024 ? (sz / 1024).toFixed(1) + 'GB' : Math.round(sz) + 'MB';
+  el.innerHTML = `<div style="display:flex;gap:20px;flex-wrap:wrap;font-size:12px;opacity:.9">
+    <div><div style="font-size:22px;font-weight:700">${vs.length}</div>${t('stTotal')}</div>
+    <div><div style="font-size:22px;font-weight:700">${parts}</div>P</div>
+    <div><div style="font-size:22px;font-weight:700">${gb}</div>${t('stSize')}</div>
+    <div><div style="font-size:22px;font-weight:700;color:var(--acc)">${fav}</div>${t('stFav')}</div>
+  </div>`;
+}
+/* v17.2: 睡眠定时统一入口 — 设置页 chips 和播放器 Zz 面板共用 */
+function sleepSet(min) {
+  clearTimeout(window._sleepT);
+  window._sleepT = null;
+  document.querySelectorAll('#sleepRow [data-min], #sleepPop [data-min]').forEach(x3 =>
+    x3.classList.toggle('on', +x3.dataset.min === min && min > 0));
+  if (min > 0) {
+    window._sleepT = setTimeout(() => { const pv = $('pvideo'); if (pv) pv.pause(); toast(t('setSleep') + ' ✓'); }, min * 60000);
+  }
+  if ($('sleepState')) $('sleepState').textContent = min > 0 ? t('sMin').replace('%d', min) : '';
+  sleepPopSync();
+}
+function sleepPopSync() {
+  const el = $('sleepPop');
+  if (!el) return;
+  const cur = window._sleepMin || 0;
+  const mins = [0, 15, 30, 45, 60];
+  el.innerHTML = mins.map(m => `<div data-min="${m}" class="${cur === m && m > 0 ? 'on' : ''}">${m === 0 ? t('sOff') : t('sMin').replace('%d', m)}</div>`).join('');
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('#sleepRow [data-min]');
+  if (!b) return;
+  window._sleepMin = +b.dataset.min;
+  sleepSet(window._sleepMin);
+});
+document.addEventListener('click', e => {
+  const sp = e.target.closest('#sleepPop [data-min]');
+  if (sp) { window._sleepMin = +sp.dataset.min; sleepSet(window._sleepMin); $('sleepPop').classList.remove('open'); return; }
+  if (e.target.closest('#pSleep')) { sleepPopSync(); $('sleepPop').classList.toggle('open'); return; }
+  if (!e.target.closest('#sleepPop')) { const el2 = $('sleepPop'); if (el2) el2.classList.remove('open'); }
+});
+sleepPopSync();
+recentRender();
+statsRender();
+/* server 端进度合并进本地账本(重装/换浏览器不丢) */
+try {
+  fetch('/api/progress').then(r3 => r3.json()).then(sp2 => {
+    if (!sp2) return;
+    const local = histLoad();
+    const have = new Set(local.map(x4 => x4.r));
+    let added = 0;
+    const keys = Object.keys(sp2);
+    for (let i = 0; i < keys.length; i++) {
+      const rel = keys[i];
+      const vv = sp2[rel];
+      if (have.has(rel) || !vv || !(vv.pos > 20)) continue;
+      if (vv.dur && vv.pos >= vv.dur - 15) continue;
+      local.push({ r: rel, t: Math.round(vv.pos), d: Math.round(vv.dur || 0), at: Date.now() });
+      added++;
+    }
+    if (added) { histSave(local); renderResume(); recentRender(); }
+  });
+} catch (e) {}
 refreshTasks(); loadLib(); checkVer(); loadCfg(); loadTagStats(); loadQueue();
 initSubStyleUI();
 applyTheme();
@@ -7373,12 +8447,403 @@ node smoke.mjs        # 加载期冒烟: 用 DOM 桩真跑一遍脚本, 谁抛�
 - 浏览器需 Chromium 80+（可选链 `?.`）；Kiwi 太旧建议用户换 Via。
 - 播放 4K/高码率取决于片源与浏览器解码，面板不做转码。
 
-## 13. 部署机器档案
+## 12. 部署机器档案
 
 Android 手机（Termux + Termux:API + Termux:Widget，建议 F-Droid 版）+ Windows PC 双端使用；
 手机浏览器建议 Chromium 内核 80+；下载目录 `~/storage/downloads/decache`；Windows 上 start.bat 直接跑。
 
 *本文件随版本更新。改代码不改本文档 = 失职。*
+
+## 13. v6.18 升级记录 (2026-10-24)
+
+### UI v7→v8 · 六主题换肤系统(mono/geist/catppuccin/synthwave/retro/pipboy)
+- `<html data-ui="...">` 换肤, 明暗仍归 `data-theme` 三态, 主题自带亮/暗双套色板
+- 内置: mono(默认, 原样)/ refactor(Refactoring UI) / retro(Win95) / 8bit(NES) / pipboy(辐射终端)
+- 新增令牌 `--acc --acc-tx --ring --sh --font`, 全部注入在 index.html 尾部 "v7 主题包" 段
+- 动效只动 transform/opacity, `prefers-reduced-motion: reduce` 时全局关停
+- 播放器进度条吃 `--pink`, 字幕颜色从写死 `#fff` 改 `var(--tx)`
+- 设置页新增"界面风格" chips, localStorage `take_ui`; JS 仅新增 `applyUiTheme()` ~20 行
+- 预览: preview.html 免启动直接看 5 主题 × 3 明暗
+
+### 修复
+- **存储型 XSS**: `/api/tag` 零字符校验 + 前端标签裸插 innerHTML → 服务端拒 `<>"'&`, 前端 `esc()` 双层兜底
+- **HTTP/1.0 无 keep-alive**: handler 加 `protocol_version = "HTTP/1.1"`, 全部 13 个响应出口核对过 Content-Length (304 无体符合 RFC), selftest 全过 + 活体复用验证通过
+- 版本号 → 6.18
+
+### 验证 SOP 结果: selftest 全部通过 ✅ / frontcheck 七闸全过 ✅ / 活体 keep-alive + XSS 拦截 ✅
+
+## 14. v8 主题系统 (2026-10-24)
+
+基于 2026 设计趋势调研(玻璃拟态2.0/Catppuccin 人气配色/StyleShift Synthwave 规范/Vercel Geist 纪律)重做的换肤层:
+- refactor → geist(真 Vercel 纪律: --edge shadow-as-border/6-8-12 圆角/宽字距标签), 8bit 退役 → synthwave(深紫黑底+品红/青双霓虹+落日网格场景层)
+- 新增 catppuccin(Mocha/Latte 官方色板, 胶囊 chips)
+- 每主题补"组件语言", synthwave 独有 body::before 场景层(纯渐变合成层, 不随滚动重绘, 亮色自动关闭)
+- 发光只给主元素(StyleShift 教训: 到处发光=廉价)
+- v7 存档迁移: take_ui refactor→geist, 8bit→synthwave
+- mono/retro/pipboy 保留, 全部六主题 × 明暗仍归 data-theme 三态
+- 验证: frontcheck 全过 / node --check 过 / 13 张 Playwright 截图人工复核
+
+——以上 v6.18/v8 记录的是换肤层落地; v9–v12.1 演进见第 15–17 节。
+
+## 15. v9–v12 着色器特效 (WebGL 后处理)
+
+设置页「画质特效」下拉, localStorage 键 `take_fx`, 4 档:
+- **CRT 电视**: 扫描线+色差+失真+颗粒+辉光+微曲率+荫罩+信号行微闪+滚动亮带+亮度呼吸
+- **VHS 录像**: 弯波+细撕裂+色度涂抹+跟踪磁条+磁头噪带+偏色
+- **胶片颗粒**: 片门游移+24Hz 闪烁+连续颗粒
+- **霓虹辉光**: 高光涨落+彩虹呼吸+轻扫描
+
+硬约束(改前必读):
+- 单 pass 单着色器 12 uniform; 全部连续时间函数无跳变
+- 性能: DPR≤1.5(写 `window.devicePixelRatio`), 暂停/后台/关播放器即停渲染, WebGL 失败自动回退 off
+- 存档兼容: 旧 `tube` 档→`crt` 且落盘; 无效值白名单回退 `off`
+- `fxFit()`: 画布按 object-fit:contain 算法对齐视频, 防比例拉伸
+- 代码位置: <script> 内 `FX_PRESETS` + fxEnsure/fxStart/fxFit/fxLoop 函数组
+- 开发期预设表演示页 fx_demo.html 不在发行包内, 改它时小心大括号被替换吃掉, 改完 `node --check`
+
+## 16. v10–v11 播放器改造
+
+- 控制条 → 悬浮玻璃坞(毛玻璃圆角), v11 起进度条/旋钮/按钮/面板逐主题定制(六主题各一套)
+- 单击切换控件: 藏着→亮 6 秒, 亮着→秒收; `barPre` 手势前状态捕获防闪一瞬
+- 播放列表折叠分组: 连续同 bvid 合并为一组, 点组头展开/收回, 当前集自动展开
+  (renderList/plrowHtml + .plgrp/.plparts CSS)
+- 字幕颜色固定白字/黑底, 与主题无关(applySubStyle), 勿接主题令牌
+- 代码位置: hideCtrl/poke + barPre 捕获; 换肤 JS「UI 主题包」段 applyUiTheme
+
+## 17. v12.1 GL 上下文回收修复
+
+安卓切后台系统会回收 WebGL context, 切回花屏/变卡。
+fxEnsure() 已挂 `webglcontextlost`(preventDefault+fxStop) / `webglcontextrestored`
+(置空 fxPr/fxTex/fxU → fxEnsure 重建程序 → fxStart) 监听, 并配合 visibilitychange 先停再启。
+**勿删这两个监听。**
+
+## 18. v6.19 待办收尾 (2026-10-24)
+
+- **待办#4 已结**: 删除 visibilitychange 里"切后台自动 requestPictureInPicture"块;
+  手动 PiP 按钮(pPip)与 HAS_PIP 能力检测保留(按钮显隐判定用)
+- 文档补齐: 本 HANDOVER 新增第 15–17 节, 尾部章节重编号(12 部署档案 / 13 v6.18 / 14 v8)
+- 包卫生: 清除 .frontcheck.tmp.js、cookies/*.tmp、HANDOVER.md.bak 入包
+
+## 19. v6.20 播放器整改 (2026-10-24, 真机反馈驱动)
+
+- **着色器丝滑化**: fs 里 4 处 `floor(tm*24/30/17)` 低频整屏跳变全改连续函数(多频 sin, 行号只做相位);
+  "顿顿的"根因就是它, 不是性能问题
+- **CRT 褪色+色偏**: 新 uniform `fd` — 降饱和+黑位轻提+暖绿偏色; crt 档 `fade:.3`;
+  声明/上传/预设四处都要接, 漏一处就是静默无效
+- **编译/链接检查**: fxCompile/fxEnsure 现在检查 COMPILE_STATUS/LINK_STATUS, 失败 console.warn + 回退 off;
+  之前编译失败会静默直出原片 = "有的档有效果有的没有"的隐藏根因
+- **切后台健壮性**: fxStart/fxLoop 入口查 `isContextLost()`, 丢着不硬重建, 等 webglcontextrestored 拉起;
+  lost 期间不再空转画黑帧
+- **章节功能整个删除**: pChap 按钮/chapPanel/chapMarks 分段条/loadChapters/renderChapters/renderChapList
+  及全部调用点已清; server 端 /api/chapters 和 /api/marks 端点还在(前端不再调用), 要彻底清再删 server.py
+- **播放器头部主题化**: 根因 = #pmodal 硬重置了一套 mono 局部变量把主题色板全盖了;
+  现在五主题各一行 `#pmodal` 变量映射(恒暗色板) + #phead 背景逐主题渐变 + .ttl/.icbtn 接 var(--tx)
+- **血泪新增**: ① cut_block 删函数后检查残留 `);` `;` 孤儿行 ② 闸2 不追踪多参数箭头函数参数,
+  删函数时若带走了平铺声明表里的名字, 别处的合法参数引用会连坐误报(本次 gi 案: 没用的参数直接删)
+
+## 20. v14 · 主题性格化 (2026-10-24)
+
+每个主题有自己的视觉语言, 不再只是换色/换字:
+- **retro 像素庄园**: 星露谷(暖木纸感卡+◆符) × MC(物品栏格硬边内阴影) × WinXP(凸起按钮, 已有);
+  新增像素云+草地天际线场景层; logo 用 Press Start 2P(仅标题, 正文保可读); tabbar 小像素大写+下划线选中
+- **pipboy 终端大融合**: 辐射绿基调 + TUI 语汇 — 边框卡/ $ 提示符/ [] 选中/tab [按钮] 括号/打字机 logo(steps 动画);
+  扫描线/辉光/▮光标保留
+- **synthwave 霓虹之夜**: logo 铬字渐变(Orbitron+background-clip:text, 原 text-shadow 须置 none 否则透明字出影框);
+  .page::before 星闪层(z-index:-1 在 body::before 之后→盖场景层底下内容上面); light 模式隐藏(同落日规则)
+- **catppuccin 奶油玻璃**: 毛玻璃卡(backdrop-filter blur 12px)+粉彩渐变按钮+胶囊 chip
+- **geist 工程网格**: 蓝图网格纹理(.page::before+mask 渐隐)+下划线选中+卡片细边框轻投影
+- 字体: Google Fonts link(offline 时 display=swap 秒回退系统字体, 不阻塞渲染)
+- 新动画全部包进 prefers-reduced-motion
+- 血泪: content 动画 steps() 对 logo 长度不敏感, 宁多勿少; background-clip:text 与 text-shadow 互斥
+
+## 21. v15 · 真机二轮反馈修复 (2026-10-24)
+
+- **纯音频黑屏**: `#pstage.audio` 时 video 被 CSS 隐藏, 但 fxCv 特效画布没禁用 → 对着无帧纹理画全黑。
+  修: CSS `#pstage.audio #fxCv{display:none!important}` + fxStart 拦截 audio 类。音频视频别再开特效
+- **面板主题化漏网**: `.qh`(×3) `.qitem` 的 color 和面板分隔线是 v6 时代硬编码白色系, 不换变量主题进不来。
+  已全部换 var(--tx)/var(--line)/var(--tx2)
+- **播放器按钮全白**: `#pmodal` 的 `color:#FAFAFA` 写死属性盖掉了 v13 的变量映射(映射只改了--tx变量,
+  子元素继承的是color属性)。改 `color:var(--tx)`, mono 下 --tx 同为 #FAFAFA 视觉零回归
+- **窄屏控制条拥挤**: pctrl/phead 按钮 ≤560px 缩到 32px、≤380px 缩到 28px, pipboy 按钮括号窄屏收起,
+  最大化按钮不再被挤出屏
+- **logo De cache 大空隙**: v14 打字机 width 动画把 .logo 拉成父容器全宽, flex 下文字被拉散。
+  改 clip-path:inset 动画, 零布局副作用
+- **CRT 像素微发光**: 新 uniform `pg` — 4邻域采样溢出 bloom, crt 档 `pglow:.5`
+- **i18n 混杂根因**: 词典 203 键中英齐全; 混杂是动态面板(凭据/队列/SOP)初始化时插文本,
+  切语言后不重渲。langBtn 加 location.reload() 根治
+- **血泪**: ① 改 --xxx 变量后检查同规则里有没有写死的 color/background 属性盖它 ② width 动画做打字机
+  会撑满父宽, 用 clip-path ③ CSS 硬编码色审计清单: .qh/.qitem/#pmodal/phead——以后新增面板组件必须用变量
+
+## 22. v15.2 · 亮度手感 + 文件夹升级 (2026-10-24)
+
+- **亮度锁 100%**: applyB 上限 1.6→1.0 只调暗; 范围跨度 1.2→0.6 同滑程手感细一倍(dy/300);
+  5% 步进量化(每 20px 一档, round(b*20)/20); 100% 吸附区放宽 ±2.5%; 存量 take_bright>1 载入即拉回;
+  吸附成功显示 "☀ 100% · 原色"
+- **文件夹五件套**: ① 人性化大小 sizeText(436KB/1.2MB/3.4GB) ② agoText 修改时间(3天前,
+  server 的 mtime 早就在响应里, 前端一直没接) ③ 面包屑全路径分段可点(原代码只有 根/..当前 三层,
+  中间全断; 循环写法避闸2多参箭头连坐) ④ take_browse 存 sessionStorage, 切走再回原地
+  ⑤ foldFilter 名称过滤框(事件委托绑定一次, data-i18n-ph 已有机制零新增)
+- **i18n 补 7 词条**: bFilter/agoNow/agoS/agoM/agoH/agoD/agoW (zh/en 各一套, %d 模板)
+- **血泪**: ① 闸2 不追踪多参数箭头函数参数 — 模板串里用参数就报未声明, 写法首选用行内
+  let/const 循环, 或删无用参数 ② server.py 的 VERSION 常量要和 UI 版本一起走, 不然用户看版本号
+  以为没装上(本次 6.18→15.1 就是祖传字符串没同步)
+
+## 23. v15.3 · 全面自审 + 下载历史 (2026-10-24)
+
+- **下载历史**: parse 成功记 localStorage take_hist(去重, 最多 8 条); page-dl 输入框下 chips 行,
+  点击回填+自动重新解析; data-hu 属性 + 事件委托绑定一次; 初始化随 applyLang 渲染
+- **server 死端点删除**: /api/chapters /api/marks(章节功能 v6.20 已删前端) /api/open(前端从没调用)。
+  删法: 从 `if u.path == "..."` 切到下一个 `if u.path ==` 前; 删完必须 python3 -m py_compile
+- **自审确认健康**: 手势三模式(进度/音量/亮度)逻辑完好; 倍速早就有 localStorage 记忆;
+  i18n 203 键对齐; /api/stream|sub|thumb|library|frame 均被前端正常使用(拼参形式)
+- **待办(不紧急)**: 词典 ~80 死词条(chAdd 等章节遗留)、chapPanel/chapMarks 死 CSS 规则——纯脏无害;
+  任务页可加批量取消/自动归档; 媒体库可加排序选择器
+- **血泪**: rep 用 `function xxx() {` 当锚点时, 先确认原文有没有 `async ` 前缀 — 被顶掉的话
+  async 会 orphaned 粘给下一个函数, 原函数丢 async 里面 await 全炸(本次事故实录);
+  以后锚点统一用 `async function xxx` 或带前文上下文
+
+## 24. v16 · 微交互炫酷包 (2026-10-24)
+
+2026 移动端 UI 趋势落地: 即时反馈/spring 按压/分层入场, 全部 transform+opacity (GPU 合成, 不重排):
+- **按压反馈**: .btn/.icbtn/.chip/.tabbar button :active scale(.93) (tabbar .9), 橡皮筋曲线 cubic-bezier(.34,1.56,.64,1)
+- **页面切换升级**: .page 由淡入改 淡入+上浮 pageIn .32s, 覆盖旧 fadein(旧 keyframes 留无害)
+- **聚焦光环**: input/textarea/select :focus 主题色 3px 光环(color-mix 22%), 高级感主力
+- **进度条流光**: #pfill::after 无限扫光 — 只挂播放器进度条(稳定DOM), 任务列表高频重渲绝不挂
+- **stagger 入场**: .browsecard/.vcard/.tcard 逐张上浮(6级延迟) — 只挂用户主动触发的低频列表
+- **reduce-motion 全收**: 新动画一个不落的进媒体查询
+- **血泪**: ① 入场动画绝不能挂高频 innerHTML 重渲的容器(任务列表每秒重建→每秒闪) ② .logo 入场
+  别碰 — pipboy 打字机/v14 主题 logo 规则特异性会互相覆盖, 各主题 logo 已有特色
+
+## 25. v17 · 设置页 + 功能六件套 + 自适应主题 (2026-10-24)
+
+- **独立设置页** page-settings: nav 齿轮; 从下载页搬入 凭据/手机访问/字幕大小/特效/日志/界面风格 六张卡
+  + 孤儿分组 h2 一并清理; 新增 睡眠定时/最近播放/统计 三卡
+- **观看进度备份**: server.py `/api/progress`(POST 存+_progress.json 落盘 / GET 全量);
+  savePos() 写入时同步 server; 启动时 server 记录合并回本地 hist 账本(>20s 且未看完15s内才算),
+  续播卡片(renderResume)与最近播放自动获得跨浏览器/重装不丢的能力
+- **批量下载**: input#url→textarea; parse() 拆 parseOne(raw), 多行逐行解析排队(350ms 间隔)
+- **睡眠定时**: 设置页 chips(关/15/30/45/60), window._sleepT, 到点 pause+toast
+- **最近播放/统计**: 复用 histLoad 账本(点击 data-open 走现有 openRel 委托); 仪表盘 LIB.videos
+  (视频数/P数/size_mb 总大小/收藏), statsRender 挂 loadLib 刷新
+- **第 7 主题 mauto「自适应」**: 视频帧 drawImage 到 8×8 canvas, 取"饱和度×亮度"最高分像素为主色,
+  5s 间隔写内联 --acc/--edge/--srf2; CSS 兜底防闪烁; 切走 mauto 时 removeProperty 防污染其他主题;
+  #pmodal 映射不覆盖 --acc → 播放器控件自动跟主色
+- **大扫除**: 程序化检测删 17 死词条(×中英) + 14 条 chap 死 CSS 规则
+- **血泪**: ① 搬卡时别落下分组 h2(孤儿标题) ② 死词条检测要扫双引号和 data-i18n 属性两种引用
+  ③ Object.entries().forEach 回调参数闸2不认, 用 for 循环+行内 const ④ rep 锚点先核对 async 前缀
+
+## 26. v17.1 · 播放器内特效快切 (2026-10-24)
+
+- pctrl 加 FX 按钮(i-theme 图标), 点击弹出 #fxPop 面板(上浮淡入, absolute 挂 #pctrl)
+- 5 档直达: 关/CRT/VHS/胶片/霓虹, 当前档高亮; 设置页 fxSel 与面板双向同步
+- fxSet(m) 统一入口封装(原 onchange 三行散落逻辑), 两处 UI 都调它
+- 面板点击外部自动收起; 词条复用 fxOff/fxCrt/fxVhs/fxFilm/fxNeon
+
+## 27. v17.2 · 黑屏根治 + 播放器重排 (2026-10-24)
+
+- **特定主题播放黑屏根治**: 根因 = synthwave/pipboy 场景层的 infinite 动画与 Android video 硬件解码层冲突。
+  body.pm-open 挂/摘钩子(随 pmodal open/close), CSS 一条 animation-play-state:paused 全场景层静默;
+  openPlayer 60ms 后 repairSurface() 双保险
+- **最近播放去重**: hist 账本是"每次观看一条"设计, recentRender 按 r 去重只留最新
+- **统计 0MB**: part 字段是 size 不是 size_mb
+- **控件隐藏 6s→3s**(poke 的 barT)
+- **播放器重排**: ① 中央播放键 #pCPlay(74px 毛玻璃圆钮, absolute 居中, 复用 togglePlay,
+  play/pause 同步 <use>, hideCtrl/poke 同 lifecycle) ② pctrl 移除 pPlay(悬空引用已清, 闸1 把关)
+  ③ FX 按钮上移 hrow2, fxPop 改顶部弹出 ④ 睡眠 Zz 按钮上移 hrow2 + sleepPop 面板,
+  sleepSet() 统一入口设置页/播放器两处共用 ⑤ #phead 本就是 absolute(定位上下文现成)
+- **血泪**: ① 删按钮必须全局搜 id 引用(闸1 会逮, 但最好在删前先搜) ② 场景层动画是 Android video
+  黑屏的高发根因, 播放器打开期间静默是通用解法
+
+## 28. v17.3 · 中央键收尾 + 着色器流畅根治 (2026-10-24)
+
+- **中央键**: 透明度 .55→.30/边框 .28→.16/68px(不挡画面); 补齐漏网显隐路径 — 单击手势
+  和 pause 事件里直接操作 bar 的代码不走 hideCtrl/poke, 中央键曾只在主路径跟随
+- **着色器"顿顿的"根治四板斧**:
+  ① GL 上下文加 powerPreference:'high-performance' — 别把渲染分去省电核心
+  ② texImage2D 去重 — video 解码 24-30fps vs rAF 60fps, currentTime 没变就跳过重上传, 省一半纹理带宽
+  ③ 基准分辨率 DPR cap 1.5→1.25 — 起点降 30% 像素
+  ④ fps 自适应 — 每 45 帧统计: 持续<38fps 渲染尺度×0.85(最底 0.5, fxFit 重算画布), >55fps 缓慢回升
+- 顿感根因链: Android Chrome 给网页分省电调度 → rAF 帧率低 → 时间连续但帧间隔大 → 效果跳动
+
+## 29. v18 · 播放器主题深融合 (2026-10-24)
+
+终端主题融合的配方 = pctrl 全定制 + phead 渐变 + pmodal 变量映射 + TUI 语汇多层叠加;
+其他主题只吃了变量映射的表层。补齐:
+- **病灶板变量化(一处治好所有主题)**: #partCover 封面底板 #1b1b26→var(--srf2)/var(--bg);
+  #listPanel/#queuePanel 面板底 rgba(16,16,20,.97)→color-mix(var(--srf3) 96%) — 这俩是"封面/面板不跟主题"的元凶
+- **pfill 进度条短板**: catppuccin 粉彩渐变 / geist 纯白 — 之前它们露着 mono 的 B 站粉, 割裂感主源
+- **geist pctrl 补完**: 之前裸奔(只有 icbtn.on 颜色), 现在深灰底+细边+白字
+- **中央键逐主题**: pipboy 绿边 / synthwave 霓虹边 / catppuccin 粉彩边 / retro 像素方钮
+- **retro 像素块进度条**: repeating-linear-gradient 9px 草绿块 — MC 物品栏语汇延伸
+- mono 进度条保留 B 站粉 = mono 的个性, 不动
+
+## 30. v18.1 · 封面融合 + synthwave 阳光 (2026-10-24)
+
+- **"纸片感"根治**: 媒体库封面是实打实的彩图, 卡片硬边贴背景上像异物。两味药:
+  ① .vcard .cov::after 底部 32% 渐变(var(--srf)) — 封面下缘"熔接"进卡底板, 消硬边
+  ② --cardglow 环境辉光(卡片阴影叠一层主题色) — 各主题变量段声明, :root 默认透明, mauto 也有份
+- **synthwave 阳光**: body::before 背景顶部加两层 — repeating-conic 从太阳中心(50% 104px)
+  向下 2.5°宽金黄光束扇形展开(9°周期) + 180px 橙金光晕。repeating-conic 放最上层被太阳圆盖中心,
+  光束自然从日缘射出; 透明度 .10 不抢戏
+
+## 31. v18.2 · 全局 UI 融合层 (2026-10-24)
+
+- **顶面主题光**: 所有卡片/面板/标签组/目录行 background-image 叠加 7% --acc 顶渐变(42% 处淡出),
+  像被场景光源照亮; 用 background-image 分量叠加, 不碰现有 background 简写和 box-shadow
+- **环境辉光**: filter:drop-shadow(0 6px 18px var(--cardglow)) — drop-shadow 不动 box-shadow,
+  retro 的像素阴影/pipboy 的内辉光零冲突
+- **毛玻璃透出**: synthwave blur 18(原 82% 半透明无 blur) / geist 85%+blur 14 / retro 94% 微透无 blur(保像素锐度)
+- retro 全程排除渐变/辉光 — 纸片人格不能软; pipboy/mono 本就单色无场景层, 不加 blur
+- mono 补 --cardglow 淡粉(.06)
+- **血泪**: 叠加光影别用 box-shadow 简写(会清掉主题定制阴影) — background-image 分量叠加 +
+  filter:drop-shadow 是零冲突双通道
+
+## 32. v17.4 · 黑屏根除 + 中央键常显 (2026-10-24)
+
+- **黑屏从"缓解"到"根除"**: v17.2 的暂停动画只治了 animated 层, retro 的**静态** fixed 场景层
+  同样触发 video 解码层冲突(用户实测复现)。修法升级: 播放器打开时 display:none 场景层 — 
+  全屏被不透明 #pmodal 盖死, 场景层本就看不见, 隐藏零视觉代价, fixed 层冲突连根拔除
+- **中央键常显**: 之前跟着 hideCtrl 隐藏 → 用户看到"点一下出现再消失"以为没生效。实际它是
+  正常工作的, 只是被误隐藏。撤出隐藏体系常显, 透明度再降 .30→.22, 定位=播放状态灯
+  (播放中显暂停图标/暂停显播放图标)
+
+## 33. v17.5 · 中央键收尸 + 着色器热节流稳态 (2026-10-24)
+
+- **中央键**: ① 删 backdrop-filter — Android 上 backdrop-filter 元素与 video 同框是黑屏大户(retro 黑屏嫌疑+1)
+  ② 显隐改 #pmodal:has(#pctrl.hide) #pCPlay 纯 CSS — 显隐 100% 跟随控制条, hideCtrl/poke/单击手势/
+  pause 所有野路径自动同步(旧 JS 逐路径挂钩必然漏), JS 钩子留作 :has 不支持时兜底
+- **着色器越用越卡**: 不是内存泄漏(program/texture 复用、监听一次性绑定, 全排查过) — 症状
+  "视频流畅着色器卡" = 手机发热降频: 硬解视频不吃 CPU, GL 效果吃 GPU 先感知。
+  旧自适应在发热场景 fps 38-55 间震荡 → 每 45 帧重设 canvas(纹理重 alloc+合成层重建) 反而更卡。
+  稳态化: 快降(×.8)/慢升(+.04)/双阈值滞回(降<38 升>58)/升档 30 秒锁定/采样窗 45→60 帧
+
+## 34. v19 · 性能大治理 (2026-10-24)
+
+- **#phint span**: 删 backdrop-filter:blur(6px) — retro 黑屏最后嫌疑(视频区里最后一个 blur 雷)
+- **毛玻璃降档**(大面积 blur 是移动端最贵 CSS, 媒体库 60 卡滚动时卡爆):
+  synthwave 18→10 / geist 14→8 / catppuccin 12→8+底更不透明(84%)
+- **drop-shadow → box-shadow 多层**: v18.2 的 filter:drop-shadow 给每张卡建合成层(60卡=60层),
+  改 box-shadow 追加辉光层(绘制时画, 不建层); retro/pipboy 排除保定制阴影
+- **着色器再压**: DPR 基准 1.25→1.0(像素量-36%, 6寸屏1080p看不出), 自适应下限 0.5→0.4 降档 ×0.8→×0.75
+- 场景动画排查: synPulse/synRoll/geist漂移/pipboy 全是 transform/opacity 合成器动画, 便宜, 不动
+- **血泪**: 移动端 CSS 性能三雷区排序: backdrop-filter > filter(每元素合成层) > 大面积渐变动画;
+  辉光类效果永远优先 box-shadow 多层方案
+
+## 35. v19.1 · 落日体积光 + 发热根治 (2026-10-24)
+
+- **落日重做**: 删 repeating-conic 线条光束(用户: 太low) → 体积光四件套:
+  ① 地面反光 linear-gradient(to top) 橙金洒在网格上 ② 宽光柱 conic 带亮芯(11°-23°, 中心 .26 亮)
+  ③ 天空染色 顶部暖橙渐变 ④ 暖阳晕 210px。静态渐变零动画成本
+- **发热根治**: pollTick 原每 3s 无条件 refreshTasks+loadLib — loadLib 重建 60 张卡+触发
+  vcard stagger 动画每 3s 全场重播(动画挂高频容器, v16 时的告诫自己踩了)。门控:
+  媒体库全量重建只在 任务页/媒体库页激活时; 其他页只 refreshTasks(轻量)。轮询重建时
+  #lib.rebuild 禁入场动画
+
+## 36. v19.2 · 着色器渐进卡顿收尾 (2026-10-24)
+
+- **texImage2D → texSubImage2D**: Chrome 对 video 元素反复 texImage2D 会走存储重分配路径,
+  部分驱动累积 GPU 内存不释放 = "越用越卡"的驱动级根因(已排除 JS 泄漏/监听绑定/program 复用)。
+  texSubImage2D 只更新像素不重新分配存储(官方推荐); 首帧仍 texImage2D 初始化(window._fxTInit 标志,
+  纹理重建时归零)
+- 至此着色器性能五层防御: 高性能GPU → 纹理去重 → DPR1.0基准 → fps自适应稳态 → texSubImageD
+
+## 37. v19.3 · 双视频叠加根治 + 原生清晰度 (2026-10-24)
+
+- **双视频叠加/黑屏真凶**: v19.2 的 texSubImage2D 有尺寸陷阱 — 换视频后新分辨率≠纹理存储尺寸
+  时更新 INVALID_OPERATION, fxCv 画布冻结在旧视频最后一帧 → 新旧画面叠加(或整片冻结=黑屏感)。
+  修法: videoWidth/Height 匹配才走 texSubImage2D, 不匹配/首帧/分辨率变化 → texImage2D 全量重建
+- **清晰度还原原生**(用户点名): 删 _fxQ 分辨率降档(含稳态逻辑), DPR 上限 1.0→2.0。
+  保留: 纹理去重 + texSubImage2D(尺寸守卫版) — 这俩不降画质
+- synthwave 卡底 82%→90%, 落日透出含蓄
+
+## 38. v19.5 · 黑屏自愈架构(永久根治) (2026-10-24)
+
+七轮对症修复(synthwave/pipboy/retro 轮流犯)证明根因是机型/GPU/驱动层面的组合, 远程猜测修不完。
+换打法: 自愈 — 让"用户看到黑屏"在系统层面不可能发生:
+- fxLoop 每 30 帧 gl.readPixels 读画布中心像素, 连续 3 次(<5/255, ~1.5s, 防夜景误伤) 全黑
+  且 video 在播/非音频 → fxStop+fxStart 重建 GL 全链路(program/texture/缓冲全重建)
+- 同视频重建 >3 次仍黑 → FX_MODE=off 落盘, 回退原生 video(fxStop 隐藏 fxCv 即露出原画),
+  toast 提示; 下个视频 _fxRecovers 归零给特效重试机会, 连续 3 个视频都黑才维持关闭
+- 不猜根因: 驱动 bug/图层冲突/纹理失败/静默 context lost — 黑=被检测=被修复或回退
+- **血泪**: 反复出现的平台级 bug, 别再做第 N 次根因猜测 — 上自检+自愈+优雅降级三件套
+
+## 39. v19.6 · 着色器根治·RVFC 架构 (2026-10-24)
+
+搜索+发散后的架构级重做:
+- **渲染驱动: requestVideoFrameCallback 替代 rAF** — 回调绑视频解码帧率(25fps视频=25次渲染/秒,
+  rAF 60 次纯属浪费), 与解码器零浪费同步, 时间仍连续(performance.now() 驱动 GLSL 时间)
+- **texImage2D 回退**: Unity 论坛实测 Chrome 上 texImageD **way faster**, 此前按通用建议改的
+  texSubImage2D 方向错误已回退; RVFC 每次回调必是新帧, 天然去重, 直接全量
+- **rAF 30fps 节流回退**(老浏览器)
+- 驱动双轨: 支持 RVFC 走 fxVF, 不支持走 fxLoop, fxStart 自动选, fxStop 双取消
+- 黑屏自愈(v19.5)在 fxRender 内继续生效
+- 理论依据: ml5/Chrome 案例 GPU 进程随 video-texture 时长劣化 → 渲染次数减半 = 累积速度减半,
+  配合 RVFC 精确同步消除空转
+
+## 40. v19.7 · 终极体检收官 (2026-10-24)
+
+全项目发散审计结论:
+- **后端健康**: ThreadingHTTPServer(多线程, 视频流不堵API) + Range 13处 + 死端点已清
+- **前端规模**: 221KB 单文件 / CSS 646 规则 / JS 2436 行 / i18n 220+键中英对齐 / 30 SVG 图标
+- **渲染管线**: RVFC 驱动 + texImage2D + 黑屏自愈 + readPixels 自检 — 平台级问题全部架构自愈
+- **性能三雷区**: backdrop-filter 34处残留全是已降档卡片(8-10px) | drop-shadow 合成层已清 |
+  轮询已页面门控
+- **定时器**: 仅 2 个 setInterval(mauto 5s 取色带主题预检 + pollTick 3s 已门控)
+- sw 缓存名 v1→v2
+
+## 41. v19.8 · 合成层快路径 (2026-10-24)
+
+搜索"丝滑且省电"的 actionable 结论:
+- **fxCv/pvideo 加 translateZ(0)**: 15 浏览器实测 Android Chrome 合成提升 35%(web_search:269#9) — 每帧
+  参与合成的两个元素走合成器快路径, 不再每帧与页面层协商
+- 旁证搜索: DVFS 论文证实"帧率匹配负载"是省电视角的最优解(RVFC 已做到); emscripten 官方
+  "lowest possible precision on mobile"(mediump 已符合); "单 pass SuperShader"(已符合);
+  渲染循环零对象分配(已符合)
+- 剩余理论空间: shader 分支削减/低精度 hash — 收益小风险大, 不动
+
+## 42. v19.9 · 着色器定期保养 (2026-10-24)
+
+- window._fxCare 每 90 秒(仅播放中): deleteTexture + createTexture + 参数重设 + _fxTInit=0
+- 原理: ml5/Chromium 案例证实 Chrome GPU 进程处理 video-texture 随时长渐进劣化; 定期换纹理对象
+  让该路径重走干净初始化, 累积每 90 秒清零一次
+- 零打断: 纹理每帧本来就要上传(texImageD), 换对象后下一帧就是一次常规全量上传, 单帧开销无感
+- program 对象不保养: 重编译要几十 ms 会真卡; 单对象无累积问题
+- 暂停/关闭/特效关/context丢 时不动作
+
+## 43. v19.10 · 感知层优化 (2026-10-24)
+
+发散推演结论:
+- 人眼流畅感主因 = 帧间隔均匀(jank感知), 不是帧率高 — 24fps电影恒定间隔没人说卡。
+  RVFC 天然供给恒定间隔, 此层已满配
+- 死路两条(已排除): 双纹理ping-pong(直接采样视频帧架构, 交替会放出旧帧);
+  帧混合柔化(需FBO双pass, 成本反涨40-60%)
+- 落地: ① GLSL 时间流速 ×0.9 — 运动幅度降10%, 同样帧率下更柔更不暴露不均匀,
+  速度变化低于人眼察觉阈 ② 纹理保养 90s→60s
+
+## 44. v19.11 · 全项目终审 (2026-10-24)
+
+逐文件审查结论:
+- **server.py (2937行)**: ThreadingHTTPServer + safe_media_path/safe_dir_path 路径穿越双防护 + Range
+  拖动 + iOS MP4 兼容副本 + 死端点已清 — 健康
+- **start.sh/boot.sh**: 保活循环+wakelock+termux-notification 完备 — 健康
+- **sw.js/manifest**: 网络优先+离线壳, 缓存名 v2 — 健康
+- **前端盲区复查**: 字幕系统(gen代次令牌防竞态)/任务系统(Map)/下载队列 — 健康;
+  eval=0, XSS esc() 双层防御在位, console 仅 shader 编译告警 2 处
+- **i18n 终验**: zh 211/en 213 键完全对齐; 修复 uiAdaptiveHint 被 v17 死词条清理误删(zh 缺 en 在);
+  Damaged/tablet 两键差为值含冒号的正则假阳性
+- **测试件**: chaos_test/e2e_real/fake_yt_dlp/selftest 在位 — 不改
+- **体检数据**: 221KB 单文件/646 CSS 规则/2436 行 JS/30 SVG 图标/GL 30+uniform
+
+## 45. 未来线索 · 着色器性能的未竟之路 (2026-10-24, 存档给下一代 AI)
+
+用户决定暂缓。已穷尽的方案: RVFC驱动/texImage2D/黑屏自愈/60s保养/合成层/感知层/时间流速 — 
+卡点在 Android Chrome 的 <video>→WebGL 纹理路径(架构性上限, 网页层无法绕过)。
+**下一代可探索的方向(按优先级)**:
+1. **WebCodecs API** — VideoDecoder 解码出 VideoFrame 对象, 直接 texImage2D(VideoFrame),
+   绕过 <video> 元素的合成器路径 — Chrome 官方推荐的未来视频处理姿势, 可能是真根治
+2. mpv IPC 混合架构(网页遥控器+mpv引擎) — 设计已在对话中定型, 未动工
+3. Chrome 自身演进 — 零拷贝 video texture 是 Chromium 团队持续投入方向, 可能某天自愈
+桌面端 Chrome 的着色器流畅度待用户验证(可能只有 Android 病灶)。
 MDEOF
 
 cat > "$APP"/manifest.json <<'MJSON'
@@ -7407,7 +8872,7 @@ MJSON
 cat > "$APP"/sw.js <<'SWEOF'
 // sw.js — service worker: 只缓存"外壳"(图标/manifest/页面壳)
 // 绝不动 /api/* —— 里面是媒体流和用户数据, 缓存了就是灾难
-const CACHE = 'decache-shell-v1';
+const CACHE = 'decache-shell-v2';
 const SHELL = ['/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-maskable-512.png',
                '/icons/apple-touch-icon.png', '/manifest.json'];
 
@@ -7454,7 +8919,8 @@ AACANAQA/HNOB4CxAQDA2AAAYGwAAFh1bK0XAAAAAAAAAAAAAAAAAAAAAAAAAAAYDh0AAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACQAJAAkACQAJAAkACQDpBwDHZwgBIAEgASABIAEgASAB
 IAEg3RIABEofPwACwCACQIoCgEDp4wdAABhGZQAQKH38ACgPAAKljx8A5QFAoPTxA6A8AAiUPn4A
 lAcAgdLHD4Hyxw+B8scPgPIAIFD6+CFQ/vghUP74IVD++CFQ/vhBUP7wIZDjh0COHwQ5fBDk8EGQ
-wwdBDh8GOXogtPTBfwD82JLUfO+JfgAAAABJRU5ErkJggg==Iicon-192.pngB64
+wwdBDh8GOXogtPTBfwD82JLUfO+JfgAAAABJRU5ErkJggg==
+Iicon-192.pngB64
 base64 -d "$APP/icons/icon-192.png.b64" > "$APP/icons/icon-192.png" 2>/dev/null && rm -f "$APP/icons/icon-192.png.b64"
 cat > "$APP/icons/icon-512.png.b64" <<'Iicon-512.pngB64'
 iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAYAAAD0eNT6AAAM9klEQVR42u3WwY3CQBBFQSdgiVjJ
@@ -7516,7 +8982,8 @@ RQAARB9/EQAA0cdfBABA9PEXAQAQffxFAAAe//DnHwAAASACAMDjLwIAwOMvBADAwy8CAMDjLwIA
 wOMvAgDA4y8CAMDjLwIAwOMvAgDA4y8EAMDDLwIAwOMvAgDA4y8EAPDw+0QAAB5/nxAAwMPvEwEA
 ePx9QgAAD79PBADg8fcJAQA8/D4hAICH3ycEAPDw+4QAAB5+nxAAwMPvEwIAePh9QgDAw+/zCQEA
 D7/PJwYAPPo+nxgA8Oj7fGIAwKPv84kBAI++zycIADz4Pp8oAPDY+3zCAMBDf5LvCfNpZxT2/bU5
-AAAAAElFTkSuQmCCIicon-512.pngB64
+AAAAAElFTkSuQmCC
+Iicon-512.pngB64
 base64 -d "$APP/icons/icon-512.png.b64" > "$APP/icons/icon-512.png" 2>/dev/null && rm -f "$APP/icons/icon-512.png.b64"
 cat > "$APP/icons/icon-maskable-512.png.b64" <<'Iicon-maskable-512.pngB64'
 iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAYAAAD0eNT6AAAKrklEQVR42u3WwU0DQRBEUSdgiVjJ
@@ -7568,6 +9035,7 @@ AIAAAAGAAAABAAJAAAACAASAAAAEAAgAAQAIABAAAgAQACAABAAIAEAACAAQAIAAEAAgAAABIABA
 AAAAAgAAEAAAgAAAAAQAACAAAAABAAAIAABAAAAAAgAAEAAAgAAAAAQAACAAAEAAGAIABAAAIAAA
 AAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAAAWAEABAAAIAA
 AAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAw1DvuxsaHECHHGAAAAABJRU5ErkJggg==
+
 Iicon-maskable-512.pngB64
 base64 -d "$APP/icons/icon-maskable-512.png.b64" > "$APP/icons/icon-maskable-512.png" 2>/dev/null && rm -f "$APP/icons/icon-maskable-512.png.b64"
 cat > "$APP/icons/apple-touch-icon.png.b64" <<'Iapple-touch-icon.pngB64'
@@ -7583,7 +9051,8 @@ OoUaaKBTqIEGOoUaaKBTqIEGOoUaaKBTqIEGOgUbaKBTqIEGOoUaaKBTqIH2ceL/0EADDTTQWjig
 gQYaaAENtIAGWkADDTTQkMMLtIAGWkADLaCBBhpooIEGWkADLaCBFtAS0BLQEtACWgJaAloCWnoD
 /XqGENAS0BLQEtACWgJaAloCWvoQNNRKYQZaQEsrg4ZaKcxAC2hpZdBQK4UZaOVAQ60UZqCVAw21
 UpiBVg401Ephhlo5zEArBxpqpTBDrRxmqJXDDLVymKFWDjPUymGGWjnMUCuHGWzlIEOtJGawlYMM
-tpKQwVYSMtxKIoYb4n+9C+ijARcGH1xRAAAAAElFTkSuQmCCIapple-touch-icon.pngB64
+tpKQwVYSMtxKIoYb4n+9C+ijARcGH1xRAAAAAElFTkSuQmCC
+Iapple-touch-icon.pngB64
 base64 -d "$APP/icons/apple-touch-icon.png.b64" > "$APP/icons/apple-touch-icon.png" 2>/dev/null && rm -f "$APP/icons/apple-touch-icon.png.b64"
 
 echo "════ 4/4 完成 ════"

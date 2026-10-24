@@ -618,9 +618,400 @@ node smoke.mjs        # 加载期冒烟: 用 DOM 桩真跑一遍脚本, 谁抛�
 - 浏览器需 Chromium 80+（可选链 `?.`）；Kiwi 太旧建议用户换 Via。
 - 播放 4K/高码率取决于片源与浏览器解码，面板不做转码。
 
-## 13. 部署机器档案
+## 12. 部署机器档案
 
 Android 手机（Termux + Termux:API + Termux:Widget，建议 F-Droid 版）+ Windows PC 双端使用；
 手机浏览器建议 Chromium 内核 80+；下载目录 `~/storage/downloads/decache`；Windows 上 start.bat 直接跑。
 
 *本文件随版本更新。改代码不改本文档 = 失职。*
+
+## 13. v6.18 升级记录 (2026-10-24)
+
+### UI v7→v8 · 六主题换肤系统(mono/geist/catppuccin/synthwave/retro/pipboy)
+- `<html data-ui="...">` 换肤, 明暗仍归 `data-theme` 三态, 主题自带亮/暗双套色板
+- 内置: mono(默认, 原样)/ refactor(Refactoring UI) / retro(Win95) / 8bit(NES) / pipboy(辐射终端)
+- 新增令牌 `--acc --acc-tx --ring --sh --font`, 全部注入在 index.html 尾部 "v7 主题包" 段
+- 动效只动 transform/opacity, `prefers-reduced-motion: reduce` 时全局关停
+- 播放器进度条吃 `--pink`, 字幕颜色从写死 `#fff` 改 `var(--tx)`
+- 设置页新增"界面风格" chips, localStorage `take_ui`; JS 仅新增 `applyUiTheme()` ~20 行
+- 预览: preview.html 免启动直接看 5 主题 × 3 明暗
+
+### 修复
+- **存储型 XSS**: `/api/tag` 零字符校验 + 前端标签裸插 innerHTML → 服务端拒 `<>"'&`, 前端 `esc()` 双层兜底
+- **HTTP/1.0 无 keep-alive**: handler 加 `protocol_version = "HTTP/1.1"`, 全部 13 个响应出口核对过 Content-Length (304 无体符合 RFC), selftest 全过 + 活体复用验证通过
+- 版本号 → 6.18
+
+### 验证 SOP 结果: selftest 全部通过 ✅ / frontcheck 七闸全过 ✅ / 活体 keep-alive + XSS 拦截 ✅
+
+## 14. v8 主题系统 (2026-10-24)
+
+基于 2026 设计趋势调研(玻璃拟态2.0/Catppuccin 人气配色/StyleShift Synthwave 规范/Vercel Geist 纪律)重做的换肤层:
+- refactor → geist(真 Vercel 纪律: --edge shadow-as-border/6-8-12 圆角/宽字距标签), 8bit 退役 → synthwave(深紫黑底+品红/青双霓虹+落日网格场景层)
+- 新增 catppuccin(Mocha/Latte 官方色板, 胶囊 chips)
+- 每主题补"组件语言", synthwave 独有 body::before 场景层(纯渐变合成层, 不随滚动重绘, 亮色自动关闭)
+- 发光只给主元素(StyleShift 教训: 到处发光=廉价)
+- v7 存档迁移: take_ui refactor→geist, 8bit→synthwave
+- mono/retro/pipboy 保留, 全部六主题 × 明暗仍归 data-theme 三态
+- 验证: frontcheck 全过 / node --check 过 / 13 张 Playwright 截图人工复核
+
+——以上 v6.18/v8 记录的是换肤层落地; v9–v12.1 演进见第 15–17 节。
+
+## 15. v9–v12 着色器特效 (WebGL 后处理)
+
+设置页「画质特效」下拉, localStorage 键 `take_fx`, 4 档:
+- **CRT 电视**: 扫描线+色差+失真+颗粒+辉光+微曲率+荫罩+信号行微闪+滚动亮带+亮度呼吸
+- **VHS 录像**: 弯波+细撕裂+色度涂抹+跟踪磁条+磁头噪带+偏色
+- **胶片颗粒**: 片门游移+24Hz 闪烁+连续颗粒
+- **霓虹辉光**: 高光涨落+彩虹呼吸+轻扫描
+
+硬约束(改前必读):
+- 单 pass 单着色器 12 uniform; 全部连续时间函数无跳变
+- 性能: DPR≤1.5(写 `window.devicePixelRatio`), 暂停/后台/关播放器即停渲染, WebGL 失败自动回退 off
+- 存档兼容: 旧 `tube` 档→`crt` 且落盘; 无效值白名单回退 `off`
+- `fxFit()`: 画布按 object-fit:contain 算法对齐视频, 防比例拉伸
+- 代码位置: <script> 内 `FX_PRESETS` + fxEnsure/fxStart/fxFit/fxLoop 函数组
+- 开发期预设表演示页 fx_demo.html 不在发行包内, 改它时小心大括号被替换吃掉, 改完 `node --check`
+
+## 16. v10–v11 播放器改造
+
+- 控制条 → 悬浮玻璃坞(毛玻璃圆角), v11 起进度条/旋钮/按钮/面板逐主题定制(六主题各一套)
+- 单击切换控件: 藏着→亮 6 秒, 亮着→秒收; `barPre` 手势前状态捕获防闪一瞬
+- 播放列表折叠分组: 连续同 bvid 合并为一组, 点组头展开/收回, 当前集自动展开
+  (renderList/plrowHtml + .plgrp/.plparts CSS)
+- 字幕颜色固定白字/黑底, 与主题无关(applySubStyle), 勿接主题令牌
+- 代码位置: hideCtrl/poke + barPre 捕获; 换肤 JS「UI 主题包」段 applyUiTheme
+
+## 17. v12.1 GL 上下文回收修复
+
+安卓切后台系统会回收 WebGL context, 切回花屏/变卡。
+fxEnsure() 已挂 `webglcontextlost`(preventDefault+fxStop) / `webglcontextrestored`
+(置空 fxPr/fxTex/fxU → fxEnsure 重建程序 → fxStart) 监听, 并配合 visibilitychange 先停再启。
+**勿删这两个监听。**
+
+## 18. v6.19 待办收尾 (2026-10-24)
+
+- **待办#4 已结**: 删除 visibilitychange 里"切后台自动 requestPictureInPicture"块;
+  手动 PiP 按钮(pPip)与 HAS_PIP 能力检测保留(按钮显隐判定用)
+- 文档补齐: 本 HANDOVER 新增第 15–17 节, 尾部章节重编号(12 部署档案 / 13 v6.18 / 14 v8)
+- 包卫生: 清除 .frontcheck.tmp.js、cookies/*.tmp、HANDOVER.md.bak 入包
+
+## 19. v6.20 播放器整改 (2026-10-24, 真机反馈驱动)
+
+- **着色器丝滑化**: fs 里 4 处 `floor(tm*24/30/17)` 低频整屏跳变全改连续函数(多频 sin, 行号只做相位);
+  "顿顿的"根因就是它, 不是性能问题
+- **CRT 褪色+色偏**: 新 uniform `fd` — 降饱和+黑位轻提+暖绿偏色; crt 档 `fade:.3`;
+  声明/上传/预设四处都要接, 漏一处就是静默无效
+- **编译/链接检查**: fxCompile/fxEnsure 现在检查 COMPILE_STATUS/LINK_STATUS, 失败 console.warn + 回退 off;
+  之前编译失败会静默直出原片 = "有的档有效果有的没有"的隐藏根因
+- **切后台健壮性**: fxStart/fxLoop 入口查 `isContextLost()`, 丢着不硬重建, 等 webglcontextrestored 拉起;
+  lost 期间不再空转画黑帧
+- **章节功能整个删除**: pChap 按钮/chapPanel/chapMarks 分段条/loadChapters/renderChapters/renderChapList
+  及全部调用点已清; server 端 /api/chapters 和 /api/marks 端点还在(前端不再调用), 要彻底清再删 server.py
+- **播放器头部主题化**: 根因 = #pmodal 硬重置了一套 mono 局部变量把主题色板全盖了;
+  现在五主题各一行 `#pmodal` 变量映射(恒暗色板) + #phead 背景逐主题渐变 + .ttl/.icbtn 接 var(--tx)
+- **血泪新增**: ① cut_block 删函数后检查残留 `);` `;` 孤儿行 ② 闸2 不追踪多参数箭头函数参数,
+  删函数时若带走了平铺声明表里的名字, 别处的合法参数引用会连坐误报(本次 gi 案: 没用的参数直接删)
+
+## 20. v14 · 主题性格化 (2026-10-24)
+
+每个主题有自己的视觉语言, 不再只是换色/换字:
+- **retro 像素庄园**: 星露谷(暖木纸感卡+◆符) × MC(物品栏格硬边内阴影) × WinXP(凸起按钮, 已有);
+  新增像素云+草地天际线场景层; logo 用 Press Start 2P(仅标题, 正文保可读); tabbar 小像素大写+下划线选中
+- **pipboy 终端大融合**: 辐射绿基调 + TUI 语汇 — 边框卡/ $ 提示符/ [] 选中/tab [按钮] 括号/打字机 logo(steps 动画);
+  扫描线/辉光/▮光标保留
+- **synthwave 霓虹之夜**: logo 铬字渐变(Orbitron+background-clip:text, 原 text-shadow 须置 none 否则透明字出影框);
+  .page::before 星闪层(z-index:-1 在 body::before 之后→盖场景层底下内容上面); light 模式隐藏(同落日规则)
+- **catppuccin 奶油玻璃**: 毛玻璃卡(backdrop-filter blur 12px)+粉彩渐变按钮+胶囊 chip
+- **geist 工程网格**: 蓝图网格纹理(.page::before+mask 渐隐)+下划线选中+卡片细边框轻投影
+- 字体: Google Fonts link(offline 时 display=swap 秒回退系统字体, 不阻塞渲染)
+- 新动画全部包进 prefers-reduced-motion
+- 血泪: content 动画 steps() 对 logo 长度不敏感, 宁多勿少; background-clip:text 与 text-shadow 互斥
+
+## 21. v15 · 真机二轮反馈修复 (2026-10-24)
+
+- **纯音频黑屏**: `#pstage.audio` 时 video 被 CSS 隐藏, 但 fxCv 特效画布没禁用 → 对着无帧纹理画全黑。
+  修: CSS `#pstage.audio #fxCv{display:none!important}` + fxStart 拦截 audio 类。音频视频别再开特效
+- **面板主题化漏网**: `.qh`(×3) `.qitem` 的 color 和面板分隔线是 v6 时代硬编码白色系, 不换变量主题进不来。
+  已全部换 var(--tx)/var(--line)/var(--tx2)
+- **播放器按钮全白**: `#pmodal` 的 `color:#FAFAFA` 写死属性盖掉了 v13 的变量映射(映射只改了--tx变量,
+  子元素继承的是color属性)。改 `color:var(--tx)`, mono 下 --tx 同为 #FAFAFA 视觉零回归
+- **窄屏控制条拥挤**: pctrl/phead 按钮 ≤560px 缩到 32px、≤380px 缩到 28px, pipboy 按钮括号窄屏收起,
+  最大化按钮不再被挤出屏
+- **logo De cache 大空隙**: v14 打字机 width 动画把 .logo 拉成父容器全宽, flex 下文字被拉散。
+  改 clip-path:inset 动画, 零布局副作用
+- **CRT 像素微发光**: 新 uniform `pg` — 4邻域采样溢出 bloom, crt 档 `pglow:.5`
+- **i18n 混杂根因**: 词典 203 键中英齐全; 混杂是动态面板(凭据/队列/SOP)初始化时插文本,
+  切语言后不重渲。langBtn 加 location.reload() 根治
+- **血泪**: ① 改 --xxx 变量后检查同规则里有没有写死的 color/background 属性盖它 ② width 动画做打字机
+  会撑满父宽, 用 clip-path ③ CSS 硬编码色审计清单: .qh/.qitem/#pmodal/phead——以后新增面板组件必须用变量
+
+## 22. v15.2 · 亮度手感 + 文件夹升级 (2026-10-24)
+
+- **亮度锁 100%**: applyB 上限 1.6→1.0 只调暗; 范围跨度 1.2→0.6 同滑程手感细一倍(dy/300);
+  5% 步进量化(每 20px 一档, round(b*20)/20); 100% 吸附区放宽 ±2.5%; 存量 take_bright>1 载入即拉回;
+  吸附成功显示 "☀ 100% · 原色"
+- **文件夹五件套**: ① 人性化大小 sizeText(436KB/1.2MB/3.4GB) ② agoText 修改时间(3天前,
+  server 的 mtime 早就在响应里, 前端一直没接) ③ 面包屑全路径分段可点(原代码只有 根/..当前 三层,
+  中间全断; 循环写法避闸2多参箭头连坐) ④ take_browse 存 sessionStorage, 切走再回原地
+  ⑤ foldFilter 名称过滤框(事件委托绑定一次, data-i18n-ph 已有机制零新增)
+- **i18n 补 7 词条**: bFilter/agoNow/agoS/agoM/agoH/agoD/agoW (zh/en 各一套, %d 模板)
+- **血泪**: ① 闸2 不追踪多参数箭头函数参数 — 模板串里用参数就报未声明, 写法首选用行内
+  let/const 循环, 或删无用参数 ② server.py 的 VERSION 常量要和 UI 版本一起走, 不然用户看版本号
+  以为没装上(本次 6.18→15.1 就是祖传字符串没同步)
+
+## 23. v15.3 · 全面自审 + 下载历史 (2026-10-24)
+
+- **下载历史**: parse 成功记 localStorage take_hist(去重, 最多 8 条); page-dl 输入框下 chips 行,
+  点击回填+自动重新解析; data-hu 属性 + 事件委托绑定一次; 初始化随 applyLang 渲染
+- **server 死端点删除**: /api/chapters /api/marks(章节功能 v6.20 已删前端) /api/open(前端从没调用)。
+  删法: 从 `if u.path == "..."` 切到下一个 `if u.path ==` 前; 删完必须 python3 -m py_compile
+- **自审确认健康**: 手势三模式(进度/音量/亮度)逻辑完好; 倍速早就有 localStorage 记忆;
+  i18n 203 键对齐; /api/stream|sub|thumb|library|frame 均被前端正常使用(拼参形式)
+- **待办(不紧急)**: 词典 ~80 死词条(chAdd 等章节遗留)、chapPanel/chapMarks 死 CSS 规则——纯脏无害;
+  任务页可加批量取消/自动归档; 媒体库可加排序选择器
+- **血泪**: rep 用 `function xxx() {` 当锚点时, 先确认原文有没有 `async ` 前缀 — 被顶掉的话
+  async 会 orphaned 粘给下一个函数, 原函数丢 async 里面 await 全炸(本次事故实录);
+  以后锚点统一用 `async function xxx` 或带前文上下文
+
+## 24. v16 · 微交互炫酷包 (2026-10-24)
+
+2026 移动端 UI 趋势落地: 即时反馈/spring 按压/分层入场, 全部 transform+opacity (GPU 合成, 不重排):
+- **按压反馈**: .btn/.icbtn/.chip/.tabbar button :active scale(.93) (tabbar .9), 橡皮筋曲线 cubic-bezier(.34,1.56,.64,1)
+- **页面切换升级**: .page 由淡入改 淡入+上浮 pageIn .32s, 覆盖旧 fadein(旧 keyframes 留无害)
+- **聚焦光环**: input/textarea/select :focus 主题色 3px 光环(color-mix 22%), 高级感主力
+- **进度条流光**: #pfill::after 无限扫光 — 只挂播放器进度条(稳定DOM), 任务列表高频重渲绝不挂
+- **stagger 入场**: .browsecard/.vcard/.tcard 逐张上浮(6级延迟) — 只挂用户主动触发的低频列表
+- **reduce-motion 全收**: 新动画一个不落的进媒体查询
+- **血泪**: ① 入场动画绝不能挂高频 innerHTML 重渲的容器(任务列表每秒重建→每秒闪) ② .logo 入场
+  别碰 — pipboy 打字机/v14 主题 logo 规则特异性会互相覆盖, 各主题 logo 已有特色
+
+## 25. v17 · 设置页 + 功能六件套 + 自适应主题 (2026-10-24)
+
+- **独立设置页** page-settings: nav 齿轮; 从下载页搬入 凭据/手机访问/字幕大小/特效/日志/界面风格 六张卡
+  + 孤儿分组 h2 一并清理; 新增 睡眠定时/最近播放/统计 三卡
+- **观看进度备份**: server.py `/api/progress`(POST 存+_progress.json 落盘 / GET 全量);
+  savePos() 写入时同步 server; 启动时 server 记录合并回本地 hist 账本(>20s 且未看完15s内才算),
+  续播卡片(renderResume)与最近播放自动获得跨浏览器/重装不丢的能力
+- **批量下载**: input#url→textarea; parse() 拆 parseOne(raw), 多行逐行解析排队(350ms 间隔)
+- **睡眠定时**: 设置页 chips(关/15/30/45/60), window._sleepT, 到点 pause+toast
+- **最近播放/统计**: 复用 histLoad 账本(点击 data-open 走现有 openRel 委托); 仪表盘 LIB.videos
+  (视频数/P数/size_mb 总大小/收藏), statsRender 挂 loadLib 刷新
+- **第 7 主题 mauto「自适应」**: 视频帧 drawImage 到 8×8 canvas, 取"饱和度×亮度"最高分像素为主色,
+  5s 间隔写内联 --acc/--edge/--srf2; CSS 兜底防闪烁; 切走 mauto 时 removeProperty 防污染其他主题;
+  #pmodal 映射不覆盖 --acc → 播放器控件自动跟主色
+- **大扫除**: 程序化检测删 17 死词条(×中英) + 14 条 chap 死 CSS 规则
+- **血泪**: ① 搬卡时别落下分组 h2(孤儿标题) ② 死词条检测要扫双引号和 data-i18n 属性两种引用
+  ③ Object.entries().forEach 回调参数闸2不认, 用 for 循环+行内 const ④ rep 锚点先核对 async 前缀
+
+## 26. v17.1 · 播放器内特效快切 (2026-10-24)
+
+- pctrl 加 FX 按钮(i-theme 图标), 点击弹出 #fxPop 面板(上浮淡入, absolute 挂 #pctrl)
+- 5 档直达: 关/CRT/VHS/胶片/霓虹, 当前档高亮; 设置页 fxSel 与面板双向同步
+- fxSet(m) 统一入口封装(原 onchange 三行散落逻辑), 两处 UI 都调它
+- 面板点击外部自动收起; 词条复用 fxOff/fxCrt/fxVhs/fxFilm/fxNeon
+
+## 27. v17.2 · 黑屏根治 + 播放器重排 (2026-10-24)
+
+- **特定主题播放黑屏根治**: 根因 = synthwave/pipboy 场景层的 infinite 动画与 Android video 硬件解码层冲突。
+  body.pm-open 挂/摘钩子(随 pmodal open/close), CSS 一条 animation-play-state:paused 全场景层静默;
+  openPlayer 60ms 后 repairSurface() 双保险
+- **最近播放去重**: hist 账本是"每次观看一条"设计, recentRender 按 r 去重只留最新
+- **统计 0MB**: part 字段是 size 不是 size_mb
+- **控件隐藏 6s→3s**(poke 的 barT)
+- **播放器重排**: ① 中央播放键 #pCPlay(74px 毛玻璃圆钮, absolute 居中, 复用 togglePlay,
+  play/pause 同步 <use>, hideCtrl/poke 同 lifecycle) ② pctrl 移除 pPlay(悬空引用已清, 闸1 把关)
+  ③ FX 按钮上移 hrow2, fxPop 改顶部弹出 ④ 睡眠 Zz 按钮上移 hrow2 + sleepPop 面板,
+  sleepSet() 统一入口设置页/播放器两处共用 ⑤ #phead 本就是 absolute(定位上下文现成)
+- **血泪**: ① 删按钮必须全局搜 id 引用(闸1 会逮, 但最好在删前先搜) ② 场景层动画是 Android video
+  黑屏的高发根因, 播放器打开期间静默是通用解法
+
+## 28. v17.3 · 中央键收尾 + 着色器流畅根治 (2026-10-24)
+
+- **中央键**: 透明度 .55→.30/边框 .28→.16/68px(不挡画面); 补齐漏网显隐路径 — 单击手势
+  和 pause 事件里直接操作 bar 的代码不走 hideCtrl/poke, 中央键曾只在主路径跟随
+- **着色器"顿顿的"根治四板斧**:
+  ① GL 上下文加 powerPreference:'high-performance' — 别把渲染分去省电核心
+  ② texImage2D 去重 — video 解码 24-30fps vs rAF 60fps, currentTime 没变就跳过重上传, 省一半纹理带宽
+  ③ 基准分辨率 DPR cap 1.5→1.25 — 起点降 30% 像素
+  ④ fps 自适应 — 每 45 帧统计: 持续<38fps 渲染尺度×0.85(最底 0.5, fxFit 重算画布), >55fps 缓慢回升
+- 顿感根因链: Android Chrome 给网页分省电调度 → rAF 帧率低 → 时间连续但帧间隔大 → 效果跳动
+
+## 29. v18 · 播放器主题深融合 (2026-10-24)
+
+终端主题融合的配方 = pctrl 全定制 + phead 渐变 + pmodal 变量映射 + TUI 语汇多层叠加;
+其他主题只吃了变量映射的表层。补齐:
+- **病灶板变量化(一处治好所有主题)**: #partCover 封面底板 #1b1b26→var(--srf2)/var(--bg);
+  #listPanel/#queuePanel 面板底 rgba(16,16,20,.97)→color-mix(var(--srf3) 96%) — 这俩是"封面/面板不跟主题"的元凶
+- **pfill 进度条短板**: catppuccin 粉彩渐变 / geist 纯白 — 之前它们露着 mono 的 B 站粉, 割裂感主源
+- **geist pctrl 补完**: 之前裸奔(只有 icbtn.on 颜色), 现在深灰底+细边+白字
+- **中央键逐主题**: pipboy 绿边 / synthwave 霓虹边 / catppuccin 粉彩边 / retro 像素方钮
+- **retro 像素块进度条**: repeating-linear-gradient 9px 草绿块 — MC 物品栏语汇延伸
+- mono 进度条保留 B 站粉 = mono 的个性, 不动
+
+## 30. v18.1 · 封面融合 + synthwave 阳光 (2026-10-24)
+
+- **"纸片感"根治**: 媒体库封面是实打实的彩图, 卡片硬边贴背景上像异物。两味药:
+  ① .vcard .cov::after 底部 32% 渐变(var(--srf)) — 封面下缘"熔接"进卡底板, 消硬边
+  ② --cardglow 环境辉光(卡片阴影叠一层主题色) — 各主题变量段声明, :root 默认透明, mauto 也有份
+- **synthwave 阳光**: body::before 背景顶部加两层 — repeating-conic 从太阳中心(50% 104px)
+  向下 2.5°宽金黄光束扇形展开(9°周期) + 180px 橙金光晕。repeating-conic 放最上层被太阳圆盖中心,
+  光束自然从日缘射出; 透明度 .10 不抢戏
+
+## 31. v18.2 · 全局 UI 融合层 (2026-10-24)
+
+- **顶面主题光**: 所有卡片/面板/标签组/目录行 background-image 叠加 7% --acc 顶渐变(42% 处淡出),
+  像被场景光源照亮; 用 background-image 分量叠加, 不碰现有 background 简写和 box-shadow
+- **环境辉光**: filter:drop-shadow(0 6px 18px var(--cardglow)) — drop-shadow 不动 box-shadow,
+  retro 的像素阴影/pipboy 的内辉光零冲突
+- **毛玻璃透出**: synthwave blur 18(原 82% 半透明无 blur) / geist 85%+blur 14 / retro 94% 微透无 blur(保像素锐度)
+- retro 全程排除渐变/辉光 — 纸片人格不能软; pipboy/mono 本就单色无场景层, 不加 blur
+- mono 补 --cardglow 淡粉(.06)
+- **血泪**: 叠加光影别用 box-shadow 简写(会清掉主题定制阴影) — background-image 分量叠加 +
+  filter:drop-shadow 是零冲突双通道
+
+## 32. v17.4 · 黑屏根除 + 中央键常显 (2026-10-24)
+
+- **黑屏从"缓解"到"根除"**: v17.2 的暂停动画只治了 animated 层, retro 的**静态** fixed 场景层
+  同样触发 video 解码层冲突(用户实测复现)。修法升级: 播放器打开时 display:none 场景层 — 
+  全屏被不透明 #pmodal 盖死, 场景层本就看不见, 隐藏零视觉代价, fixed 层冲突连根拔除
+- **中央键常显**: 之前跟着 hideCtrl 隐藏 → 用户看到"点一下出现再消失"以为没生效。实际它是
+  正常工作的, 只是被误隐藏。撤出隐藏体系常显, 透明度再降 .30→.22, 定位=播放状态灯
+  (播放中显暂停图标/暂停显播放图标)
+
+## 33. v17.5 · 中央键收尸 + 着色器热节流稳态 (2026-10-24)
+
+- **中央键**: ① 删 backdrop-filter — Android 上 backdrop-filter 元素与 video 同框是黑屏大户(retro 黑屏嫌疑+1)
+  ② 显隐改 #pmodal:has(#pctrl.hide) #pCPlay 纯 CSS — 显隐 100% 跟随控制条, hideCtrl/poke/单击手势/
+  pause 所有野路径自动同步(旧 JS 逐路径挂钩必然漏), JS 钩子留作 :has 不支持时兜底
+- **着色器越用越卡**: 不是内存泄漏(program/texture 复用、监听一次性绑定, 全排查过) — 症状
+  "视频流畅着色器卡" = 手机发热降频: 硬解视频不吃 CPU, GL 效果吃 GPU 先感知。
+  旧自适应在发热场景 fps 38-55 间震荡 → 每 45 帧重设 canvas(纹理重 alloc+合成层重建) 反而更卡。
+  稳态化: 快降(×.8)/慢升(+.04)/双阈值滞回(降<38 升>58)/升档 30 秒锁定/采样窗 45→60 帧
+
+## 34. v19 · 性能大治理 (2026-10-24)
+
+- **#phint span**: 删 backdrop-filter:blur(6px) — retro 黑屏最后嫌疑(视频区里最后一个 blur 雷)
+- **毛玻璃降档**(大面积 blur 是移动端最贵 CSS, 媒体库 60 卡滚动时卡爆):
+  synthwave 18→10 / geist 14→8 / catppuccin 12→8+底更不透明(84%)
+- **drop-shadow → box-shadow 多层**: v18.2 的 filter:drop-shadow 给每张卡建合成层(60卡=60层),
+  改 box-shadow 追加辉光层(绘制时画, 不建层); retro/pipboy 排除保定制阴影
+- **着色器再压**: DPR 基准 1.25→1.0(像素量-36%, 6寸屏1080p看不出), 自适应下限 0.5→0.4 降档 ×0.8→×0.75
+- 场景动画排查: synPulse/synRoll/geist漂移/pipboy 全是 transform/opacity 合成器动画, 便宜, 不动
+- **血泪**: 移动端 CSS 性能三雷区排序: backdrop-filter > filter(每元素合成层) > 大面积渐变动画;
+  辉光类效果永远优先 box-shadow 多层方案
+
+## 35. v19.1 · 落日体积光 + 发热根治 (2026-10-24)
+
+- **落日重做**: 删 repeating-conic 线条光束(用户: 太low) → 体积光四件套:
+  ① 地面反光 linear-gradient(to top) 橙金洒在网格上 ② 宽光柱 conic 带亮芯(11°-23°, 中心 .26 亮)
+  ③ 天空染色 顶部暖橙渐变 ④ 暖阳晕 210px。静态渐变零动画成本
+- **发热根治**: pollTick 原每 3s 无条件 refreshTasks+loadLib — loadLib 重建 60 张卡+触发
+  vcard stagger 动画每 3s 全场重播(动画挂高频容器, v16 时的告诫自己踩了)。门控:
+  媒体库全量重建只在 任务页/媒体库页激活时; 其他页只 refreshTasks(轻量)。轮询重建时
+  #lib.rebuild 禁入场动画
+
+## 36. v19.2 · 着色器渐进卡顿收尾 (2026-10-24)
+
+- **texImage2D → texSubImage2D**: Chrome 对 video 元素反复 texImage2D 会走存储重分配路径,
+  部分驱动累积 GPU 内存不释放 = "越用越卡"的驱动级根因(已排除 JS 泄漏/监听绑定/program 复用)。
+  texSubImage2D 只更新像素不重新分配存储(官方推荐); 首帧仍 texImage2D 初始化(window._fxTInit 标志,
+  纹理重建时归零)
+- 至此着色器性能五层防御: 高性能GPU → 纹理去重 → DPR1.0基准 → fps自适应稳态 → texSubImageD
+
+## 37. v19.3 · 双视频叠加根治 + 原生清晰度 (2026-10-24)
+
+- **双视频叠加/黑屏真凶**: v19.2 的 texSubImage2D 有尺寸陷阱 — 换视频后新分辨率≠纹理存储尺寸
+  时更新 INVALID_OPERATION, fxCv 画布冻结在旧视频最后一帧 → 新旧画面叠加(或整片冻结=黑屏感)。
+  修法: videoWidth/Height 匹配才走 texSubImage2D, 不匹配/首帧/分辨率变化 → texImage2D 全量重建
+- **清晰度还原原生**(用户点名): 删 _fxQ 分辨率降档(含稳态逻辑), DPR 上限 1.0→2.0。
+  保留: 纹理去重 + texSubImage2D(尺寸守卫版) — 这俩不降画质
+- synthwave 卡底 82%→90%, 落日透出含蓄
+
+## 38. v19.5 · 黑屏自愈架构(永久根治) (2026-10-24)
+
+七轮对症修复(synthwave/pipboy/retro 轮流犯)证明根因是机型/GPU/驱动层面的组合, 远程猜测修不完。
+换打法: 自愈 — 让"用户看到黑屏"在系统层面不可能发生:
+- fxLoop 每 30 帧 gl.readPixels 读画布中心像素, 连续 3 次(<5/255, ~1.5s, 防夜景误伤) 全黑
+  且 video 在播/非音频 → fxStop+fxStart 重建 GL 全链路(program/texture/缓冲全重建)
+- 同视频重建 >3 次仍黑 → FX_MODE=off 落盘, 回退原生 video(fxStop 隐藏 fxCv 即露出原画),
+  toast 提示; 下个视频 _fxRecovers 归零给特效重试机会, 连续 3 个视频都黑才维持关闭
+- 不猜根因: 驱动 bug/图层冲突/纹理失败/静默 context lost — 黑=被检测=被修复或回退
+- **血泪**: 反复出现的平台级 bug, 别再做第 N 次根因猜测 — 上自检+自愈+优雅降级三件套
+
+## 39. v19.6 · 着色器根治·RVFC 架构 (2026-10-24)
+
+搜索+发散后的架构级重做:
+- **渲染驱动: requestVideoFrameCallback 替代 rAF** — 回调绑视频解码帧率(25fps视频=25次渲染/秒,
+  rAF 60 次纯属浪费), 与解码器零浪费同步, 时间仍连续(performance.now() 驱动 GLSL 时间)
+- **texImage2D 回退**: Unity 论坛实测 Chrome 上 texImageD **way faster**, 此前按通用建议改的
+  texSubImage2D 方向错误已回退; RVFC 每次回调必是新帧, 天然去重, 直接全量
+- **rAF 30fps 节流回退**(老浏览器)
+- 驱动双轨: 支持 RVFC 走 fxVF, 不支持走 fxLoop, fxStart 自动选, fxStop 双取消
+- 黑屏自愈(v19.5)在 fxRender 内继续生效
+- 理论依据: ml5/Chrome 案例 GPU 进程随 video-texture 时长劣化 → 渲染次数减半 = 累积速度减半,
+  配合 RVFC 精确同步消除空转
+
+## 40. v19.7 · 终极体检收官 (2026-10-24)
+
+全项目发散审计结论:
+- **后端健康**: ThreadingHTTPServer(多线程, 视频流不堵API) + Range 13处 + 死端点已清
+- **前端规模**: 221KB 单文件 / CSS 646 规则 / JS 2436 行 / i18n 220+键中英对齐 / 30 SVG 图标
+- **渲染管线**: RVFC 驱动 + texImage2D + 黑屏自愈 + readPixels 自检 — 平台级问题全部架构自愈
+- **性能三雷区**: backdrop-filter 34处残留全是已降档卡片(8-10px) | drop-shadow 合成层已清 |
+  轮询已页面门控
+- **定时器**: 仅 2 个 setInterval(mauto 5s 取色带主题预检 + pollTick 3s 已门控)
+- sw 缓存名 v1→v2
+
+## 41. v19.8 · 合成层快路径 (2026-10-24)
+
+搜索"丝滑且省电"的 actionable 结论:
+- **fxCv/pvideo 加 translateZ(0)**: 15 浏览器实测 Android Chrome 合成提升 35%(web_search:269#9) — 每帧
+  参与合成的两个元素走合成器快路径, 不再每帧与页面层协商
+- 旁证搜索: DVFS 论文证实"帧率匹配负载"是省电视角的最优解(RVFC 已做到); emscripten 官方
+  "lowest possible precision on mobile"(mediump 已符合); "单 pass SuperShader"(已符合);
+  渲染循环零对象分配(已符合)
+- 剩余理论空间: shader 分支削减/低精度 hash — 收益小风险大, 不动
+
+## 42. v19.9 · 着色器定期保养 (2026-10-24)
+
+- window._fxCare 每 90 秒(仅播放中): deleteTexture + createTexture + 参数重设 + _fxTInit=0
+- 原理: ml5/Chromium 案例证实 Chrome GPU 进程处理 video-texture 随时长渐进劣化; 定期换纹理对象
+  让该路径重走干净初始化, 累积每 90 秒清零一次
+- 零打断: 纹理每帧本来就要上传(texImageD), 换对象后下一帧就是一次常规全量上传, 单帧开销无感
+- program 对象不保养: 重编译要几十 ms 会真卡; 单对象无累积问题
+- 暂停/关闭/特效关/context丢 时不动作
+
+## 43. v19.10 · 感知层优化 (2026-10-24)
+
+发散推演结论:
+- 人眼流畅感主因 = 帧间隔均匀(jank感知), 不是帧率高 — 24fps电影恒定间隔没人说卡。
+  RVFC 天然供给恒定间隔, 此层已满配
+- 死路两条(已排除): 双纹理ping-pong(直接采样视频帧架构, 交替会放出旧帧);
+  帧混合柔化(需FBO双pass, 成本反涨40-60%)
+- 落地: ① GLSL 时间流速 ×0.9 — 运动幅度降10%, 同样帧率下更柔更不暴露不均匀,
+  速度变化低于人眼察觉阈 ② 纹理保养 90s→60s
+
+## 44. v19.11 · 全项目终审 (2026-10-24)
+
+逐文件审查结论:
+- **server.py (2937行)**: ThreadingHTTPServer + safe_media_path/safe_dir_path 路径穿越双防护 + Range
+  拖动 + iOS MP4 兼容副本 + 死端点已清 — 健康
+- **start.sh/boot.sh**: 保活循环+wakelock+termux-notification 完备 — 健康
+- **sw.js/manifest**: 网络优先+离线壳, 缓存名 v2 — 健康
+- **前端盲区复查**: 字幕系统(gen代次令牌防竞态)/任务系统(Map)/下载队列 — 健康;
+  eval=0, XSS esc() 双层防御在位, console 仅 shader 编译告警 2 处
+- **i18n 终验**: zh 211/en 213 键完全对齐; 修复 uiAdaptiveHint 被 v17 死词条清理误删(zh 缺 en 在);
+  Damaged/tablet 两键差为值含冒号的正则假阳性
+- **测试件**: chaos_test/e2e_real/fake_yt_dlp/selftest 在位 — 不改
+- **体检数据**: 221KB 单文件/646 CSS 规则/2436 行 JS/30 SVG 图标/GL 30+uniform
+
+## 45. 未来线索 · 着色器性能的未竟之路 (2026-10-24, 存档给下一代 AI)
+
+用户决定暂缓。已穷尽的方案: RVFC驱动/texImage2D/黑屏自愈/60s保养/合成层/感知层/时间流速 — 
+卡点在 Android Chrome 的 <video>→WebGL 纹理路径(架构性上限, 网页层无法绕过)。
+**下一代可探索的方向(按优先级)**:
+1. **WebCodecs API** — VideoDecoder 解码出 VideoFrame 对象, 直接 texImage2D(VideoFrame),
+   绕过 <video> 元素的合成器路径 — Chrome 官方推荐的未来视频处理姿势, 可能是真根治
+2. mpv IPC 混合架构(网页遥控器+mpv引擎) — 设计已在对话中定型, 未动工
+3. Chrome 自身演进 — 零拷贝 video texture 是 Chromium 团队持续投入方向, 可能某天自愈
+桌面端 Chrome 的着色器流畅度待用户验证(可能只有 Android 病灶)。

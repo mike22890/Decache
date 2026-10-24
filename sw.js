@@ -1,6 +1,6 @@
 // sw.js — service worker: 只缓存"外壳"(图标/manifest/页面壳)
 // 绝不动 /api/* —— 里面是媒体流和用户数据, 缓存了就是灾难
-const CACHE = 'decache-shell-v1';
+const CACHE = 'decache-shell-v2';
 const SHELL = ['/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-maskable-512.png',
                '/icons/apple-touch-icon.png', '/manifest.json'];
 

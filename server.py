@@ -24,7 +24,22 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "6.17"         # 版本号: 显示在界面顶栏, 排查新旧用(改代码顺手改这里)
+VERSION = "15.1"
+
+# v17: 观看进度记忆 (前端每10s心跳上报; key=相对路径)
+PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_progress.json")
+PROGRESS = {}
+try:
+    if os.path.exists(PROGRESS_FILE):
+        PROGRESS = json.load(open(PROGRESS_FILE, "r", encoding="utf-8"))
+except Exception:
+    PROGRESS = {}
+
+def save_progress():
+    try:
+        json.dump(PROGRESS, open(PROGRESS_FILE, "w", encoding="utf-8"), ensure_ascii=False)
+    except Exception:
+        pass   # UI 已走到 v15.1, 别再让这数拖后腿(前端顶栏显示,排查新旧用)         # 版本号: 显示在界面顶栏, 排查新旧用(改代码顺手改这里)
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.ini"
 # 下载目录/扫描目录的默认值**按平台给不同值**:
@@ -2248,6 +2263,8 @@ def cancel_task(tid):
 
 # ---------------- HTTP ----------------
 class Handler(BaseHTTPRequestHandler):
+    # v7: HTTP/1.1 keep-alive — 面板轮询密集, 省掉每次新建 TCP(全部出口已核过 Content-Length, 304 无体符合 RFC)
+    protocol_version = "HTTP/1.1"
     def log_message(self, *a):
         pass
 
@@ -2495,26 +2512,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             return self.wfile.write(body)
-        if u.path == "/api/chapters":                   # 章节: 容器真章节 or 等距伪章节
-            target = safe_media_path(q.get("rel", [""])[0])
-            if target is None or not target.exists():
-                return self._json({"error": "路径不允许"}, 404)
-            try:
-                dur = float(q.get("dur", ["0"])[0])
-            except ValueError:
-                dur = 0
-            meta = probe_meta(target)
-            if meta.get("duration"):
-                dur = meta["duration"]
-            chs = meta.get("chapters") or []
-            real = bool(chs)
-            if not real and dur > 0:
-                # 无章节: 按缩略图同样的 12 段等距切(中点取帧) → 图能直接对��
-                n = 12
-                chs = [{"start": round(dur * i / n, 3), "end": round(dur * (i + 1) / n, 3),
-                        "title": f"片段 {i + 1}"} for i in range(n)]
-            return self._json({"chapters": chs, "real": real, "duration": dur,
-                                "thumb_index": {str(i): i for i in range(len(chs))}})
         if u.path == "/api/health":                     # 坏文件体检(单个视频)
             bvid = q.get("bvid", [""])[0]
             lib = load_library()
@@ -2653,16 +2650,6 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
             return
-        if u.path == "/api/open":
-            target = safe_media_path(q.get("rel", [""])[0])
-            if target is None:
-                return self._json({"error": "路径不合法"}, 403)
-            if target.exists():
-                r = open_external(target)       # 跨平台: os.startfile/open/xdg-open/termux-open
-                if r is True:
-                    return self._json({"ok": True})
-                return self._json({"error": f"外部打开失败: {r}"}, 500)
-            return self._json({"error": "文件不存在"}, 404)
         if u.path == "/api/diagnostics":
             return self._json(diagnostics())
         self._json({"error": "not found"}, 404)
@@ -2706,6 +2693,21 @@ class Handler(BaseHTTPRequestHandler):
             t["_replace_orig"] = str(old)
             log_op(f"重新下载: {e.get('title', '')[:40]} P{p}")
             return self._json({"id": t["id"]})
+        if u.path == "/api/progress":                   # v17 观看进度
+            if method == "POST":
+                ln = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(ln).decode("utf-8", "ignore") if ln else ""
+                try:
+                    d = json.loads(body)
+                    if d.get("path"):
+                        PROGRESS[str(d["path"])] = {"pos": float(d.get("pos") or 0), "dur": float(d.get("dur") or 0)}
+                        save_progress()
+                except Exception:
+                    pass
+                self._json({})
+            else:
+                self._json(PROGRESS)
+            return
         if u.path == "/api/credentials":               # 凭据: 增/删/改(POST)
             dom = str(body.get("domain", "")).strip().lower()
             cv = str(body.get("cookie", "")).strip()
@@ -2746,6 +2748,9 @@ class Handler(BaseHTTPRequestHandler):
             tag = str(body.get("tag", ""))[:16]
             if not bvid or not tag:
                 return self._json({"error": "缺 bvid 或 tag"}, 400)
+            # v7: 标签会原样回显进前端 innerHTML, 这里挡掉注入字符(前端另有 esc 兜底)
+            if any(c in tag for c in '<>"\'&'):
+                return self._json({"error": "标签含非法字符"}, 400)
             tags = toggle_tag(bvid, tag)
             if tags is None:
                 return self._json({"error": "库里没这个视频"}, 404)
@@ -2824,28 +2829,6 @@ class Handler(BaseHTTPRequestHandler):
             if not items:
                 return self._json({"error": "没解析出可用文件(路径必须在允许目录内)"}, 400)
             return self._json(queue_ops({"op": "set", "items": items}))
-        if u.path == "/api/marks":                      # 手动章节标记(存 library, 不改原文件)
-            bvid = str(body.get("bvid", ""))
-            rel = str(body.get("rel", ""))
-            lib = load_library()
-            e = lib.get(bvid)
-            if not e:
-                return self._json({"error": "库里没这个视频"}, 404)
-            marks = e.get("marks") or []
-            if body.get("op") == "del":
-                marks = [m for m in marks if abs(float(m.get("t", 0)) - float(body.get("t", 0))) > 0.01]
-            else:
-                t = float(body.get("t", 0))
-                title = str(body.get("title", ""))[:60] or f"标记 {fmt_sec(t)}"
-                marks.append({"t": round(t, 2), "title": title})
-                marks.sort(key=lambda m: m["t"])
-            def _set_marks(lib):
-                e = lib.get(bvid)
-                if e is not None:
-                    e["marks"] = marks
-                return lib
-            mutate_library(_set_marks)
-            return self._json({"ok": True, "marks": marks})
         if u.path == "/api/download":
             parts = [int(p) for p in body.get("parts", [])]
             if not parts:
