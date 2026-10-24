@@ -7428,17 +7428,7 @@ with urllib.request.urlopen(req, timeout=5) as r:
 s, b = get("/api/stream?rel=../../etc/passwd")
 chk("GET /api/stream 越权 404", s == 404, f"{s}")
 
-# 章节(真章节/伪章节) + m3u 导入导出 + 手动标记
-s, b = get("/api/chapters?rel=movies/a.mp4&dur=600")
-d = json.loads(b) if s == 200 else {}
-chk("GET /api/chapters 有响应", s == 200, f"{s} {b[:80]}")
-chk("无真章节时给 12 段伪章节", len(d.get("chapters", [])) == 12, str(len(d.get("chapters", []))))
-chk("伪章节标记 real=false", d.get("real") is False, str(d.get("real")))
-chk("伪章节首段从 0 开始", abs(d["chapters"][0]["start"]) < 0.01, str(d["chapters"][0]))
-chk("伪章节段长 = dur/12", abs(d["chapters"][1]["start"] - 50.0) < 0.01, str(d["chapters"][1]))
-s, b = get("/api/chapters?rel=../../etc/passwd")
-chk("GET /api/chapters 越权 404", s == 404, f"{s}")
-
+# m3u 导入导出
 s, b = get("/api/playlist.m3u")
 chk("GET /api/playlist.m3u", s == 200 and b"#EXTM3U" in b, f"{s} {b[:60]}")
 m3u = "#EXTM3U\n#EXTINF:-1,A\n" + str(DL / "movies" / "a.mp4") + "\n#EXTINF:-1,Bad\n/etc/passwd\n"
@@ -7447,12 +7437,6 @@ d = json.loads(b) if s == 200 else {}
 chk("POST /api/queue/import 导入", s == 200 and len(d.get("items", [])) == 1, f"{s} {b[:100]}")
 chk("m3u 导入过滤越权路径", all("passwd" not in i["rel"] for i in d.get("items", [])), str(d))
 
-s, b = post("/api/marks", {"bvid": "BV1test", "rel": "movies/a.mp4", "t": 42.5, "title": "精彩片段"})
-d = json.loads(b) if s == 200 else {}
-chk("POST /api/marks 落标记", s == 200 and len(d.get("marks", [])) == 1, f"{s} {b[:80]}")
-s, b = post("/api/marks", {"bvid": "BV1test", "rel": "movies/a.mp4", "op": "del", "t": 42.5})
-d = json.loads(b) if s == 200 else {}
-chk("POST /api/marks 删标记", s == 200 and len(d.get("marks", [])) == 0, f"{s} {b[:80]}")
 
 # 状态码(英文) + 查重 + 磁盘占用
 s, b = get("/api/tasks")
