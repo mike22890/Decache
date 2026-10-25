@@ -56,50 +56,42 @@ Real screenshots from an Android phone (Termux), unmodified.
 
 ## 怎么安装 / Installation
 
-### 第 0 步：文件在哪 / Step 0: where the files are
-
-> **⬇ 下载最新版安装包 (take-bundle.tar.gz)** — Releases 页面
-> **⬇ Download the latest bundle** — on the Releases page
-
 ### 安卓手机（Termux）/ Android (Termux)
 
-**1** 装 Termux（别用 Play 商店版，太老）/ Install Termux (skip the Play Store build):
+**1** 装 [Termux](https://f-droid.org/packages/com.termux/)（**别用 Play 商店版**，太老跑不动）
+/ Install [Termux](https://f-droid.org/packages/com.termux/) (**skip the Play Store build** — too old to run this)
 
-```
-pkg install python ffmpeg
-```
-
-**2** 存储权限（只做一次）/ Grant storage (one time):
+**2** 授权存储（只做一次，**不做的话视频会存进你找不到的私有目录**）
+/ Grant storage (once — without it downloads land in a private folder you can't reach):
 
 ```
 termux-setup-storage
 ```
 
-**3** 下载并安装 / Download and install:
+**3** 一行装好（依赖、引擎、面板文件全包）
+/ One line does it (dependencies, engines, panel files):
 
 ```
 curl -L -o install.sh https://raw.githubusercontent.com/mike22890/Decache/main/install.sh && bash install.sh
 ```
 
-> 不会命令行？Releases 页下 `take-bundle.tar.gz`，ZArchiver 解压后进文件夹跑 `bash install.sh`。
-> No terminal? Grab `take-bundle.tar.gz` from Releases, unzip, run `bash install.sh` inside.
-
-**4** 启动 / Start:
+**4** 启动（**别关这个窗口**，前台保活，关了服务就停）
+/ Start (**keep the window open** — it holds the service in the foreground):
 
 ```
 bash ~/decache/start.sh
 ```
 
-看到"面板已启动"即可，**别关窗口**。
-Wait for "面板已启动" and **keep the window open**.
+**5** 浏览器打开 → `http://127.0.0.1:8765`
 
-**5** 浏览器打开 / Open → `http://127.0.0.1:8765`
+> 不想用命令行？Releases 页下 `take-bundle.tar.gz`，解压后进文件夹跑 `bash install.sh`。
+> No terminal? Grab `take-bundle.tar.gz` from the Releases page, unzip, run `bash install.sh` inside.
 
 ### Windows / Mac / Linux
 
 **1** 装 Python 3.9+（Windows 勾 "Add Python to PATH"）和 ffmpeg / Install Python 3.9+ (tick "Add to PATH") and ffmpeg
 
-**2** 下 `take-bundle.tar.gz` 解压到任意文件夹 / Download the bundle, unzip anywhere
+**2** 下 [take-bundle.tar.gz](https://github.com/mike22890/Decache/releases/latest) 解压到任意文件夹 / Download the bundle, unzip anywhere
 
 **3** 启动 / Start: Windows 双击 `start.bat`；Mac/Linux 终端跑 `bash start.sh` / double-click `start.bat`, or `bash start.sh`
 
