@@ -10,7 +10,8 @@ import { dirname, join } from 'node:path';
 import vm from 'node:vm';
 
 const base = dirname(fileURLToPath(import.meta.url));
-const src = readFileSync(join(base, 'index.html'), 'utf8');
+/* v20.0: normalize CRLF (gate-7 regex ate trailing CR on Windows files) */
+const src = readFileSync(join(base, "index.html"), "utf8").split(String.fromCharCode(13)+String.fromCharCode(10)).join(String.fromCharCode(10))
 const _m = src.match(/<script>([\s\S]*?)<\/script>/);
 const JS = _m ? _m[1] : src;          // 脚本正文(闸6/闸7 用)
 let bad = 0;

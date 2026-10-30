@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const base = dirname(fileURLToPath(import.meta.url));
-const read = f => readFileSync(join(base, f), 'utf8').replace(/\r\n/g, '\n').replace(/\n+$/, '\n');
+const read = f => { const b = readFileSync(join(base, f), 'utf8').replace(/\r\n/g, '\n'); return b.endsWith('\n') ? b.replace(/\n+$/, '\n') : b + '\n'; };
 
 const files = [
   ['server.py',   'PYEOF'],
@@ -46,12 +46,28 @@ for (const [name, eof] of files) {
 const head = `#!/data/data/com.termux/files/usr/bin/bash
 # decache · 一键安装/升级(自包含, Termux)
 # 本文件由 sync_install.mjs 生成 — 手工编辑会被下一次同步覆盖
+# CRLF self-heal: transfers sometimes rewrite LF as CRLF; heredoc terminators then never match
+if grep -q $'\\r' "$0" 2>/dev/null; then
+  echo "⚠ CRLF detected (transfer corruption), cleaning and re-executing..."
+  tr -d '\\r' < "$0" > "$HOME/.install_clean.sh" && exec bash "$HOME/.install_clean.sh"
+fi
 set -e; cd ~
 APP=~/decache
 OLD=~/decache
 echo "════ 1/4 依赖 ════"
+# 死镜像自愈: librehat 等镜像仓库停在 2021, 拉新版 ffmpeg 却拉不到配套 libplacebo → 链接断裂
+if grep -rq "termux.librehat.com" "$PREFIX/etc/apt/sources.list" "$PREFIX/etc/apt/sources.list.d/" 2>/dev/null; then
+  sed -i 's|termux.librehat.com|packages.termux.dev|g' "$PREFIX/etc/apt/sources.list" "$PREFIX/etc/apt/sources.list.d/"* 2>/dev/null
+  echo "  ✓ 检测到过时镜像(librehat), 已切回官方源"
+fi
 pkg update -y >/dev/null 2>&1 || pkg update -y
-pkg install -y python ffmpeg termux-api
+# 半残依赖自愈: 部分升级留下的 broken 状态全量补齐, 失败不中断安装
+pkg upgrade -y >/dev/null 2>&1 || apt-get -f install -y >/dev/null 2>&1 || true
+pkg install -y python ffmpeg termux-api || {
+  echo "  ⚠ 依赖装失败, 尝试修复断裂依赖后重试..."
+  apt-get -f install -y || true
+  pkg install -y python ffmpeg termux-api
+}
 # nodejs: yt-dlp 解析部分站点(尤其 YouTube)需要 JS runtime, 缺了会报解析失败
 command -v node >/dev/null 2>&1 || pkg install -y nodejs || echo "  ⚠ nodejs 没装上(某些站点解析可能失败)"
 echo "════ 2/4 引擎 ════"

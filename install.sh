@@ -1,12 +1,28 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # decache · 一键安装/升级(自包含, Termux)
 # 本文件由 sync_install.mjs 生成 — 手工编辑会被下一次同步覆盖
+# CRLF self-heal: transfers sometimes rewrite LF as CRLF; heredoc terminators then never match
+if grep -q $'\r' "$0" 2>/dev/null; then
+  echo "⚠ CRLF detected (transfer corruption), cleaning and re-executing..."
+  tr -d '\r' < "$0" > "$HOME/.install_clean.sh" && exec bash "$HOME/.install_clean.sh"
+fi
 set -e; cd ~
 APP=~/decache
 OLD=~/decache
 echo "════ 1/4 依赖 ════"
+# 死镜像自愈: librehat 等镜像仓库停在 2021, 拉新版 ffmpeg 却拉不到配套 libplacebo → 链接断裂
+if grep -rq "termux.librehat.com" "$PREFIX/etc/apt/sources.list" "$PREFIX/etc/apt/sources.list.d/" 2>/dev/null; then
+  sed -i 's|termux.librehat.com|packages.termux.dev|g' "$PREFIX/etc/apt/sources.list" "$PREFIX/etc/apt/sources.list.d/"* 2>/dev/null
+  echo "  ✓ 检测到过时镜像(librehat), 已切回官方源"
+fi
 pkg update -y >/dev/null 2>&1 || pkg update -y
-pkg install -y python ffmpeg termux-api
+# 半残依赖自愈: 部分升级留下的 broken 状态全量补齐, 失败不中断安装
+pkg upgrade -y >/dev/null 2>&1 || apt-get -f install -y >/dev/null 2>&1 || true
+pkg install -y python ffmpeg termux-api || {
+  echo "  ⚠ 依赖装失败, 尝试修复断裂依赖后重试..."
+  apt-get -f install -y || true
+  pkg install -y python ffmpeg termux-api
+}
 # nodejs: yt-dlp 解析部分站点(尤其 YouTube)需要 JS runtime, 缺了会报解析失败
 command -v node >/dev/null 2>&1 || pkg install -y nodejs || echo "  ⚠ nodejs 没装上(某些站点解析可能失败)"
 echo "════ 2/4 引擎 ════"
@@ -3422,7 +3438,11 @@ input[type=text]::placeholder{color:var(--tx3)}
 #pmodal.open{display:flex}
 #pstage{position:relative;flex:1;min-height:0;width:100%;background:#000;
   display:flex;align-items:center;justify-content:center;touch-action:none;overflow:hidden}
-#pvideo{width:100%;height:100%;object-fit:contain;background:#000;display:block;transform:translateZ(0)}   /* v19.8: 合成层快路径(实测+35%) */
+#pvideo{position:relative;z-index:1;width:100%;height:100%;object-fit:contain;background:transparent;display:block;transform:translateZ(0)}   /* v21.4: 底改透明, 信箱黑边让位给氛围光; 黑底由 #pstage 兜 */
+/* v21.4: Ambient Mode 氛围光画布 — 垫在视频后面, 低分辨率+大模糊+放大, 黑边变画面延伸 */
+#ambCv{position:absolute;inset:0;width:100%;height:100%;z-index:0;display:none;pointer-events:none;
+  filter:saturate(1.4) brightness(.82);transform:scale(1.35)}   /* v21.4b: 46px 大模糊挪进画布内部(ctx.filter, 24x14 上几乎零成本), 全屏 CSS blur 会拖死低端机 */
+@supports not (filter: blur(4px)){#ambCv{display:none!important}}
 /* 顶栏两行: 第一行 = 标题(整行, 不用挤在按钮中间), 第二行 = 交互按钮 */
 #phead{position:absolute;top:0;left:0;right:0;z-index:7;display:flex;flex-direction:column;gap:10px;
   padding:14px 16px calc(14px + env(safe-area-inset-top));
@@ -3551,7 +3571,7 @@ input[type=text]::placeholder{color:var(--tx3)}
   }
 }
 @media (prefers-reduced-motion: reduce){
-  *,*::before,*::after{
+  html:not(.force-fx) *,html:not(.force-fx) *::before,html:not(.force-fx) *::after{
     animation-duration:.001s!important;animation-delay:0s!important;
     animation-iteration-count:1!important;transition-duration:.001s!important;
     scroll-behavior:auto!important}
@@ -3896,6 +3916,32 @@ html[data-ui="synthwave"][data-theme="light"] .page::before{display:none}
 @media (prefers-color-scheme:light){
   html[data-ui="synthwave"]:not([data-theme="dark"]) .page::before{display:none}}
 
+/* v21.2: 透视网格地板 — 复古未来的灵魂件。transform 走合成器, reduce 归零由全局块管 */
+html[data-ui="synthwave"] .page::after{content:"";position:fixed;left:-60%;right:-60%;bottom:-6vh;
+  height:52vh;z-index:-1;pointer-events:none;
+  background:
+    repeating-linear-gradient(90deg, rgba(0,240,255,.18) 0 2px, transparent 2px 70px),
+    repeating-linear-gradient(0deg, rgba(255,45,149,.20) 0 2px, transparent 2px 58px);
+  transform:perspective(300px) rotateX(61deg);transform-origin:50% 0;
+  -webkit-mask-image:linear-gradient(180deg,transparent 0,#000 26%);
+          mask-image:linear-gradient(180deg,transparent 0,#000 26%)}
+@media (prefers-reduced-motion:no-preference){
+  html[data-ui="synthwave"] .page::after{animation:synFloor 1.6s linear infinite}
+  @keyframes synFloor{to{transform:perspective(300px) rotateX(61deg) translateY(58px)}}
+}
+html[data-ui="synthwave"][data-theme="light"] .page::after{display:none}
+@media (prefers-color-scheme:light){
+  html[data-ui="synthwave"]:not([data-theme="dark"]) .page::after{display:none}}
+
+/* v21.4: mauto 自适应 · 主界面氛围光 — 视频主色从天顶和地角渗进来, 没视频时给薄荷默认色保身份 */
+html[data-ui="mauto"] body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background:
+    radial-gradient(ellipse 90% 55% at 50% -12%, var(--amb, rgba(120,220,180,.20)), transparent 70%),
+    radial-gradient(ellipse 70% 45% at 88% 112%, var(--amb, rgba(120,220,180,.14)), transparent 72%)}
+@media (prefers-reduced-motion:no-preference){
+  html[data-ui="mauto"] body::before{animation:mauBreath 7s ease-in-out infinite}
+  @keyframes mauBreath{50%{opacity:.72}}}
+
 /* ── catppuccin · 奶油玻璃: 毛玻璃卡 + 粉彩渐变按钮 ── */
 html[data-ui="catppuccin"] .card{background:color-mix(in srgb, var(--srf) 84%, transparent);
   backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
@@ -3918,9 +3964,9 @@ html[data-ui="geist"] .tabbar button.on{box-shadow:inset 0 -2px 0 var(--acc)}
 html[data-ui="geist"] .card{border:1px solid var(--line);box-shadow:0 1px 2px rgba(0,0,0,.18)}
 
 @media (prefers-reduced-motion:reduce){
-  html[data-ui="pipboy"] .logo,html[data-ui="synthwave"] .page::before{animation:none}
-  #pfill::after,.browsecard,.vcard,.tcard,.page{animation:none}
-  .btn,.icbtn,.chip,.tabbar button{transition:none}
+  html:not(.force-fx)[data-ui="pipboy"] .logo,html:not(.force-fx)[data-ui="synthwave"] .page::before{animation:none}
+  html:not(.force-fx) #pfill::after,html:not(.force-fx) .browsecard,html:not(.force-fx) .vcard,html:not(.force-fx) .tcard,html:not(.force-fx) .page{animation:none}
+  html:not(.force-fx) .btn,html:not(.force-fx) .icbtn,html:not(.force-fx) .chip,html:not(.force-fx) .tabbar button{transition:none}
 }
 
 /* v17.1: 播放器内特效快切面板 */
@@ -3939,8 +3985,15 @@ html:not([data-ui="retro"]) .card,
 /* 环境辉光: drop-shadow 不碰 box-shadow, 卡片被主题色氛围光包裹 (retro 排除) */
 html:not([data-ui="retro"]):not([data-ui="pipboy"]) .card{box-shadow:0 4px 16px rgba(0,0,0,.3),0 0 18px var(--cardglow)}   .rebuild .vcard{animation:none!important}   /* v19.1: 轮询重建不播入场动画 */
 
-/* v19.4: 下载历史 chip 防溢出(JS截短之外的CSS双保险) */
-#urlHist .chip{max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto}
+/* v20.0: 下载历史 = 缩略图卡片(替代旧文字chip), 防溢出双保险保留 */
+.histcard{display:inline-flex;align-items:center;gap:7px;max-width:46%;min-height:40px;padding:4px 9px 4px 4px;
+  border:1px solid var(--line);border-radius:12px;cursor:pointer;background:var(--card);
+  overflow:hidden;flex:0 1 auto;transition:border-color .15s}
+.histcard:hover{border-color:var(--acc)}
+.histcard img{width:34px;height:24px;object-fit:cover;border-radius:7px;flex:none;background:var(--srf2)}
+.histcard .ht{font-size:12.5px;color:var(--tx2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.histcard .hx{flex:none;font-size:11px;opacity:.45;line-height:1;padding:2px 3px;border-radius:6px;color:var(--tx)}
+.histcard .hx:hover{opacity:1;color:var(--danger,var(--acc));background:var(--srf2)}
 
 /* v19: drop-shadow(合成层大户)→box-shadow多层 */
 /* 场景浓厚三主题: 毛玻璃透出背景 */
@@ -3948,6 +4001,53 @@ html[data-ui="synthwave"] .card{background:color-mix(in srgb, var(--srf) 90%, tr
 html[data-ui="geist"] .card{background:color-mix(in srgb, var(--srf) 87%, transparent);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 html[data-ui="retro"] .card{background-color:color-mix(in srgb, #24231F 94%, transparent)}   /* 微透无 blur, 保像素锐度 */
 html[data-ui="mono"]{--cardglow:rgba(255,45,120,.06)}   /* mono 也来一点淡淡的粉光 */
+
+/* ═══════ v20.1 · 主题融合深化: 治"贴上去"的残余 ═══════ */
+
+/* 滚动条主题化(原来只有 tabbar/chips 隐藏了, 全局条是原生灰) */
+*{scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--acc) 40%,var(--srf2)) transparent}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--acc) 38%,var(--srf2));border-radius:99px;border:2px solid var(--bg)}
+::-webkit-scrollbar-track{background:transparent}
+html[data-ui="retro"] ::-webkit-scrollbar-thumb{border-radius:0;border:2px solid #0F0E0C;background:#5E9D34}
+html[data-ui="retro"] *{scrollbar-color:#5E9D34 #24231F}
+
+/* toast 吃主题: 原来灰底白描边像外来组件 */
+#gtoast{background:color-mix(in srgb, var(--srf) 90%, transparent);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+html[data-ui="synthwave"] #gtoast{border-color:rgba(255,45,149,.4);box-shadow:0 8px 28px rgba(0,0,0,.45),0 0 16px rgba(255,45,149,.22)}
+html[data-ui="pipboy"] #gtoast{border-radius:2px;border-color:#2B4A2B;box-shadow:0 0 18px rgba(34,255,85,.12)}
+html[data-ui="retro"] #gtoast{border-radius:0;border:2px solid #0F0E0C;box-shadow:4px 4px 0 rgba(0,0,0,.4),inset 0 0 0 2px #4B4941;backdrop-filter:none}
+html[data-ui="catppuccin"] #gtoast{border-color:rgba(203,166,247,.32)}
+html[data-ui="geist"] #gtoast{box-shadow:0 0 0 1px var(--edge),0 8px 28px rgba(0,0,0,.4)}
+
+/* 顶栏底缘融合: 主题色缝线 + 场景透上来(原来 88% 近实色, 交界是一条硬线) */
+.appbar{background:color-mix(in srgb, var(--bg) 58%, transparent);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px)}
+.appbar::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;pointer-events:none;
+  background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--acc) 55%,transparent) 50%,transparent);opacity:.45}
+html[data-ui="retro"] .appbar{background:color-mix(in srgb, var(--bg) 92%, transparent);backdrop-filter:none;-webkit-backdrop-filter:none}
+html[data-ui="retro"] .appbar::after{background:#0F0E0C;opacity:1;height:2px}
+
+/* 卡片透明度校准: 毛玻璃形同虚设 = 网格在卡边被硬截断 */
+html[data-ui="synthwave"] .card{background:color-mix(in srgb, var(--srf) 82%, transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+html[data-ui="geist"] .card{background:color-mix(in srgb, var(--srf) 80%, transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+
+/* 按钮语言归位: synthwave 要霓虹线条不要荧光贴纸, catppuccin 要低饱和奶油 */
+html[data-ui="synthwave"] .btn{background:linear-gradient(180deg,rgba(255,45,149,.16),rgba(185,103,255,.10));
+  border:1px solid rgba(255,45,149,.6);box-shadow:0 0 14px rgba(255,45,149,.32),inset 0 0 12px rgba(255,45,149,.14);
+  color:#FFD9EE;text-shadow:0 0 8px rgba(255,45,149,.75)}
+html[data-ui="synthwave"] .btn.ghost{background:transparent;border:1px solid rgba(139,233,253,.4);
+  color:#8BE9FD;box-shadow:none;text-shadow:0 0 8px rgba(139,233,253,.55)}
+html[data-ui="synthwave"] .btn:active{box-shadow:0 0 22px rgba(255,45,149,.5),inset 0 0 18px rgba(255,45,149,.22)}
+html[data-ui="catppuccin"] .btn{background:linear-gradient(135deg,color-mix(in srgb,#89B4FA 76%,#A6ADC8),color-mix(in srgb,#CBA6F7 76%,#A6ADC8));
+  box-shadow:0 2px 10px rgba(137,180,250,.16)}
+
+/* 播放器控制条全主题化(v18 只给了 geist/pipboy 零星) */
+html[data-ui="synthwave"] #pctrl{background:rgba(14,6,28,.88);border-color:rgba(255,45,149,.28)}
+html[data-ui="catppuccin"] #pctrl{background:rgba(30,30,46,.9);border-color:rgba(205,214,244,.12)}
+html[data-ui="retro"] #pctrl{background:#181713;border-radius:0;box-shadow:inset 0 0 0 2px #4B4941}
+html[data-ui="mono"] #pctrl{background:color-mix(in srgb, var(--srf) 92%, transparent)}
+html[data-ui="synthwave"] #pfill{background:linear-gradient(90deg,#FF2D95,#B967FF);box-shadow:0 0 14px rgba(255,45,149,.55)}
+html[data-ui="pipboy"] #pfill{background:#22FF55;box-shadow:0 0 12px rgba(34,255,85,.5)}
 
 /* ═══════ v18.1 · 封面融合层: 封面底部融入底板 + 主题色环境辉光, 治"纸片感" ═══════ */
 :root{--cardglow:transparent}
@@ -3991,7 +4091,7 @@ html[data-ui="retro"] #pfill{background:repeating-linear-gradient(90deg,#7BC96F 
 #pmodal:has(#pctrl.hide) #pCPlay{opacity:0;pointer-events:none}   /* v17.5: 显隐100%跟随控制条, 单击/pause等野路径也罩 */
 
 /* v17.4: 播放器打开期间直接隐藏场景层 — 全屏被不透明 pmodal 盖死本就看不清; fixed 层(video 解码层冲突黑屏的元凶, retro 静态层也中招)一律摘除 */
-body.pm-open::before,body.pm-open::after,body.pm-open .page::before{display:none!important}
+body.pm-open::before,body.pm-open::after,body.pm-open .page::before,body.pm-open .page::after{display:none!important}
 
 /* v15: 窄屏紧凑 — 控制条/头部按钮缩小, pipboy括号收起, 最大化不再被挤出屏 */
 @media (max-width:560px){
@@ -4069,7 +4169,7 @@ input:focus-visible,select:focus-visible,button:focus-visible{outline:none;
   .track:hover{height:8px}
 }
 @media (prefers-reduced-motion:reduce){
-  *{animation:none!important;transition:none!important}
+  html:not(.force-fx) *{animation:none!important;transition:none!important}
 }
 
 
@@ -4422,6 +4522,7 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
         <span class="chip" data-uiopt="retro" data-i18n="uiRetro">复古</span>
         <span class="chip" data-uiopt="pipboy" data-i18n="uiPip">终端</span>
         <span class="chip" data-uiopt="mauto" data-i18n="uiMauto" title="跟随视频主色实时换色">自适应</span>
+        <span class="chip" id="fxAllChip" title="省电模式/系统减动效会强制关闭主题动效,此开关强制全开">特效全开</span>
       </span>
     </div>
     <div class="meta" style="margin-top:8px" data-i18n="uiHint">界面皮肤, 明暗跟随右上角主题按钮。</div>
@@ -4509,10 +4610,6 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
     </div>
   </div>
   <div class="card" style="margin-top:12px">
-    <div class="qh" style="border:none;padding-bottom:4px"><span data-i18n="setRecent">最近播放</span></div>
-    <div id="recentList"></div>
-  </div>
-  <div class="card" style="margin-top:12px">
     <div class="qh" style="border:none;padding-bottom:4px"><span data-i18n="setStats">统计</span></div>
     <div id="statsBody"></div>
   </div>
@@ -4570,6 +4667,7 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
 <div id="pmodal">
   <button id="pCPlay" aria-label="播放/暂停"><svg class="ic"><use id="pCPlayUse" href="#i-play"/></svg></button>
 <div id="pstage">
+    <canvas id="ambCv" width="24" height="14"></canvas>
     <video id="pvideo" playsinline autoplay></video>
     <button id="pTap" style="display:none;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
       z-index:6;width:72px;height:72px;border-radius:50%;border:1px solid rgba(255,255,255,.3);
@@ -4644,7 +4742,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
 
 /* ═══ i18n ═══ */
 const I18N = {
-  zh: {fxFallback:'渲染异常, 已回退原画', tabSet:'设置', setSleep:'睡眠定时', setSleepHint:'到点自动暂停', sOff:'关', sMin:'%d分钟', setRecent:'最近播放', setRecentEmpty:'还没有播放记录', setStats:'统计', stTotal:'文件', stSize:'总大小', stFav:'收藏', uiMauto:'自适应', uiAdaptiveHint:'跟随视频主色实时换色', dlBatchTip:'支持多行批量: 每行一个链接', bFilter:'过滤文件…', agoNow:'刚刚', agoS:'%d秒前', agoM:'%d分钟前', agoH:'%d小时前', agoD:'%d天前', agoW:'%d周前', fxTitle:'画质特效',fxVhs:'VHS 录像',fxHint:'GPU 后处理, 发热或卡顿请关闭。',fxLabel:'特效',fxOff:'关闭',fxCrt:'CRT 电视',fxFilm:'胶片颗粒',fxNeon:'霓虹辉光',uiStyle:'界面风格',uiMono:'单色',uiGeist:'极简',uiCat:'柔和',uiSynth:'复古未来',uiRetro:'复古',uiPip:'终端',uiHint:'界面皮肤, 明暗跟随右上角主题按钮。', parse:'解析', all:'全选', none:'全不选', audio:'仅音频', dl:'下载所选',
+  zh: {fxFallback:'渲染异常, 已回退原画', tabSet:'设置', setSleep:'睡眠定时', setSleepHint:'到点自动暂停', sOff:'关', sMin:'%d分钟', setStats:'统计', stTotal:'文件', stSize:'总大小', stFav:'收藏', uiMauto:'自适应', uiAdaptiveHint:'跟随视频主色实时换色', dlBatchTip:'支持多行批量: 每行一个链接', bFilter:'过滤文件…', agoNow:'刚刚', agoS:'%d秒前', agoM:'%d分钟前', agoH:'%d小时前', agoD:'%d天前', agoW:'%d周前', fxTitle:'画质特效',fxVhs:'VHS 录像',fxHint:'GPU 后处理, 发热或卡顿请关闭。',fxLabel:'特效',fxOff:'关闭',fxCrt:'CRT 电视',fxFilm:'胶片颗粒',fxNeon:'霓虹辉光',uiStyle:'界面风格',uiMono:'单色',uiGeist:'极简',uiCat:'柔和',uiSynth:'复古未来',uiRetro:'复古',uiPip:'终端',uiHint:'界面皮肤, 明暗跟随右上角主题按钮。', parse:'解析', all:'全选', none:'全不选', audio:'仅音频', dl:'下载所选',
     tasks:'下载任务', noTask:'暂无任务', library:'媒体库', scan:'扫描全盘', export:'导出备份',
     loose:'散文件', sNew:'最新', sSeq:'下载顺序', sOld:'最早', sName:'名称',
     tabDl:'下载', tabTask:'任务', tabLib:'媒体库', searchPh:'搜索标题', emptyLib:'库里还空着', emptySearch:'没搜到', resume:'继续观看',
@@ -4700,7 +4798,7 @@ const I18N = {
     installTip:'浏览器菜单 →「添加到主屏幕 / 安装应用」, 之后点桌面图标即可用',
     uniRun:'生成通用版中…', uniOk:'已生成全平台通用版', uniAlready:'已经是 mp4',
     uniFail:'生成失败', uniCompat:'生成通用版(全平台都能播)'},
-  en: {fxFallback:'Render error, fell back to plain video', tabSet:'Settings', setSleep:'Sleep timer', setSleepHint:'Auto-pause when time is up', sOff:'Off', sMin:'%d min', setRecent:'Recently played', setRecentEmpty:'Nothing played yet', setStats:'Statistics', stTotal:'Files', stSize:'Total size', stFav:'Favorites', uiMauto:'Adaptive', dlBatchTip:'Batch: one URL per line', uiAdaptiveHint:'Follows the video\'s dominant color', bFilter:'Filter files…', agoNow:'just now', agoS:'%ds ago', agoM:'%dm ago', agoH:'%dh ago', agoD:'%dd ago', agoW:'%dw ago', fxTitle:'Video FX',fxVhs:'VHS Tape',fxHint:'GPU post-processing; turn off if hot or laggy.',fxLabel:'Effects',fxOff:'Off',fxCrt:'CRT TV',fxFilm:'Film Grain',fxNeon:'Neon Glow',uiStyle:'UI style',uiMono:'Mono',uiGeist:'Minimal',uiCat:'Soft',uiSynth:'Retro-Future',uiRetro:'Retro',uiPip:'Terminal',uiHint:'Interface skin; light/dark follows the theme button.', parse:'Parse', all:'All', none:'None', audio:'Audio only', dl:'Download',
+  en: {fxFallback:'Render error, fell back to plain video', tabSet:'Settings', setSleep:'Sleep timer', setSleepHint:'Auto-pause when time is up', sOff:'Off', sMin:'%d min', setStats:'Statistics', stTotal:'Files', stSize:'Total size', stFav:'Favorites', uiMauto:'Adaptive', dlBatchTip:'Batch: one URL per line', uiAdaptiveHint:'Follows the video\'s dominant color', bFilter:'Filter files…', agoNow:'just now', agoS:'%ds ago', agoM:'%dm ago', agoH:'%dh ago', agoD:'%dd ago', agoW:'%dw ago', fxTitle:'Video FX',fxVhs:'VHS Tape',fxHint:'GPU post-processing; turn off if hot or laggy.',fxLabel:'Effects',fxOff:'Off',fxCrt:'CRT TV',fxFilm:'Film Grain',fxNeon:'Neon Glow',uiStyle:'UI style',uiMono:'Mono',uiGeist:'Minimal',uiCat:'Soft',uiSynth:'Retro-Future',uiRetro:'Retro',uiPip:'Terminal',uiHint:'Interface skin; light/dark follows the theme button.', parse:'Parse', all:'All', none:'None', audio:'Audio only', dl:'Download',
     tasks:'Tasks', noTask:'No tasks', library:'Library', scan:'Scan videos', export:'Export backup',
     loose:'Loose files', sNew:'Newest', sSeq:'Order', sOld:'Oldest', sName:'Name',
     tabDl:'Download', tabTask:'Tasks', tabLib:'Library', searchPh:'Search titles', emptyLib:'Library is empty', emptySearch:'No results', resume:'Resume',
@@ -4933,23 +5031,36 @@ const fmtT = t0 => {
 };
 
 /* ═══ 解析/下载 ═══ */
-/* v15.3: 下载历史 — 解析成功记一笔, chips 点击回填再解析 */
-function histAdd(u) {
+/* v20.0: 下载历史 — 解析成功记一笔(带封面+标题), chips 点击回填再解析, × 删除单条 */
+function histLoad2() {
   let h = [];
   try { h = JSON.parse(localStorage.getItem('take_hist') || '[]'); } catch (e) {}
-  h = [u, ...h.filter(x => x !== u)].slice(0, 8);
+  return (Array.isArray(h) ? h : []).map(x => typeof x === 'string' ? { u: x, c: '', t: '' } : x)
+    .filter(x => x && x.u);   /* v15.3 旧数据是纯字符串, 无缝升级 */
+}
+function histAdd(u, cover, title) {
+  const h = [{ u, c: cover || '', t: title || '', at: Date.now() },
+    ...histLoad2().filter(x => x.u !== u)].slice(0, 8);
   localStorage.setItem('take_hist', JSON.stringify(h));
   histRender();
 }
 function histRender() {
-  let h = [];
-  try { h = JSON.parse(localStorage.getItem('take_hist') || '[]'); } catch (e) {}
+  const h = histLoad2();
   const el = $('urlHist');
   if (!el) return;
-  el.innerHTML = h.map(u2 => `<button class="chip" data-hu="${esc(u2)}" title="${esc(u2)}">${esc(u2.length > 20 ? u2.slice(0, 20) + '…' : u2)}</button>`).join('');
+  el.innerHTML = h.map(x => `<div class="histcard" data-hu="${esc(x.u)}" title="${esc(x.u)}">` +
+    (x.c ? `<img src="/api/thumb?url=${encodeURIComponent(x.c)}" loading="lazy" alt="">` : '') +
+    `<span class="ht">${esc(x.t || x.u)}</span>` +
+    `<span class="hx" data-hx="${esc(x.u)}" title="删除">✕</span></div>`).join('');
   el.style.display = h.length ? 'flex' : 'none';
 }
 document.addEventListener('click', e => {
+  const del = e.target.closest('[data-hx]');   /* × 删除 — 必须在 [data-hu] 之前判, × 在卡片内部 */
+  if (del) {
+    localStorage.setItem('take_hist', JSON.stringify(histLoad2().filter(x => x.u !== del.dataset.hx)));
+    histRender();
+    return;
+  }
   const b = e.target.closest('[data-hu]');
   if (!b) return;
   $('url').value = b.dataset.hu;
@@ -4978,7 +5089,7 @@ async function parseOne(raw) {
     if (d.error) { $('perr').textContent = d.error; return; }
     current = d;
     current.url = d.url || raw;      // 用解析出来的最终地址(短链已跟完), 不再用短链下载
-    histAdd(raw);
+    histAdd(raw, d.cover, d.title);
     $('infoCard').style.display = 'block';
     $('cover').src = d.cover ? '/api/thumb?url=' + encodeURIComponent(d.cover) : '';
     $('vtitle').textContent = d.title;
@@ -5200,13 +5311,15 @@ function mautoTick() {
     root.setProperty('--acc', `rgb(${cs(best[0] * 1.05)},${cs(best[1] * 1.05)},${cs(best[2] * 1.05)})`);
     root.setProperty('--edge', `rgba(${cs(best[0])},${cs(best[1])},${cs(best[2])},.35)`);
     root.setProperty('--srf2', `rgba(${cs(best[0] * 0.35)},${cs(best[1] * 0.35)},${cs(best[2] * 0.35)},.16)`);
+    root.setProperty('--amb', `rgba(${cs(best[0])},${cs(best[1])},${cs(best[2])},.20)`);   /* v21.4: 主界面氛围光色 */
   } catch (e2) {}
 }
 setInterval(mautoTick, 5000);
 
-/* v19.9: 着色器定期保养 — 每90秒(播放中)无缝重建纹理对象, Chrome 的 video-texture 路径
+/* v19.9: 着色器定期保养 — 每60秒(播放中)无缝重建纹理对象, Chrome 的 video-texture 路径
    重走一遍干净初始化, 清掉"越用越卡"的渐进累积(ml5/Chromium 案例: GPU 进程随时长劣化)。
-   零打断: 纹理每帧本来就上传, 换对象只是下一帧多一次常规 texImage2D; program 不动(重编译会卡) */
+   v20.0: 真正的根因已修 — fragment shader 全程 highp(原 mediump 的 t 随播放时长单调增长,
+   fp16 精度坍塌, 手机 GPU 越算越慢; StackOverflow 移动端同病同因)。保养继续留着兜底纹理层。 */
 window._fxCare = setInterval(() => {
   if (FX_MODE === 'off' || !fxGl || !fxTex) return;   /* 特效没跑=没累积, 不用清 */
   if (fxGl.isContextLost()) return;
@@ -5230,10 +5343,37 @@ function applyUiTheme() {
   else { rs.removeProperty('--acc'); rs.removeProperty('--edge'); rs.removeProperty('--srf2'); }
   document.querySelectorAll('[data-uiopt]').forEach(c =>
     c.classList.toggle('on', c.dataset.uiopt === UI_THEME));
+  /* v21.1: 主题切换=全页 GPU 层大换血, Android WebView(Kiwi 冻结版尤甚)会顺手回收
+     视频表面(黑屏有声, 与切后台同族, 见 repairSurface 注释)。真机 Kiwi 实测 stall
+     判断靠不住——帧计数可能照走而表面已死, 所以播放中不做判断, 无条件重插视频
+     重建表面(一次微闪换不黑屏); 桌面同路径代价可忽略。 */
+  try {
+    const pv = document.getElementById('pvideo');
+    if ($('pmodal').classList.contains('open') && pv && pv.getAttribute('src') &&
+        !pv.paused && !$('pstage').classList.contains('audio')) {
+      setTimeout(() => {
+        try { reattachVideo(); nudgeDecoder(); } catch (e) {}
+      }, 700);
+    }
+  } catch (e) { /* 初始化早于播放器模块时静默跳过 */ }
 }
 document.querySelectorAll('[data-uiopt]').forEach(c =>
   c.onclick = () => { UI_THEME = c.dataset.uiopt; applyUiTheme(); });
 applyUiTheme();
+
+/* v21.0: 特效全开 — 手机省电模式/系统"移除动画"会强制 prefers-reduced-motion,
+   三处 reduce 块把主题动效一刀切归零(这就是"手机效果普通"的主因)。force-fx 类豁免。 */
+const FX_ALL_ON = () => localStorage.getItem('take_forcefx') === '1';
+const applyFxAll = () => {
+  const on = FX_ALL_ON();
+  document.documentElement.classList.toggle('force-fx', on);
+  const chip = $('fxAllChip'); if (chip) chip.classList.toggle('on', on);
+};
+applyFxAll();
+$('fxAllChip').onclick = () => {
+  localStorage.setItem('take_forcefx', FX_ALL_ON() ? '0' : '1');
+  applyFxAll();
+};
 
 /* ═══ 播放器着色器特效 v8.3: WebGL 后处理, 设置里可开关 ═══ */
 /* v10: CRT 按 crt-geom 经典参数 — 细浅扫描线/荫罩/柔焦/微曲率/滚动亮带 */
@@ -5279,7 +5419,7 @@ function fxEnsure() {
   if (fxPr && fxGl.isContextLost()) fxPr = null;
   if (!fxPr) {
   const vs = 'attribute vec2 p;varying vec2 vUv;void main(){vUv=vec2(p.x*.5+.5,p.y*.5+.5);gl_Position=vec4(p,0.,1.);}';
-  const fs = `precision mediump float;varying vec2 vUv;uniform sampler2D T;uniform float t;uniform vec2 r;
+  const fs = `precision highp float;varying vec2 vUv;uniform sampler2D T;uniform highp float t;uniform vec2 r;
 uniform float s,a,v,g,w,k,m,j,n,q,f,trk,fd,pg;
 float rnd(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453);}
 void main(){
@@ -5413,7 +5553,7 @@ function fxRender(ts) {
   {
     const bc = window._fxBC = window._fxBC || { n: 0, black: 0 };
     bc.n++;
-    if (bc.n >= 30) {
+    if (bc.n >= 300) {   /* v20.0: 30帧→300帧, readPixels 是 GPU stall 大户, 黑屏检测降频 */
       bc.n = 0;
       try {
         const px = new Uint8Array(4);
@@ -6901,6 +7041,31 @@ function repairSurface(step) {
   setTimeout(() => repairSurface(step + 1), 800);  // 给浏览器 0.8s 自己缓过来
 }
 
+/* ═══ v21.4: Ambient Mode — 氛围光(YouTube 同款): 24x14 低清画布垫在视频后面,
+   大模糊+放大 1.35, 黑边变成画面的延伸。rAF 自带节拍(120ms≈8fps, 氛围光不要流畅要省电),
+   不依赖 RVFC——fx 关闭时也能跑, Kiwi 老内核无 RVFC 也能跑。暂停时冻结最后一帧。 ═══ */
+(function () {
+  const cv = $('ambCv'); if (!cv) return;
+  const cx = cv.getContext('2d'); if (!cx) return;
+  let last = 0;
+  function tick(ts) {
+    requestAnimationFrame(tick);
+    const now = ts || 0;
+    if (now - last < 120) return;
+    last = now;
+    try {
+      const show = $('pmodal').classList.contains('open') && v && v.getAttribute('src') &&
+                   !$('pstage').classList.contains('audio') && v.readyState >= 2 && v.videoWidth;
+      cv.style.display = show ? 'block' : 'none';
+      if (!show || v.paused) return;      /* 暂停: 冻结最后一帧当静态氛围 */
+      try { cx.filter = 'blur(2px)'; } catch (e) {}   /* 24x14 上模糊几乎免费; 老内核不支持就靠双线性插值 */
+      cx.drawImage(v, 0, 0, cv.width, cv.height);
+      try { cx.filter = 'none'; } catch (e) {}
+    } catch (e) {}
+  }
+  requestAnimationFrame(tick);
+})();
+
 function onForeground() {
   clearTimeout(_resumeTk);
   repaintAll();                                    // 白屏那条: 先整页重画一次
@@ -6996,20 +7161,6 @@ setInterval(pollTick, 3000);
 applyLang(); histRender();
 
 /* ── v17 功能包 ── */
-function recentRender() {
-  const el = $('recentList');
-  if (!el) return;
-  const seen = new Set();
-  const h = histLoad().filter(x2 => { if (seen.has(x2.r)) return false; seen.add(x2.r); return true; }).slice(0, 10);   /* v17.2: 同文件只留最新一条 */
-  if (!h.length) { el.innerHTML = `<div style="opacity:.6;font-size:12px;padding:6px 0">${t('setRecentEmpty')}</div>`; return; }
-  el.innerHTML = h.map(x2 => {
-    const name = String(x2.r || '').split('/').pop() || x2.r;
-    return `<div class="qitem" data-open="${esc(x2.r)}" style="cursor:pointer">
-      <svg class="ic"><use href="#i-play"/></svg>
-      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(name)}</span>
-      <span class="bm">${agoText((x2.at || 0) / 1000)}</span></div>`;
-  }).join('');
-}
 function statsRender() {
   const el = $('statsBody');
   if (!el) return;
@@ -7063,7 +7214,6 @@ document.addEventListener('click', e => {
   if (!e.target.closest('#sleepPop')) { const el2 = $('sleepPop'); if (el2) el2.classList.remove('open'); }
 });
 sleepPopSync();
-recentRender();
 statsRender();
 /* server 端进度合并进本地账本(重装/换浏览器不丢) */
 try {
@@ -7081,7 +7231,7 @@ try {
       local.push({ r: rel, t: Math.round(vv.pos), d: Math.round(vv.dur || 0), at: Date.now() });
       added++;
     }
-    if (added) { histSave(local); renderResume(); recentRender(); }
+    if (added) { histSave(local); renderResume(); }
   });
 } catch (e) {}
 refreshTasks(); loadLib(); checkVer(); loadCfg(); loadTagStats(); loadQueue();
@@ -7098,10 +7248,15 @@ cat > "$APP"/start.sh <<'SHEOF'
 # decache · 一键启动(前台保活)
 # 为什么前台跑: Android 的前台服务有通知, 系统不会像后台进程那样随手杀。
 # 加 while 循环: 进程崩了自动拉起(手机内存紧张/系统回收时不会一睡不醒)。
+#
+# 热修(断电重启后 start.sh 卡死):
+# 重启后 Termux:API 的 IPC 可能未就绪/被系统冻结, termux-notification 会永久挂起。
+# 旧版这两行没有超时保护, 一挂住 server.py 就永远执行不到 → 敲 start.sh 无响应。
+# 修法: 所有 termux-* 调用限时(timeout) + 后台化, 主循环立刻起 server。
 set -u
 cd ~/decache || { echo "找不到 ~/decache, 先跑 install.sh"; exit 1; }
-termux-wake-lock 2>/dev/null || true      # 保持 CPU 唤醒, 下载不被冻结
-termux-notification --title "Decache" --content "媒体库运行中" --id decache --priority low 2>/dev/null || true
+( timeout 10 termux-wake-lock 2>/dev/null ) &
+( sleep 2; timeout 10 termux-notification --title "Decache" --content "媒体库运行中" --id decache --priority low 2>/dev/null ) &
 while true; do
   if ! pgrep -f "python.*server.py" >/dev/null 2>&1; then
     python server.py
@@ -7114,9 +7269,10 @@ cat > "$APP"/boot.sh <<'BOOTEOF'
 #!/data/data/com.termux/files/usr/bin/bash
 # decache · 开机自启(Termux:Boot 调用)
 # 安装: 装 Termux:Boot(F-Droid) → 把这个脚本软链/复制到 ~/.termux/boot/
+# 热修: termux-wake-lock 同样限时+后台, 重启后 IPC 挂起不拖累启动。
 set -u
 export PATH="$PREFIX/bin:$PATH"
-termux-wake-lock 2>/dev/null || true
+( timeout 10 termux-wake-lock 2>/dev/null ) &
 sleep 8                                  # 等系统网络/存储就绪
 bash ~/decache/start.sh >/dev/null 2>&1 &
 BOOTEOF
