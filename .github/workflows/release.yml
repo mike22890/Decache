@@ -1,0 +1,17 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pack take-bundle (git archive, take/ prefix, tracked files only)
+        run: git archive --format=tar.gz --prefix=take/ -o take-bundle.tar.gz HEAD
+      - name: Create release with auto notes
+        run: gh release create "$GITHUB_REF_NAME" take-bundle.tar.gz --generate-notes --title "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
