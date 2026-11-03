@@ -193,5 +193,23 @@ let bad = 0;
   } else console.log('✅ 闸7 变量遮蔽: 无');
 }
 
+/* 闸8: stylelint CSS 校验 — 2026-11-03 实锤 fuzzy patch 把 backdrop-filter 撕成
+   「ba + 注释 + ckdrop-filter」粘成一行, 七道闸全放行进了包。属性级断裂只有真正的
+   CSS 解析器能抓。依赖: npm i -g stylelint postcss-html + .stylelintrc.json */
+try {
+  const { execSync } = await import('node:child_process');
+  let out = '';
+  try {
+    out = execSync('stylelint index.html --custom-syntax postcss-html', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) { out = (e.stdout || '') + (e.stderr || ''); }
+  const hits = out.split('\n').filter(l => /✖|Error/.test(l) && !/Duplicate property/.test(l) && !/problems \(|problems\(/.test(l));
+  if (hits.length) {
+    bad++;
+    console.log('❌ 闸8 CSS 语法/属性: ' + hits.length + ' 处 — ' + hits.slice(0, 4).map(s => s.trim()).join(' | '));
+  } else console.log('✅ 闸8 CSS 语法/属性: 无断裂 (重复属性等历史噪音已豁免)');
+} catch (e) {
+  console.log('⚠ 闸8 跳过: stylelint 不可用 (npm i -g stylelint postcss-html)');
+}
+
 console.log(bad ? `\n${bad} 道闸没过` : '\n前端静态闸全过 ✅');
 process.exit(bad ? 1 : 0);
