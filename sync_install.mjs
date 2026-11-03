@@ -60,6 +60,15 @@ if grep -rq "termux.librehat.com" "$PREFIX/etc/apt/sources.list" "$PREFIX/etc/ap
   sed -i 's|termux.librehat.com|packages.termux.dev|g' "$PREFIX/etc/apt/sources.list" "$PREFIX/etc/apt/sources.list.d/"* 2>/dev/null
   echo "  ✓ 检测到过时镜像(librehat), 已切回官方源"
 fi
+# 网络自愈: 主源为空或探测不通 → 自动切清华 TUNA(国内直连快), 不让用户干等 apt 摸死镜像
+_m="$PREFIX/etc/apt/sources.list"
+[ -s "$_m" ] || { echo "deb https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main stable main" > "$_m"; echo "  ✓ 主源为空, 已写入清华 TUNA 镜像"; }
+_src=$(grep -m1 '^deb ' "$_m" 2>/dev/null | sed 's|.*://||; s|/.*||')
+if [ -n "$_src" ] && [ "$_src" != "mirrors.tuna.tsinghua.edu.cn" ] && ! curl -sI --connect-timeout 6 --max-time 10 "https://$_src" >/dev/null 2>&1; then
+  cp "$_m" "$_m.bak" 2>/dev/null
+  echo "deb https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main stable main" > "$_m"
+  echo "  ⚠ 原源($_src)探测不通, 已切清华 TUNA 镜像(原配置备份为 sources.list.bak)"
+fi
 pkg update -y >/dev/null 2>&1 || pkg update -y
 # 半残依赖自愈: 部分升级留下的 broken 状态全量补齐, 失败不中断安装
 pkg upgrade -y >/dev/null 2>&1 || apt-get -f install -y >/dev/null 2>&1 || true
