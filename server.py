@@ -1013,10 +1013,7 @@ def scan_videos():
     全被覆盖**(lost update, 标签集体消失)。现在: 只读阶段只收集, 写阶段用
     mutate_library() 在锁内合并 —— 并发改动不会被覆盖。"""
     # ── 1) 只读阶段: 收集要导入的文件夹(全程不碰媒体库) ──
-    panel_folders = set()
-    for e in load_library().values():
-        fo = Path(e.get("folder", ""))
-        panel_folders.add(((DOWNLOAD_DIR / fo) if not fo.is_absolute() else fo).resolve())
+    panel_folders = _owned_folders()
     found = {}                      # folder -> [(文件名, MB)]
     for raw in SCAN_DIRS.split(","):
         root = Path(os.path.expanduser(raw.strip()))
@@ -1070,6 +1067,94 @@ def scan_videos():
         if key.startswith("EXT_"):
             snapshot_thumb(key)
     return added
+
+# ═══ v22.0: 本地视频导入 — 复制/移动进面板目录结构, 抽帧封面, 保持每视频独立文件夹 ═══
+def _owned_folders():
+    """正式库(dl)内已被占用的目录集合, 供扫描/导入做「面板自己的目录」过滤。
+    库外引用(EXT 原地收编的扫描目录绝对路径)不算 — 否则扫描目录一旦收编过一个
+    文件就被拉黑, 新文件既进不了 EXT 扫描也进不了导入候选(2026-11-03 实锤)。"""
+    owned = set()
+    dl = DOWNLOAD_DIR.resolve()
+    for e in load_library().values():
+        fo = Path(e.get("folder", ""))
+        p = ((DOWNLOAD_DIR / fo) if not fo.is_absolute() else fo).resolve()
+        if p == dl or dl in p.parents:            # 只认 dl 子树内的目录
+            owned.add(p)
+    return owned
+
+def import_candidates():
+    """列出可导入的本地视频(scan 发现逻辑的只读版)。返回候选列表, 不动账本。"""
+    panel_folders = _owned_folders()
+    out, seen = [], set()
+    for raw in SCAN_DIRS.split(","):
+        root = Path(os.path.expanduser(raw.strip()))
+        if not root.is_dir():
+            continue
+        for f in root.rglob("*"):
+            if not f.is_file() or f.suffix.lower() not in VIDEO_EXTS:
+                continue
+            fp = f.resolve()
+            if fp in seen:
+                continue
+            seen.add(fp)
+            if any(fp == pf or fp.is_relative_to(pf) for pf in panel_folders):
+                continue                          # 已在面板目录里的跳过
+            try:
+                out.append({"path": str(fp), "name": nfc(f.name),
+                            "size": round(f.stat().st_size / 1048576, 1)})
+            except OSError:
+                continue
+    out.sort(key=lambda x: x["name"].lower())
+    return out
+
+
+def import_local(paths, mode):
+    """把选中的本地视频搬进面板结构: <标题>/<原文件名>, 写账本, 抽帧封面。
+    mode: 'move'(默认, 省空间) / 'copy'。文件先落地, 账本后写, 封面最后(失败无害)。"""
+    done, failed = [], []
+    for p in (paths or [])[:200]:
+        try:
+            src = Path(p)
+            if not src.is_file() or src.suffix.lower() not in VIDEO_EXTS:
+                failed.append({"path": p, "err": "not a video"})
+                continue
+            stem = nfc(src.stem) or "import"
+            dest_dir = DOWNLOAD_DIR / stem
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / src.name
+            if dest.exists():                     # 重名加序号, 决不覆盖
+                i = 2
+                while (dest_dir / f"{src.stem}_{i}{src.suffix}").exists():
+                    i += 1
+                dest = dest_dir / f"{src.stem}_{i}{src.suffix}"
+            (shutil.move if mode == "move" else shutil.copy2)(str(src), str(dest))
+        except Exception as e:
+            failed.append({"path": p, "err": str(e)})
+            continue
+        key = "LOC_" + hashlib.md5(str(dest).encode()).hexdigest()[:10]
+
+        def _apply(lib, key=key, dest=dest, stem=stem):
+            if key in lib:
+                return
+            lib[key] = {"title": stem, "owner": "本地导入",
+                        "folder": str(dest.parent.relative_to(DOWNLOAD_DIR.resolve())),
+                        "cover": "", "cover_url": "",
+                        "parts": {"1": {"name": dest.stem, "file": dest.name,
+                                        "size": round(dest.stat().st_size / 1048576, 1)}},
+                        "seq": next_seq(lib)}
+
+        try:
+            mutate_library(_apply)
+        except Exception as e:
+            failed.append({"path": p, "err": f"账本: {e}"})
+            continue
+        try:
+            snapshot_thumb(key)                   # 智能选帧封面(复用扫描导入同款), 失败无害
+        except Exception:
+            pass
+        done.append({"path": p, "key": key})
+    return {"ok": True, "done": len(done), "failed": failed}
+
 
 def export_bundle():
     """导出面板全部状态为 tar.gz(配置+媒体库+封面+程序), 换机整个拷走即还原。"""
@@ -2463,6 +2548,11 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 log_op(f"扫描失败: {e}", "error")
                 return self._json({"error": str(e)}, 500)
+        if u.path == "/api/import_list":             # v22.0: 本地导入候选
+            try:
+                return self._json({"cands": import_candidates()})
+            except Exception as e:
+                return self._json({"error": str(e)}, 500)
         if u.path == "/api/export":
             try:
                 out = export_bundle()
@@ -2665,6 +2755,14 @@ class Handler(BaseHTTPRequestHandler):
                 body = {}
         except Exception:
             return self._json({"error": "请求格式不对(不是合法 JSON)"}, 400)
+        if u.path == "/api/import_local":              # v22.0: 本地导入执行(move/copy)
+            paths = body.get("paths") or []
+            if not isinstance(paths, list) or not paths:
+                return self._json({"error": "没有选中任何文件"}, 400)
+            mode = "move" if body.get("mode") == "copy" else "move"
+            out = import_local([str(x) for x in paths], mode)
+            log_op(f"本地导入完成: {out['done']} 个, 失败 {len(out['failed'])}")
+            return self._json(out)
         if u.path == "/api/redownload":                 # 重下: 先下到临时名, 成功才替换(失败不丢原文件)
             bvid = str(body.get("bvid", ""))
             p = str(body.get("p", ""))

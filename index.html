@@ -172,13 +172,13 @@ h2{font-size:11px;color:var(--tx3);font-weight:600;margin:22px 0 10px;letter-spa
 #listPanel .qh .spacer{flex:1}
 .plist2{flex:1;overflow:auto;padding:4px 0}
 .plrow{display:flex;align-items:center;gap:9px;padding:7px 12px;cursor:pointer}
-.plrow:active{background:rgba(255,255,255,.07)}
-.plrow.cur{background:rgba(251,114,153,.14)}
-.plrow .plth{width:56px;height:34px;flex:none;border-radius:6px;background:#26262B center/cover no-repeat;
-  display:flex;align-items:center;justify-content:center;color:#666;font-size:11px}
-.plrow .pln{flex:1;min-width:0;font-size:12.5px;color:#EDEDF2;overflow:hidden;
+.plrow:active{background:var(--srf2)}   /* v22.0: 硬编码白→令牌, pipboy 等主题自动跟随 */
+.plrow.cur{background:color-mix(in srgb, var(--acc) 14%, transparent)}   /* v22.0: 写死 mono 粉→主题色 */
+.plrow .plth{width:56px;height:34px;flex:none;border-radius:6px;background:var(--srf2) center/cover no-repeat;
+  display:flex;align-items:center;justify-content:center;color:var(--tx3);font-size:11px}
+.plrow .pln{flex:1;min-width:0;font-size:12.5px;color:var(--tx);overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
-.plrow.cur .pln{color:#fff;font-weight:600}
+.plrow.cur .pln{color:var(--acc);font-weight:600}
 .plrow .plp{font-size:10.5px;color:var(--tx3);flex:none;font-variant-numeric:tabular-nums}
 
 /* ── 站点凭据 ── */
@@ -291,6 +291,15 @@ input[type=text]::placeholder{color:var(--tx3)}
 .chips{display:flex;gap:7px;overflow:auto;padding-bottom:12px;scrollbar-width:none}
 .chips::-webkit-scrollbar{display:none}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:18px 13px}
+/* v22.0: 媒体库列数手动锁定(1/2/3列), 不锁=auto 自适应 */
+#lib[data-c="1"]{grid-template-columns:1fr}
+#lib[data-c="2"]{grid-template-columns:repeat(2,1fr)}
+#lib[data-c="3"]{grid-template-columns:repeat(3,1fr)}
+#libNav{position:fixed;right:18px;bottom:92px;z-index:30;display:none;flex-direction:column;gap:8px}
+#libNav .icbtn{width:38px;height:38px;font-size:16px;color:var(--tx2);background:var(--srf);border:1px solid var(--line)}
+/* v22.0: 本地导入候选行 */
+.improw{display:flex;gap:9px;align-items:center;padding:9px 2px;border-bottom:1px solid var(--line);font-size:13px;color:var(--tx);cursor:pointer}
+.improw input{width:17px;height:17px;flex:none}
 .vcard{position:relative;cursor:default}
 .vcard .cov{position:relative;display:block;width:100%;cursor:pointer;border-radius:var(--r);overflow:hidden;
   background:var(--srf2);transition:transform var(--dur)}
@@ -456,10 +465,13 @@ input[type=text]::placeholder{color:var(--tx3)}
 #pstage{position:relative;flex:1;min-height:0;width:100%;background:#000;
   display:flex;align-items:center;justify-content:center;touch-action:none;overflow:hidden}
 #pvideo{position:relative;z-index:1;width:100%;height:100%;object-fit:contain;background:transparent;display:block;transform:translateZ(0)}   /* v21.4: 底改透明, 信箱黑边让位给氛围光; 黑底由 #pstage 兜 */
-/* v21.4: Ambient Mode 氛围光画布 — 垫在视频后面, 低分辨率+大模糊+放大, 黑边变画面延伸 */
-#ambCv{position:absolute;inset:0;width:100%;height:100%;z-index:0;display:none;pointer-events:none;
-  filter:saturate(1.4) brightness(.82);transform:scale(1.35)}   /* v21.4b: 46px 大模糊挪进画布内部(ctx.filter, 24x14 上几乎零成本), 全屏 CSS blur 会拖死低端机 */
-@supports not (filter: blur(4px)){#ambCv{display:none!important}}
+/* v21.4→v22.0: Ambient Mode 氛围光画布 — 垫在视频后面, 低分辨率+放大, 黑边变画面延伸。
+   v22.0 双层交叉淡入(YouTube 官方同款 crossfade): 采样 15fps 配 320ms opacity 过渡, 省电且丝滑不闪 */
+#ambCv,#ambCv2{position:absolute;inset:0;width:100%;height:100%;z-index:0;display:none;pointer-events:none;
+  filter:saturate(1.4) brightness(.82);transform:scale(1.12);transition:opacity .32s linear}   /* 1.35硬边外扩→1.12贴身: 光从画面边缘自然长出而非贴一圈; 46px大模糊在画布内部(ctx.filter), 全屏CSS blur会拖死低端机 */
+#ambCv2{opacity:0}
+html.no-amb #ambCv,html.no-amb #ambCv2{display:none!important}   /* v22.0: 氛围光总开关(take_amb) */
+@supports not (filter: blur(4px)){#ambCv,#ambCv2{display:none!important}}
 /* 顶栏两行: 第一行 = 标题(整行, 不用挤在按钮中间), 第二行 = 交互按钮 */
 #phead{position:absolute;top:0;left:0;right:0;z-index:7;display:flex;flex-direction:column;gap:10px;
   padding:14px 16px calc(14px + env(safe-area-inset-top));
@@ -823,7 +835,6 @@ html[data-ui="retro"] .btn:active,html[data-ui="retro"] .chip:active{transform:n
 html[data-ui="retro"] .tabbar button.on{color:var(--acc)}
 
 /* ── pipboy · 辐射终端 (保留+微调) ── */
-html[data-ui="mauto"]{--acc:#7C8CF8;--edge:rgba(124,140,248,.35);--srf2:rgba(124,140,248,.14)}   /* v17 自适应主题: JS 定时取视频主色覆盖这三个变量 */
 html[data-ui="pipboy"]{
   --bg:#050905; --srf:#0A120A; --srf2:#0E180E; --srf3:#121F12;
   --line:#1D331D; --line2:#2B4A2B;
@@ -950,15 +961,6 @@ html[data-ui="synthwave"][data-theme="light"] .page::after{display:none}
 @media (prefers-color-scheme:light){
   html[data-ui="synthwave"]:not([data-theme="dark"]) .page::after{display:none}}
 
-/* v21.4: mauto 自适应 · 主界面氛围光 — 视频主色从天顶和地角渗进来, 没视频时给薄荷默认色保身份 */
-html[data-ui="mauto"] body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
-  background:
-    radial-gradient(ellipse 90% 55% at 50% -12%, var(--amb, rgba(120,220,180,.20)), transparent 70%),
-    radial-gradient(ellipse 70% 45% at 88% 112%, var(--amb, rgba(120,220,180,.14)), transparent 72%)}
-@media (prefers-reduced-motion:no-preference){
-  html[data-ui="mauto"] body::before{animation:mauBreath 7s ease-in-out infinite}
-  @keyframes mauBreath{50%{opacity:.72}}}
-
 /* ── catppuccin · 奶油玻璃: 毛玻璃卡 + 粉彩渐变按钮 ── */
 html[data-ui="catppuccin"] .card{background:color-mix(in srgb, var(--srf) 84%, transparent);
   backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
@@ -1066,6 +1068,12 @@ html[data-ui="mono"] #pctrl{background:color-mix(in srgb, var(--srf) 92%, transp
 html[data-ui="synthwave"] #pfill{background:linear-gradient(90deg,#FF2D95,#B967FF);box-shadow:0 0 14px rgba(255,45,149,.55)}
 html[data-ui="pipboy"] #pfill{background:#22FF55;box-shadow:0 0 12px rgba(34,255,85,.5)}
 
+/* ═══════ v22.0 · 播放性能模式: pm-open 时背后页面全部冻结, GPU 只伺候视频 ═══════
+   症状: 毛玻璃主题(catppuccin/synthwave/geist)播视频时 backdrop-filter+无限动画压垮合成器 → 整页无法操控只能关闭 */
+body.pm-open :not(#pmodal):not(#pmodal *){animation-play-state:paused!important;transition:none!important}
+body.pm-open .card,body.pm-open .qpanel,body.pm-open .tcard,body.pm-open .dgroup,body.pm-open .browsecard,
+body.pm-open .tabbar{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;background-image:none!important}
+
 /* ═══════ v18.1 · 封面融合层: 封面底部融入底板 + 主题色环境辉光, 治"纸片感" ═══════ */
 :root{--cardglow:transparent}
 .vcard{box-shadow:0 4px 18px rgba(0,0,0,.35), 0 0 22px var(--cardglow)}
@@ -1075,7 +1083,6 @@ html[data-ui="synthwave"]{--cardglow:rgba(255,45,149,.16)}
 html[data-ui="catppuccin"]{--cardglow:rgba(203,166,247,.14)}
 html[data-ui="pipboy"]{--cardglow:rgba(34,255,85,.12)}
 html[data-ui="geist"]{--cardglow:rgba(255,255,255,.05)}
-html[data-ui="mauto"]{--cardglow:rgba(124,140,248,.14)}
 
 /* ═══════ v18 · 播放器主题深融合 ═══════ */
 html[data-ui="catppuccin"] #pfill{background:linear-gradient(90deg,#CBA6F7,#89B4FA);box-shadow:0 0 14px rgba(203,166,247,.6)}
@@ -1496,6 +1503,16 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
       <svg class="ic" style="width:14px;height:14px;vertical-align:-2px"><use href="#i-check"/></svg>
       <span data-i18n="multiSel">多选</span>
     </button>
+    <span style="flex:1"></span>
+    <button class="btn ghost sm" onclick="openImport()" title="把设备里的视频搬进媒体库">
+      <span data-i18n="importLocal">导入本地</span>
+    </button>
+    <span v22-cols style="display:inline-flex;gap:6px;align-items:center">
+      <span class="chip" data-colc="auto" style="min-height:30px;padding:4px 11px">Auto</span>
+      <span class="chip" data-colc="1" style="min-height:30px;padding:4px 11px">1</span>
+      <span class="chip" data-colc="2" style="min-height:30px;padding:4px 11px">2</span>
+      <span class="chip" data-colc="3" style="min-height:30px;padding:4px 11px">3</span>
+    </span>
   </div>
   <div class="libtop">
     <input type="text" id="q" oninput="libSearchDebounced()">
@@ -1512,6 +1529,10 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
   </div>
   <h2 style="margin-top:4px"><span data-i18n="library">媒体库</span> · <span id="libCount">0</span></h2>
   <div class="grid" id="lib"></div>
+  <div id="libNav">
+    <button class="icbtn" onclick="libJump(true)" title="回到顶部">↑</button>
+    <button class="icbtn" onclick="libJump(false)" title="跳到底部">↓</button>
+  </div>
   <div id="looseWrap" style="margin-top:20px;display:none">
     <h2 data-i18n="loose">散文件</h2>
     <div class="loose card" style="padding:2px 14px" id="loose"></div>
@@ -1538,7 +1559,6 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
         <span class="chip" data-uiopt="synthwave" data-i18n="uiSynth">复古未来</span>
         <span class="chip" data-uiopt="retro" data-i18n="uiRetro">复古</span>
         <span class="chip" data-uiopt="pipboy" data-i18n="uiPip">终端</span>
-        <span class="chip" data-uiopt="mauto" data-i18n="uiMauto" title="跟随视频主色实时换色">自适应</span>
         <span class="chip" id="fxAllChip" title="省电模式/系统减动效会强制关闭主题动效,此开关强制全开">特效全开</span>
       </span>
     </div>
@@ -1685,6 +1705,7 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
   <button id="pCPlay" aria-label="播放/暂停"><svg class="ic"><use id="pCPlayUse" href="#i-play"/></svg></button>
 <div id="pstage">
     <canvas id="ambCv" width="24" height="14"></canvas>
+    <canvas id="ambCv2" width="24" height="14"></canvas>
     <video id="pvideo" playsinline autoplay></video>
     <button id="pTap" style="display:none;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
       z-index:6;width:72px;height:72px;border-radius:50%;border:1px solid rgba(255,255,255,.3);
@@ -1759,7 +1780,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
 
 /* ═══ i18n ═══ */
 const I18N = {
-  zh: {fxFallback:'渲染异常, 已回退原画', tabSet:'设置', setSleep:'睡眠定时', setSleepHint:'到点自动暂停', sOff:'关', sMin:'%d分钟', setStats:'统计', stTotal:'文件', stSize:'总大小', stFav:'收藏', uiMauto:'自适应', uiAdaptiveHint:'跟随视频主色实时换色', dlBatchTip:'支持多行批量: 每行一个链接', bFilter:'过滤文件…', agoNow:'刚刚', agoS:'%d秒前', agoM:'%d分钟前', agoH:'%d小时前', agoD:'%d天前', agoW:'%d周前', fxTitle:'画质特效',fxVhs:'VHS 录像',fxHint:'GPU 后处理, 发热或卡顿请关闭。',fxLabel:'特效',fxOff:'关闭',fxCrt:'CRT 电视',fxFilm:'胶片颗粒',fxNeon:'霓虹辉光',uiStyle:'界面风格',uiMono:'单色',uiGeist:'极简',uiCat:'柔和',uiSynth:'复古未来',uiRetro:'复古',uiPip:'终端',uiHint:'界面皮肤, 明暗跟随右上角主题按钮。', parse:'解析', all:'全选', none:'全不选', audio:'仅音频', dl:'下载所选',
+  zh: {fxFallback:'渲染异常, 已回退原画', tabSet:'设置', setSleep:'睡眠定时', setSleepHint:'到点自动暂停', sOff:'关', sMin:'%d分钟', setStats:'统计', stTotal:'文件', stSize:'总大小', stFav:'收藏', dlBatchTip:'支持多行批量: 每行一个链接', bFilter:'过滤文件…', agoNow:'刚刚', agoS:'%d秒前', agoM:'%d分钟前', agoH:'%d小时前', agoD:'%d天前', agoW:'%d周前', fxTitle:'画质特效',fxVhs:'VHS 录像',fxHint:'GPU 后处理, 发热或卡顿请关闭。',fxLabel:'特效',fxOff:'关闭',fxCrt:'CRT 电视',fxFilm:'胶片颗粒',fxNeon:'霓虹辉光',ambLabel:'氛围光',uiStyle:'界面风格',uiMono:'单色',uiGeist:'极简',uiCat:'柔和',uiSynth:'复古未来',uiRetro:'复古',uiPip:'终端',uiHint:'界面皮肤, 明暗跟随右上角主题按钮。', parse:'解析', all:'全选', none:'全不选', audio:'仅音频', dl:'下载所选', importLocal:'导入本地', impMove:'移动(省空间)', impCopy:'复制', impGo:'导入所选', impEmpty:'扫描目录里没有可导入的视频', impDone:'导入完成', impFail2:'个失败',
     tasks:'下载任务', noTask:'暂无任务', library:'媒体库', scan:'扫描全盘', export:'导出备份',
     loose:'散文件', sNew:'最新', sSeq:'下载顺序', sOld:'最早', sName:'名称',
     tabDl:'下载', tabTask:'任务', tabLib:'媒体库', searchPh:'搜索标题', emptyLib:'库里还空着', emptySearch:'没搜到', resume:'继续观看',
@@ -1815,7 +1836,7 @@ const I18N = {
     installTip:'浏览器菜单 →「添加到主屏幕 / 安装应用」, 之后点桌面图标即可用',
     uniRun:'生成通用版中…', uniOk:'已生成全平台通用版', uniAlready:'已经是 mp4',
     uniFail:'生成失败', uniCompat:'生成通用版(全平台都能播)'},
-  en: {fxFallback:'Render error, fell back to plain video', tabSet:'Settings', setSleep:'Sleep timer', setSleepHint:'Auto-pause when time is up', sOff:'Off', sMin:'%d min', setStats:'Statistics', stTotal:'Files', stSize:'Total size', stFav:'Favorites', uiMauto:'Adaptive', dlBatchTip:'Batch: one URL per line', uiAdaptiveHint:'Follows the video\'s dominant color', bFilter:'Filter files…', agoNow:'just now', agoS:'%ds ago', agoM:'%dm ago', agoH:'%dh ago', agoD:'%dd ago', agoW:'%dw ago', fxTitle:'Video FX',fxVhs:'VHS Tape',fxHint:'GPU post-processing; turn off if hot or laggy.',fxLabel:'Effects',fxOff:'Off',fxCrt:'CRT TV',fxFilm:'Film Grain',fxNeon:'Neon Glow',uiStyle:'UI style',uiMono:'Mono',uiGeist:'Minimal',uiCat:'Soft',uiSynth:'Retro-Future',uiRetro:'Retro',uiPip:'Terminal',uiHint:'Interface skin; light/dark follows the theme button.', parse:'Parse', all:'All', none:'None', audio:'Audio only', dl:'Download',
+  en: {fxFallback:'Render error, fell back to plain video', tabSet:'Settings', setSleep:'Sleep timer', setSleepHint:'Auto-pause when time is up', sOff:'Off', sMin:'%d min', setStats:'Statistics', stTotal:'Files', stSize:'Total size', stFav:'Favorites', dlBatchTip:'Batch: one URL per line', bFilter:'Filter files…', agoNow:'just now', agoS:'%ds ago', agoM:'%dm ago', agoH:'%dh ago', agoD:'%dd ago', agoW:'%dw ago', fxTitle:'Video FX',fxVhs:'VHS Tape',fxHint:'GPU post-processing; turn off if hot or laggy.',fxLabel:'Effects',fxOff:'Off',fxCrt:'CRT TV',fxFilm:'Film Grain',fxNeon:'Neon Glow',ambLabel:'Ambient light',uiStyle:'UI style',uiMono:'Mono',uiGeist:'Minimal',uiCat:'Soft',uiSynth:'Retro-Future',uiRetro:'Retro',uiPip:'Terminal',uiHint:'Interface skin; light/dark follows the theme button.', parse:'Parse', all:'All', none:'None', audio:'Audio only', dl:'Download', importLocal:'Import', impMove:'Move (save space)', impCopy:'Copy', impGo:'Import selected', impEmpty:'No importable videos in scan dirs', impDone:'Imported', impFail2:'failed',
     tasks:'Tasks', noTask:'No tasks', library:'Library', scan:'Scan videos', export:'Export backup',
     loose:'Loose files', sNew:'Newest', sSeq:'Order', sOld:'Oldest', sName:'Name',
     tabDl:'Download', tabTask:'Tasks', tabLib:'Library', searchPh:'Search titles', emptyLib:'Library is empty', emptySearch:'No results', resume:'Resume',
@@ -2301,37 +2322,7 @@ if (UI_THEME === 'refactor') UI_THEME = 'geist';      /* v7 存档迁移 */
 if (UI_THEME === '8bit') UI_THEME = 'synthwave';      /* v7 存档迁移 */
 /* v10.2: 智障保护 — 无效值回退 mono */
 if (['mono','geist','catppuccin','synthwave','retro','pipboy'].indexOf(UI_THEME) < 0) UI_THEME = 'mono';
-/* v17: 第 7 主题「自适应」— 视频帧取主色, 5s 刷新; 切走时清内联变量防污染其他主题 */
-const mautoCv = document.createElement('canvas');
-mautoCv.width = 8; mautoCv.height = 8;
-const mautoCx = mautoCv.getContext('2d', { willReadFrequently: true });
-function mautoTick() {
-  if (UI_THEME !== 'mauto') return;
-  const pv2 = $('pvideo');
-  if (!pv2 || pv2.paused || !pv2.videoWidth) return;
-  try {
-    mautoCx.drawImage(pv2, 0, 0, 8, 8);
-    const dd = mautoCx.getImageData(0, 0, 8, 8).data;
-    let best = null; let bestScore = -1;
-    for (let i = 0; i < dd.length; i += 4) {
-      const r2 = dd[i]; const g2 = dd[i + 1]; const b2 = dd[i + 2];
-      const mx2 = Math.max(r2, g2, b2); const mn2 = Math.min(r2, g2, b2);
-      if (mx2 < 70) continue;
-      const sat = mx2 === mn2 ? 0 : (mx2 - mn2) / mx2;
-      if (sat < 0.22) continue;
-      const score = sat * (mx2 / 255);
-      if (score > bestScore) { bestScore = score; best = [r2, g2, b2]; }
-    }
-    if (!best) return;
-    const cs = v3 => Math.max(0, Math.min(255, Math.round(v3)));
-    const root = document.documentElement.style;
-    root.setProperty('--acc', `rgb(${cs(best[0] * 1.05)},${cs(best[1] * 1.05)},${cs(best[2] * 1.05)})`);
-    root.setProperty('--edge', `rgba(${cs(best[0])},${cs(best[1])},${cs(best[2])},.35)`);
-    root.setProperty('--srf2', `rgba(${cs(best[0] * 0.35)},${cs(best[1] * 0.35)},${cs(best[2] * 0.35)},.16)`);
-    root.setProperty('--amb', `rgba(${cs(best[0])},${cs(best[1])},${cs(best[2])},.20)`);   /* v21.4: 主界面氛围光色 */
-  } catch (e2) {}
-}
-setInterval(mautoTick, 5000);
+/* v17 自适应主题已删除(v22.0): 旧存档 take_ui=mauto 由下方白名单回退 mono */
 
 /* v19.9: 着色器定期保养 — 每60秒(播放中)无缝重建纹理对象, Chrome 的 video-texture 路径
    重走一遍干净初始化, 清掉"越用越卡"的渐进累积(ml5/Chromium 案例: GPU 进程随时长劣化)。
@@ -2356,8 +2347,7 @@ function applyUiTheme() {
   document.documentElement.setAttribute('data-ui', UI_THEME);
   localStorage.setItem('take_ui', UI_THEME);
   const rs = document.documentElement.style;
-  if (UI_THEME === 'mauto') { mautoTick(); }   /* 立即取一帧, 不等 5s */
-  else { rs.removeProperty('--acc'); rs.removeProperty('--edge'); rs.removeProperty('--srf2'); }
+  rs.removeProperty('--acc'); rs.removeProperty('--edge'); rs.removeProperty('--srf2'); rs.removeProperty('--amb');   /* v22.0: mauto 已删, 恒清内联变量(含 --amb) */
   document.querySelectorAll('[data-uiopt]').forEach(c =>
     c.classList.toggle('on', c.dataset.uiopt === UI_THEME));
   /* v21.1: 主题切换=全页 GPU 层大换血, Android WebView(Kiwi 冻结版尤甚)会顺手回收
@@ -2401,6 +2391,7 @@ const FX_PRESETS = {
   neon: { scan: .12, aberr: .7,  vig: .26, grain: .02, glow: .85, warp: 0,    mask: 0, jit: 0, tint: 0,    roll: .3,  flick: 0,   trk: 0   },
 };
 let FX_MODE = localStorage.getItem('take_fx') || 'off';
+if ((localStorage.getItem('take_amb') || 'on') === 'off') document.documentElement.classList.add('no-amb');   /* v22.0: 氛围光开关恢复(默认开) */
 if (FX_MODE === 'tube') FX_MODE = 'crt';   /* v9: 显像管并入 CRT 全效 */
 /* v10.2: 无效值回退 off, 迁移结果落盘 */
 if (Object.keys(FX_PRESETS).indexOf(FX_MODE) < 0) FX_MODE = 'off';
@@ -2647,9 +2638,17 @@ function fxPopSync() {
   const el = $('fxPop');
   if (!el) return;
   const modes = ['off', 'crt', 'vhs', 'film', 'neon'];
-  el.innerHTML = modes.map(m => `<div data-fx="${m}" class="${FX_MODE === m ? 'on' : ''}">${t(FX_NAMES[m])}</div>`).join('');
+  el.innerHTML = modes.map(m => `<div data-fx="${m}" class="${FX_MODE === m ? 'on' : ''}">${t(FX_NAMES[m])}</div>`).join('') +
+    `<div data-amb class="${document.documentElement.classList.contains('no-amb') ? '' : 'on'}" style="margin-top:4px;border-top:1px solid var(--line)">${t('ambLabel')} · ${document.documentElement.classList.contains('no-amb') ? t('sOff') : 'ON'}</div>`;
 }
 document.addEventListener('click', e => {
+  const ambIt = e.target.closest('#fxPop [data-amb]');
+  if (ambIt) {                                   /* v22.0: 氛围光开关 — 切换不关面板, 让用户看见状态 */
+    const off = document.documentElement.classList.toggle('no-amb');
+    localStorage.setItem('take_amb', off ? 'off' : 'on');
+    fxPopSync();
+    return;
+  }
   const fxIt = e.target.closest('#fxPop [data-fx]');
   if (fxIt) { fxSet(fxIt.dataset.fx); $('fxPop').classList.remove('open'); return; }
   if (e.target.closest('#pFx')) { $('fxPop').classList.toggle('open'); return; }
@@ -2744,6 +2743,66 @@ $('pList').onclick = () => {
   poke();
 };
 $('listClose').onclick = () => $('listPanel').classList.remove('show');
+
+/* ═══ v22.0: 媒体库列数切换(1/2/3/auto) + 顶/底跳转 ═══ */
+let LIBC = localStorage.getItem('take_cols') || '';
+function libColsSync() {
+  const g = $('lib');
+  if (!g) return;
+  if (LIBC) g.setAttribute('data-c', LIBC); else g.removeAttribute('data-c');
+  document.querySelectorAll('[data-colc]').forEach(b => b.classList.toggle('on', b.dataset.colc === (LIBC || 'auto')));
+}
+function libJump(top) { window.scrollTo({ top: top ? 0 : document.body.scrollHeight, behavior: 'smooth' }); }
+
+/* ═══ v22.0: 本地视频导入 — 列候选/选文件/移动或复制/抽帧封面 ═══ */
+async function openImport() {
+  openSheet(t('importLocal'), '<div class="empty">…</div>');
+  let d;
+  try { d = await api('/api/import_list'); } catch (e) { $('sheetBody').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
+  const cs = d.cands || [];
+  if (!cs.length) { $('sheetBody').innerHTML = `<div class="empty">${t('impEmpty')}</div>`; return; }
+  $('sheetBody').innerHTML =
+    `<div class="row" style="margin-bottom:10px">
+       <button class="btn ghost sm" onclick="impSelAll(true)">${t('all')}</button>
+       <button class="btn ghost sm" onclick="impSelAll(false)">${t('none')}</button>
+       <span style="flex:1"></span>
+       <label style="font-size:12.5px;color:var(--tx2);white-space:nowrap"><input type="radio" name="impm" value="move" checked> ${t('impMove')}</label>
+       <label style="font-size:12.5px;color:var(--tx2);white-space:nowrap"><input type="radio" name="impm" value="copy"> ${t('impCopy')}</label>
+     </div>` +
+    cs.map(c => `<label class="improw"><input type="checkbox" class="impc" value="${esc(c.path)}" checked>
+       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</span>
+       <span style="font-size:11px;color:var(--tx3);flex:none">${c.size}MB</span></label>`).join('') +
+    `<button class="btn" style="width:100%;margin-top:12px" onclick="impGo()">${t('impGo')} (<span id="impN">${cs.length}</span>)</button>`;
+  $('sheetBody').querySelectorAll('.impc').forEach(cb => cb.onchange = impCount);
+  impCount();
+}
+function impCount() { const n = document.querySelectorAll('.impc:checked').length; const el = $('impN'); if (el) el.textContent = n; }
+function impSelAll(on) { document.querySelectorAll('.impc').forEach(cb => { cb.checked = on; }); impCount(); }
+async function impGo() {
+  const paths = [...document.querySelectorAll('.impc:checked')].map(cb => cb.value);
+  if (!paths.length) return;
+  const mode = (document.querySelector('input[name="impm"]:checked') || {}).value || 'move';
+  const btn = $('sheetBody').querySelector('button.btn:not(.ghost)');
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const out = await api('/api/import_local', { paths, mode });
+    const fail = out.failed && out.failed.length ? `, ${out.failed.length} ${t('impFail2')}` : '';
+    $('sheetBody').innerHTML = `<div class="empty">${t('impDone')}: ${out.done}${fail}</div>`;
+    loadLib();
+  } catch (e) { $('sheetBody').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; }
+}
+document.addEventListener('click', e => {
+  const c = e.target.closest('[data-colc]');
+  if (!c) return;
+  LIBC = c.dataset.colc === 'auto' ? '' : c.dataset.colc;
+  if (LIBC) localStorage.setItem('take_cols', LIBC); else localStorage.removeItem('take_cols');
+  libColsSync();
+});
+window.addEventListener('scroll', () => {
+  const nav = $('libNav');
+  if (nav) nav.style.display = (window.scrollY > 420 && $('page-lib').classList.contains('active')) ? 'flex' : 'none';
+}, { passive: true });
+libColsSync();
 
 /* ═══ 媒体库多选(批量删除/收藏) ═══ */
 let SEL_MODE = false, SEL = new Set();
@@ -4058,26 +4117,36 @@ function repairSurface(step) {
   setTimeout(() => repairSurface(step + 1), 800);  // 给浏览器 0.8s 自己缓过来
 }
 
-/* ═══ v21.4: Ambient Mode — 氛围光(YouTube 同款): 24x14 低清画布垫在视频后面,
-   大模糊+放大 1.35, 黑边变成画面的延伸。rAF 自带节拍(120ms≈8fps, 氛围光不要流畅要省电),
-   不依赖 RVFC——fx 关闭时也能跑, Kiwi 老内核无 RVFC 也能跑。暂停时冻结最后一帧。 ═══ */
+/* ═══ v22.0: Ambient Mode 重做 — 双层画布交叉淡入(YouTube 官方同款 crossfade):
+   采样 15fps 上限 + 中央 84% 裁边(letterbox 黑边不进光), 开关 take_amb(fxPop 可切)。
+   暂停冻结最后一帧; 页面隐藏时 rAF 天然停摆。单层直切帧的"闪"由 320ms 交叉过渡根治。 ═══ */
 (function () {
-  const cv = $('ambCv'); if (!cv) return;
-  const cx = cv.getContext('2d'); if (!cx) return;
-  let last = 0;
+  const cv = $('ambCv'), cv2 = $('ambCv2'); if (!cv || !cv2) return;
+  const cx = cv.getContext('2d'), cx2 = cv2.getContext('2d'); if (!cx || !cx2) return;
+  let last = 0, flip = false, shown = null;
   function tick(ts) {
     requestAnimationFrame(tick);
     const now = ts || 0;
-    if (now - last < 120) return;
+    if (now - last < 66) return;               /* 15fps 采样上限: 氛围光要氛围不要流畅 */
     last = now;
     try {
-      const show = $('pmodal').classList.contains('open') && v && v.getAttribute('src') &&
+      const show = !document.documentElement.classList.contains('no-amb') &&
+                   $('pmodal').classList.contains('open') && v && v.getAttribute('src') &&
                    !$('pstage').classList.contains('audio') && v.readyState >= 2 && v.videoWidth;
-      cv.style.display = show ? 'block' : 'none';
-      if (!show || v.paused) return;      /* 暂停: 冻结最后一帧当静态氛围 */
-      try { cx.filter = 'blur(2px)'; } catch (e) {}   /* 24x14 上模糊几乎免费; 老内核不支持就靠双线性插值 */
-      cx.drawImage(v, 0, 0, cv.width, cv.height);
-      try { cx.filter = 'none'; } catch (e) {}
+      if (show !== shown) {                    /* 开关/开合状态变化才碰 display, 避免每帧改样式 */
+        shown = show;
+        cv.style.display = cv2.style.display = show ? 'block' : 'none';
+        if (!show) { cv.style.opacity = 1; cv2.style.opacity = 0; flip = false; }
+      }
+      if (!show || v.paused) return;           /* 暂停: 冻结最后一帧当静态氛围 */
+      const tCv = flip ? cv : cv2, tCx = flip ? cx : cx2;
+      try { tCx.filter = 'blur(2px)'; } catch (e) {}
+      const sw = v.videoWidth * 0.84, sh = v.videoHeight * 0.84;   /* 中央84%采样: 黑边贴边长, 裁掉 */
+      tCx.drawImage(v, (v.videoWidth - sw) / 2, (v.videoHeight - sh) / 2, sw, sh, 0, 0, tCv.width, tCv.height);
+      try { tCx.filter = 'none'; } catch (e) {}
+      tCv.style.opacity = 1;
+      (flip ? cv2 : cv).style.opacity = 0;
+      flip = !flip;
     } catch (e) {}
   }
   requestAnimationFrame(tick);
