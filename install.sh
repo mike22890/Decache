@@ -3390,7 +3390,7 @@ input[type=text]::placeholder{color:var(--tx3)}
 /* v22.0: 本地导入候选行 */
 .improw{display:flex;gap:9px;align-items:center;padding:9px 2px;border-bottom:1px solid var(--line);font-size:13px;color:var(--tx);cursor:pointer}
 .improw input{width:17px;height:17px;flex:none}
-.vcard{position:relative;cursor:default}
+.vcard{position:relative;cursor:default;min-width:0}   /* min-width:0 = grid 三列收缩的前提, 卡片按钮排的固有宽(140px)不顶破列 */
 .vcard .cov{position:relative;display:block;width:100%;cursor:pointer;border-radius:var(--r);overflow:hidden;
   background:var(--srf2);transition:transform var(--dur)}
 .vcard .cov:active{transform:scale(.97)}
@@ -4620,6 +4620,7 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
   <h2 style="margin-top:4px"><span data-i18n="library">媒体库</span> · <span id="libCount">0</span></h2>
   <div class="grid" id="lib"></div>
   <div id="libNav">
+    <button class="icbtn" onclick="openImport()" title="导入本地视频" data-i18n-title="importLocal">⤓</button>
     <button class="icbtn" onclick="libJump(true)" title="回到顶部">↑</button>
     <button class="icbtn" onclick="libJump(false)" title="跳到底部">↓</button>
   </div>
@@ -4795,7 +4796,6 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
   <button id="pCPlay" aria-label="播放/暂停"><svg class="ic"><use id="pCPlayUse" href="#i-play"/></svg></button>
 <div id="pstage">
     <canvas id="ambCv" width="24" height="14"></canvas>
-    <canvas id="ambCv2" width="24" height="14"></canvas>
     <video id="pvideo" playsinline autoplay></video>
     <button id="pTap" style="display:none;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
       z-index:6;width:72px;height:72px;border-radius:50%;border:1px solid rgba(255,255,255,.3);
@@ -7207,13 +7207,27 @@ function repairSurface(step) {
   setTimeout(() => repairSurface(step + 1), 800);  // 给浏览器 0.8s 自己缓过来
 }
 
-/* ═══ v22.0: Ambient Mode 重做 — 双层画布交叉淡入(YouTube 官方同款 crossfade):
-   采样 15fps 上限 + 中央 84% 裁边(letterbox 黑边不进光), 开关 take_amb(fxPop 可切)。
-   暂停冻结最后一帧; 页面隐藏时 rAF 天然停摆。单层直切帧的"闪"由 320ms 交叉过渡根治。 ═══ */
+/* 第零层守护: 打开视频就黑屏(音频正常画面黑, 只能杀浏览器)的根治 —
+   旧版修复链只在页面后台回来时跑, 「刚打开就黑」这个最高发场景从来没被覆盖。
+   playing 后 1.2s 量帧数: 没在涨就走 reattach→捅解码器→软重载 三层链,
+   hardReloadStream 等价于用户手动刷新页面, 不再需要杀浏览器。 */
+v.addEventListener('playing', () => {
+  setTimeout(() => {
+    if (!$('pmodal').classList.contains('open') || v.paused || v.ended) return;
+    if ($('pstage').classList.contains('audio')) return;
+    _frameSeen = decodedFrames();
+    repairSurface(0);
+  }, 1200);
+}, {passive: true});
+
+/* ═══ v22.0: Ambient Mode — 单层低清画布持续重画。
+   24x14 重绘成本可忽略, 双层交叉淡入在此分辨率纯属自杀: 每 66ms 强制互换两层
+   opacity, 320ms 过渡永远爬不完 = 高频狂闪(2026-11-03 真机实锤, YouTube 同款
+   crossfade 只适合大图, 小画布直接画就完事)。暂停冻结最后帧; 页面隐藏 rAF 停摆。═══ */
 (function () {
-  const cv = $('ambCv'), cv2 = $('ambCv2'); if (!cv || !cv2) return;
-  const cx = cv.getContext('2d'), cx2 = cv2.getContext('2d'); if (!cx || !cx2) return;
-  let last = 0, flip = false, shown = null;
+  const cv = $('ambCv'); if (!cv) return;
+  const cx = cv.getContext('2d'); if (!cx) return;
+  let last = 0, shown = null;
   function tick(ts) {
     requestAnimationFrame(tick);
     const now = ts || 0;
@@ -7225,18 +7239,13 @@ function repairSurface(step) {
                    !$('pstage').classList.contains('audio') && v.readyState >= 2 && v.videoWidth;
       if (show !== shown) {                    /* 开关/开合状态变化才碰 display, 避免每帧改样式 */
         shown = show;
-        cv.style.display = cv2.style.display = show ? 'block' : 'none';
-        if (!show) { cv.style.opacity = 1; cv2.style.opacity = 0; flip = false; }
+        cv.style.display = show ? 'block' : 'none';
       }
       if (!show || v.paused) return;           /* 暂停: 冻结最后一帧当静态氛围 */
-      const tCv = flip ? cv : cv2, tCx = flip ? cx : cx2;
-      try { tCx.filter = 'blur(2px)'; } catch (e) {}
+      try { cx.filter = 'blur(2px)'; } catch (e) {}
       const sw = v.videoWidth * 0.84, sh = v.videoHeight * 0.84;   /* 中央84%采样: 黑边贴边长, 裁掉 */
-      tCx.drawImage(v, (v.videoWidth - sw) / 2, (v.videoHeight - sh) / 2, sw, sh, 0, 0, tCv.width, tCv.height);
-      try { tCx.filter = 'none'; } catch (e) {}
-      tCv.style.opacity = 1;
-      (flip ? cv2 : cv).style.opacity = 0;
-      flip = !flip;
+      cx.drawImage(v, (v.videoWidth - sw) / 2, (v.videoHeight - sh) / 2, sw, sh, 0, 0, cv.width, cv.height);
+      try { cx.filter = 'none'; } catch (e) {}
     } catch (e) {}
   }
   requestAnimationFrame(tick);
