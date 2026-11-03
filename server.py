@@ -594,7 +594,7 @@ def safe_media_path(rel):
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".flv", ".mov", ".m4v", ".ts", ".avi", ".rmvb", ".m4a", ".mp3", ".flac"}
 
 def allowed_roots():
-    """可访问的根目录白名单: download_dir + scan_dirs(去空白、去不存在)。"""
+    """可访问的根目录白名单: download_dir + scan_dirs(去空白、去不存在) + Termux 共享存储。"""
     roots = [DOWNLOAD_DIR.resolve()]
     for d in SCAN_DIRS.split(","):
         d = d.strip()
@@ -603,6 +603,12 @@ def allowed_roots():
                 roots.append(Path(os.path.expanduser(d)).resolve())
             except OSError:
                 pass
+    try:                                   # v22.0: Termux 授权(termux-setup-storage)后的共享存储整体可浏览,
+        st = Path.home() / "storage"       # 否则文件夹页只能看到自家一亩三分地, 用户以为读不到本机
+        if st.is_dir():
+            roots.append(st.resolve())
+    except OSError:
+        pass
     return roots
 
 def safe_dir_path(p):
@@ -1106,6 +1112,60 @@ def import_candidates():
                 continue
     out.sort(key=lambda x: x["name"].lower())
     return out
+
+
+def upload_save(name, rfile, length):
+    """v22.0: 手机选视频直传 — 流式落盘(8MB 块, 几 GB 也不吃内存), 落地后走
+    与 import_local 同款账本+封面链。返回 (dest, err, key)。"""
+    from urllib.parse import unquote
+    name = nfc(os.path.basename(unquote(name))) or "upload.mp4"
+    if "." + name.rsplit(".", 1)[-1].lower() not in VIDEO_EXTS:
+        return None, "只能上传视频文件", ""
+    stem = name.rsplit(".", 1)[0] or "import"
+    dest_dir = DOWNLOAD_DIR / stem
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / name
+    i = 2
+    while dest.exists():                          # 重名加序号, 决不覆盖
+        dest = dest_dir / f"{Path(name).stem}_{i}{Path(name).suffix}"
+        i += 1
+    try:
+        remaining = length
+        with open(dest, "wb") as f:
+            while remaining > 0:
+                chunk = rfile.read(min(8 << 20, remaining))
+                if not chunk:
+                    raise IOError("客户端中断")
+                f.write(chunk)
+                remaining -= len(chunk)
+    except Exception as e:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        return None, str(e), ""
+    key = "LOC_" + hashlib.md5(str(dest).encode()).hexdigest()[:10]
+
+    def _apply(lib, key=key, dest=dest, stem=stem):
+        if key in lib:
+            return
+        lib[key] = {"title": stem, "owner": "本地导入",
+                    "folder": str(dest.parent.relative_to(DOWNLOAD_DIR.resolve())),
+                    "cover": "", "cover_url": "",
+                    "parts": {"1": {"name": dest.stem, "file": dest.name,
+                                    "size": round(dest.stat().st_size / 1048576, 1)}},
+                    "seq": next_seq(lib)}
+
+    try:
+        mutate_library(_apply)
+    except Exception as e:
+        return dest, f"账本: {e}", ""
+    try:
+        snapshot_thumb(key)
+    except Exception:
+        pass
+    log_op(f"上传导入: {dest.name}")
+    return dest, None, key
 
 
 def import_local(paths, mode):
@@ -2748,6 +2808,12 @@ class Handler(BaseHTTPRequestHandler):
         global SESSION_COOKIE
         u = urllib.parse.urlparse(self.path)
         length = int(self.headers.get("Content-Length", 0))
+        if u.path == "/api/upload":                    # v22.0: 手机选视频直传(裸字节, 文件名在 query) — 必须在 JSON 解析前分流
+            qs = urllib.parse.parse_qs(u.query)
+            dest, err = upload_save((qs.get("name") or [""])[0], self.rfile, length)
+            if err:
+                return self._json({"error": err}, 400)
+            return self._json({"ok": True, "key": "", "path": str(dest)})
         raw_body = self.rfile.read(length) or b"{}"
         try:
             body = json.loads(raw_body)

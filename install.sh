@@ -646,7 +646,7 @@ def safe_media_path(rel):
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".flv", ".mov", ".m4v", ".ts", ".avi", ".rmvb", ".m4a", ".mp3", ".flac"}
 
 def allowed_roots():
-    """可访问的根目录白名单: download_dir + scan_dirs(去空白、去不存在)。"""
+    """可访问的根目录白名单: download_dir + scan_dirs(去空白、去不存在) + Termux 共享存储。"""
     roots = [DOWNLOAD_DIR.resolve()]
     for d in SCAN_DIRS.split(","):
         d = d.strip()
@@ -655,6 +655,12 @@ def allowed_roots():
                 roots.append(Path(os.path.expanduser(d)).resolve())
             except OSError:
                 pass
+    try:                                   # v22.0: Termux 授权(termux-setup-storage)后的共享存储整体可浏览,
+        st = Path.home() / "storage"       # 否则文件夹页只能看到自家一亩三分地, 用户以为读不到本机
+        if st.is_dir():
+            roots.append(st.resolve())
+    except OSError:
+        pass
     return roots
 
 def safe_dir_path(p):
@@ -1158,6 +1164,60 @@ def import_candidates():
                 continue
     out.sort(key=lambda x: x["name"].lower())
     return out
+
+
+def upload_save(name, rfile, length):
+    """v22.0: 手机选视频直传 — 流式落盘(8MB 块, 几 GB 也不吃内存), 落地后走
+    与 import_local 同款账本+封面链。返回 (dest, err, key)。"""
+    from urllib.parse import unquote
+    name = nfc(os.path.basename(unquote(name))) or "upload.mp4"
+    if "." + name.rsplit(".", 1)[-1].lower() not in VIDEO_EXTS:
+        return None, "只能上传视频文件", ""
+    stem = name.rsplit(".", 1)[0] or "import"
+    dest_dir = DOWNLOAD_DIR / stem
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / name
+    i = 2
+    while dest.exists():                          # 重名加序号, 决不覆盖
+        dest = dest_dir / f"{Path(name).stem}_{i}{Path(name).suffix}"
+        i += 1
+    try:
+        remaining = length
+        with open(dest, "wb") as f:
+            while remaining > 0:
+                chunk = rfile.read(min(8 << 20, remaining))
+                if not chunk:
+                    raise IOError("客户端中断")
+                f.write(chunk)
+                remaining -= len(chunk)
+    except Exception as e:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        return None, str(e), ""
+    key = "LOC_" + hashlib.md5(str(dest).encode()).hexdigest()[:10]
+
+    def _apply(lib, key=key, dest=dest, stem=stem):
+        if key in lib:
+            return
+        lib[key] = {"title": stem, "owner": "本地导入",
+                    "folder": str(dest.parent.relative_to(DOWNLOAD_DIR.resolve())),
+                    "cover": "", "cover_url": "",
+                    "parts": {"1": {"name": dest.stem, "file": dest.name,
+                                    "size": round(dest.stat().st_size / 1048576, 1)}},
+                    "seq": next_seq(lib)}
+
+    try:
+        mutate_library(_apply)
+    except Exception as e:
+        return dest, f"账本: {e}", ""
+    try:
+        snapshot_thumb(key)
+    except Exception:
+        pass
+    log_op(f"上传导入: {dest.name}")
+    return dest, None, key
 
 
 def import_local(paths, mode):
@@ -2800,6 +2860,12 @@ class Handler(BaseHTTPRequestHandler):
         global SESSION_COOKIE
         u = urllib.parse.urlparse(self.path)
         length = int(self.headers.get("Content-Length", 0))
+        if u.path == "/api/upload":                    # v22.0: 手机选视频直传(裸字节, 文件名在 query) — 必须在 JSON 解析前分流
+            qs = urllib.parse.parse_qs(u.query)
+            dest, err = upload_save((qs.get("name") or [""])[0], self.rfile, length)
+            if err:
+                return self._json({"error": err}, 400)
+            return self._json({"ok": True, "key": "", "path": str(dest)})
         raw_body = self.rfile.read(length) or b"{}"
         try:
             body = json.loads(raw_body)
@@ -3253,7 +3319,7 @@ h2{font-size:11px;color:var(--tx3);font-weight:600;margin:22px 0 10px;letter-spa
 /* ── 播放列表面板(缩略图+名称, 点一下就切) ── */
 #listPanel{position:fixed;right:12px;top:calc(var(--pTop,118px) + env(safe-area-inset-top));bottom:calc(96px + env(safe-area-inset-bottom));
   z-index:150;width:min(340px,calc(100% - 24px));display:none;flex-direction:column;
-  background:color-mix(in srgb, var(--srf3) 96%, transparent);ba   /* v18: 播放器面板跟主题 */ckdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+  background:color-mix(in srgb, var(--srf3) 96%, transparent);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);   /* v18: 播放器面板跟主题 */
   border:1px solid rgba(255,255,255,.13);border-radius:14px;overflow:hidden;
   box-shadow:0 16px 50px rgba(0,0,0,.5);touch-action:pan-y}
 #listPanel.show{display:flex}
@@ -3308,7 +3374,7 @@ h2{font-size:11px;color:var(--tx3);font-weight:600;margin:22px 0 10px;letter-spa
 /* ── 媒体库多选 ── */
 .selbar{position:fixed;left:0;right:0;bottom:0;z-index:60;display:none;align-items:center;gap:8px;
   padding:10px 14px calc(10px + env(safe-area-inset-bottom));
-  background:color-mix(in srgb, var(--srf3) 96%, transparent);ba   /* v18: 播放器面板跟主题 */ckdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  background:color-mix(in srgb, var(--srf3) 96%, transparent);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);   /* v18: 播放器面板跟主题 */
   border-top:1px solid rgba(255,255,255,.12);box-shadow:0 -8px 30px rgba(0,0,0,.5)}
 .selbar.show{display:flex}
 .btn.on{background:rgba(251,114,153,.16);border-color:rgba(251,114,153,.5);color:#FB7299}
@@ -3376,7 +3442,10 @@ input[type=text]::placeholder{color:var(--tx3)}
 .bar i{display:block;height:100%;background:var(--tx);transition:width .4s}
 
 /* ── 媒体库 ── */
-.libtop{display:flex;gap:8px;margin-bottom:12px;align-items:center}
+.libtop{display:flex;gap:8px;margin-bottom:12px;align-items:center;
+  position:sticky;top:0;z-index:25;padding:10px 2px;margin-left:-2px;margin-right:-2px;
+  background:color-mix(in srgb, var(--bg) 90%, transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-radius:0 0 var(--r,10px) var(--r,10px)}   /* v22.0: 搜索框吸顶跟随, 滚多深都能搜 */
 .libtop input{flex:1}
 .chips{display:flex;gap:7px;overflow:auto;padding-bottom:12px;scrollbar-width:none}
 .chips::-webkit-scrollbar{display:none}
@@ -4870,7 +4939,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
 
 /* ═══ i18n ═══ */
 const I18N = {
-  zh: {fxFallback:'渲染异常, 已回退原画', tabSet:'设置', setSleep:'睡眠定时', setSleepHint:'到点自动暂停', sOff:'关', sMin:'%d分钟', setStats:'统计', stTotal:'文件', stSize:'总大小', stFav:'收藏', dlBatchTip:'支持多行批量: 每行一个链接', bFilter:'过滤文件…', agoNow:'刚刚', agoS:'%d秒前', agoM:'%d分钟前', agoH:'%d小时前', agoD:'%d天前', agoW:'%d周前', fxTitle:'画质特效',fxVhs:'VHS 录像',fxHint:'GPU 后处理, 发热或卡顿请关闭。',fxLabel:'特效',fxOff:'关闭',fxCrt:'CRT 电视',fxFilm:'胶片颗粒',fxNeon:'霓虹辉光',ambLabel:'氛围光',uiStyle:'界面风格',uiMono:'单色',uiGeist:'极简',uiCat:'柔和',uiSynth:'复古未来',uiRetro:'复古',uiPip:'终端',uiHint:'界面皮肤, 明暗跟随右上角主题按钮。', parse:'解析', all:'全选', none:'全不选', audio:'仅音频', dl:'下载所选', importLocal:'导入本地', impMove:'移动(省空间)', impCopy:'复制', impGo:'导入所选', impEmpty:'扫描目录里没有可导入的视频', impDone:'导入完成', impFail2:'个失败',
+  zh: {fxFallback:'渲染异常, 已回退原画', tabSet:'设置', setSleep:'睡眠定时', setSleepHint:'到点自动暂停', sOff:'关', sMin:'%d分钟', setStats:'统计', stTotal:'文件', stSize:'总大小', stFav:'收藏', dlBatchTip:'支持多行批量: 每行一个链接', bFilter:'过滤文件…', agoNow:'刚刚', agoS:'%d秒前', agoM:'%d分钟前', agoH:'%d小时前', agoD:'%d天前', agoW:'%d周前', fxTitle:'画质特效',fxVhs:'VHS 录像',fxHint:'GPU 后处理, 发热或卡顿请关闭。',fxLabel:'特效',fxOff:'关闭',fxCrt:'CRT 电视',fxFilm:'胶片颗粒',fxNeon:'霓虹辉光',ambLabel:'氛围光',uiStyle:'界面风格',uiMono:'单色',uiGeist:'极简',uiCat:'柔和',uiSynth:'复古未来',uiRetro:'复古',uiPip:'终端',uiHint:'界面皮肤, 明暗跟随右上角主题按钮。', parse:'解析', all:'全选', none:'全不选', audio:'仅音频', dl:'下载所选', importLocal:'导入本地', impMove:'移动(省空间)', impCopy:'复制', impGo:'导入所选', impEmpty:'扫描目录里没有可导入的视频', impPick:'从手机选择视频文件', impPickHint:'或把视频放进扫描目录后点「扫描全盘」', uploading:'上传中', impDone:'导入完成', impFail2:'个失败',
     tasks:'下载任务', noTask:'暂无任务', library:'媒体库', scan:'扫描全盘', export:'导出备份',
     loose:'散文件', sNew:'最新', sSeq:'下载顺序', sOld:'最早', sName:'名称',
     tabDl:'下载', tabTask:'任务', tabLib:'媒体库', searchPh:'搜索标题', emptyLib:'库里还空着', emptySearch:'没搜到', resume:'继续观看',
@@ -4926,7 +4995,7 @@ const I18N = {
     installTip:'浏览器菜单 →「添加到主屏幕 / 安装应用」, 之后点桌面图标即可用',
     uniRun:'生成通用版中…', uniOk:'已生成全平台通用版', uniAlready:'已经是 mp4',
     uniFail:'生成失败', uniCompat:'生成通用版(全平台都能播)'},
-  en: {fxFallback:'Render error, fell back to plain video', tabSet:'Settings', setSleep:'Sleep timer', setSleepHint:'Auto-pause when time is up', sOff:'Off', sMin:'%d min', setStats:'Statistics', stTotal:'Files', stSize:'Total size', stFav:'Favorites', dlBatchTip:'Batch: one URL per line', bFilter:'Filter files…', agoNow:'just now', agoS:'%ds ago', agoM:'%dm ago', agoH:'%dh ago', agoD:'%dd ago', agoW:'%dw ago', fxTitle:'Video FX',fxVhs:'VHS Tape',fxHint:'GPU post-processing; turn off if hot or laggy.',fxLabel:'Effects',fxOff:'Off',fxCrt:'CRT TV',fxFilm:'Film Grain',fxNeon:'Neon Glow',ambLabel:'Ambient light',uiStyle:'UI style',uiMono:'Mono',uiGeist:'Minimal',uiCat:'Soft',uiSynth:'Retro-Future',uiRetro:'Retro',uiPip:'Terminal',uiHint:'Interface skin; light/dark follows the theme button.', parse:'Parse', all:'All', none:'None', audio:'Audio only', dl:'Download', importLocal:'Import', impMove:'Move (save space)', impCopy:'Copy', impGo:'Import selected', impEmpty:'No importable videos in scan dirs', impDone:'Imported', impFail2:'failed',
+  en: {fxFallback:'Render error, fell back to plain video', tabSet:'Settings', setSleep:'Sleep timer', setSleepHint:'Auto-pause when time is up', sOff:'Off', sMin:'%d min', setStats:'Statistics', stTotal:'Files', stSize:'Total size', stFav:'Favorites', dlBatchTip:'Batch: one URL per line', bFilter:'Filter files…', agoNow:'just now', agoS:'%ds ago', agoM:'%dm ago', agoH:'%dh ago', agoD:'%dd ago', agoW:'%dw ago', fxTitle:'Video FX',fxVhs:'VHS Tape',fxHint:'GPU post-processing; turn off if hot or laggy.',fxLabel:'Effects',fxOff:'Off',fxCrt:'CRT TV',fxFilm:'Film Grain',fxNeon:'Neon Glow',ambLabel:'Ambient light',uiStyle:'UI style',uiMono:'Mono',uiGeist:'Minimal',uiCat:'Soft',uiSynth:'Retro-Future',uiRetro:'Retro',uiPip:'Terminal',uiHint:'Interface skin; light/dark follows the theme button.', parse:'Parse', all:'All', none:'None', audio:'Audio only', dl:'Download', importLocal:'Import', impMove:'Move (save space)', impCopy:'Copy', impGo:'Import selected', impEmpty:'No importable videos in scan dirs', impPick:'Pick video files', impPickHint:'Or drop videos into a scan dir and hit "Scan"', uploading:'Uploading', impDone:'Imported', impFail2:'failed',
     tasks:'Tasks', noTask:'No tasks', library:'Library', scan:'Scan videos', export:'Export backup',
     loose:'Loose files', sNew:'Newest', sSeq:'Order', sOld:'Oldest', sName:'Name',
     tabDl:'Download', tabTask:'Tasks', tabLib:'Library', searchPh:'Search titles', emptyLib:'Library is empty', emptySearch:'No results', resume:'Resume',
@@ -5850,9 +5919,17 @@ async function openImport() {
   let d;
   try { d = await api('/api/import_list'); } catch (e) { $('sheetBody').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
   const cs = d.cands || [];
-  if (!cs.length) { $('sheetBody').innerHTML = `<div class="empty">${t('impEmpty')}</div>`; return; }
+  if (!cs.length) {
+    $('sheetBody').innerHTML =
+      `<div class="empty">${t('impEmpty')}</div>
+       <button class="btn" style="width:100%;margin-top:14px" onclick="impPick()">⤓ ${t('impPick')}</button>
+       <div style="font-size:11.5px;color:var(--tx3);margin-top:8px;text-align:center">${t('impPickHint')}</div>`;
+    return;
+  }
   $('sheetBody').innerHTML =
     `<div class="row" style="margin-bottom:10px">
+       <button class="btn ghost sm" onclick="impPick()">⤓ ${t('impPick')}</button>
+       <span style="flex:1"></span>
        <button class="btn ghost sm" onclick="impSelAll(true)">${t('all')}</button>
        <button class="btn ghost sm" onclick="impSelAll(false)">${t('none')}</button>
        <span style="flex:1"></span>
@@ -5868,6 +5945,28 @@ async function openImport() {
 }
 function impCount() { const n = document.querySelectorAll('.impc:checked').length; const el = $('impN'); if (el) el.textContent = n; }
 function impSelAll(on) { document.querySelectorAll('.impc').forEach(cb => { cb.checked = on; }); impCount(); }
+/* v22.0: 从手机/电脑直接选视频文件上传 — 不依赖扫描目录配置, 空态也能真导入 */
+async function impPick() {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'video/*'; inp.multiple = true;
+  inp.onchange = async () => {
+    const files = [...inp.files];
+    if (!files.length) return;
+    const paint = (txt) => { $('sheetBody').innerHTML = `<div class="empty">${esc(txt)}</div>`; };
+    let ok = 0, fail = 0;
+    for (const f of files) {
+      paint(`${t('uploading')} ${f.name} (${ok + fail + 1}/${files.length})…`);
+      try {
+        const r = await fetch('/api/upload?name=' + encodeURIComponent(f.name), { method: 'POST', body: f });
+        const j = await r.json();
+        if (j.ok) ok++; else fail++;
+      } catch (e) { fail++; }
+    }
+    paint(`${t('impDone')} ${ok}/${files.length}${fail ? ' · ' + fail + ' ' + t('impFail2') : ''}`);
+    if (typeof loadLib === 'function') loadLib();
+  };
+  inp.click();
+}
 async function impGo() {
   const paths = [...document.querySelectorAll('.impc:checked')].map(cb => cb.value);
   if (!paths.length) return;
@@ -5890,8 +5989,13 @@ document.addEventListener('click', e => {
 });
 window.addEventListener('scroll', () => {
   const nav = $('libNav');
-  if (nav) nav.style.display = (window.scrollY > 420 && $('page-lib').classList.contains('active')) ? 'flex' : 'none';
+  if (nav) nav.style.display = $('page-lib').classList.contains('active') ? 'flex' : 'none';
 }, { passive: true });
+/* 进媒体库页即显示浮球组(旧版滚 420px 才出现 = 用户以为按钮不存在) */
+new MutationObserver(() => {
+  const nav = $('libNav');
+  if (nav) nav.style.display = $('page-lib').classList.contains('active') ? 'flex' : 'none';
+}).observe($('page-lib'), { attributes: true, attributeFilter: ['class'] });
 libColsSync();
 
 /* ═══ 媒体库多选(批量删除/收藏) ═══ */
@@ -7207,18 +7311,19 @@ function repairSurface(step) {
   setTimeout(() => repairSurface(step + 1), 800);  // 给浏览器 0.8s 自己缓过来
 }
 
-/* 第零层守护: 打开视频就黑屏(音频正常画面黑, 只能杀浏览器)的根治 —
-   旧版修复链只在页面后台回来时跑, 「刚打开就黑」这个最高发场景从来没被覆盖。
-   playing 后 1.2s 量帧数: 没在涨就走 reattach→捅解码器→软重载 三层链,
-   hardReloadStream 等价于用户手动刷新页面, 不再需要杀浏览器。 */
-v.addEventListener('playing', () => {
-  setTimeout(() => {
-    if (!$('pmodal').classList.contains('open') || v.paused || v.ended) return;
-    if ($('pstage').classList.contains('audio')) return;
-    _frameSeen = decodedFrames();
-    repairSurface(0);
-  }, 1200);
-}, {passive: true});
+/* 第零层守护: 常驻帧巡逻 — 黑屏(音频正常画面黑)的根源修复。
+   触发源五花八门: 切主题/切列数/打开视频/页面回前台, 任何 DOM 抖动都可能
+   弄丢 Android 的视频合成面。逐个埋点修不完, 干脆播放期间每 3s 量一次帧数:
+   没在涨就走 reattach→捅解码器→软重载 三层链, hardReloadStream 等价于用户
+   手动刷新页面(保位置保播放), 不再需要杀浏览器。 */
+setInterval(() => {
+  if (!$('pmodal').classList.contains('open') || !v.getAttribute('src')) return;
+  if (v.paused || v.ended || $('pstage').classList.contains('audio')) return;
+  const now = decodedFrames();
+  const stuck = now >= 0 && now === _frameSeen;    // 一帧都没多 = 表面死了
+  _frameSeen = now;
+  if (stuck) repairSurface(0);
+}, 3000);
 
 /* ═══ v22.0: Ambient Mode — 单层低清画布持续重画。
    24x14 重绘成本可忽略, 双层交叉淡入在此分辨率纯属自杀: 每 66ms 强制互换两层
