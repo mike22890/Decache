@@ -24,7 +24,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "22.2"
+VERSION = "22.3"
 
 # 观看进度账本(前端每10s心跳上报; key=相对路径)
 PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_progress.json")
@@ -1992,7 +1992,7 @@ def cookie_for_domain(url):
                 return v
     return _CONF.get("cookie", "") or m.get("", "") or ""
 
-def _cmd(url, audio_only, folder, quality=0, part_no=0):
+def _cmd(url, audio_only, folder, quality=0, part_no=0, fb=False):
     # cookie: 按链接域名挑对应凭据, 每个域名一个 jar 文件(多站点不打架)
     cv = cookie_for_domain(url)
     jar = None
@@ -2027,6 +2027,11 @@ def _cmd(url, audio_only, folder, quality=0, part_no=0):
                         f"b{d}[ext=mp4]/"
                         f"bv*{d}+ba")
             FMT = _chain("height") + "," + _chain("width") + "/b[ext=mp4]/b"
+        elif fb:
+            # v22.2 兜底: 上一种组合要 DASH 音视频分离 → 靠 ffmpeg 合并。
+            # 真机(Termux)上合并阶段报 "Invalid data found when processing input"
+            # (分片是坏的/被反爬)时, 换单文件优先级最高的格式, 能不下分离流就不合并。
+            FMT = "b[ext=mp4]/b"
         else:
             FMT = ("bv*[vcodec^=avc1]+ba[acodec^=mp4a]/"
                    "bv*[vcodec^=h264]+ba[acodec^=aac]/"
@@ -2140,6 +2145,14 @@ def friendly_err(reason):
     return ""
 
 
+def _is_merge_err(reason):
+    """v22.2: 判断失败是不是"下回来了但合并/解码输入是坏的"。
+    真机 B 站最常见的一种: 引擎报 Invalid data found when processing input。"""
+    low = (reason or "").lower()
+    return ("invalid data found" in low or "error opening input files" in low
+            or "decoding failed" in low or "corrupt" in low)
+
+
 def _is_format_err(reason):
     """判断失败是不是"格式选不出来"(而不是网络/权限问题)。"""
     low = (reason or "").lower()
@@ -2171,7 +2184,7 @@ def _run_part(task, p, folder):
                                         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
             else:
                 pk["start_new_session"] = True
-            proc = subprocess.Popen(_cmd(url, task.get("audio_only", False), folder, q, p),
+            proc = subprocess.Popen(_cmd(url, task.get("audio_only", False), folder, q, p, bool(task.get("_fb"))),
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                     encoding="utf-8", errors="replace", **pk)
         except Exception as e:
@@ -2237,6 +2250,12 @@ def _run_part(task, p, folder):
                 q = 0
                 task["quality"] = 0
                 task["line"] = f"P{p} 该清晰度没有可用格式, 改用自动(最优)重试..."
+                continue
+            # v22.2: 合并阶段报"数据是坏的"→ 第二次改用单文件兜底格式
+            # (DASH 分离流合并是失败高发区; 单文件能绕开整条合并链)
+            if _is_merge_err(full):
+                task["_fb"] = True
+                task["line"] = f"P{p} 合并失败(数据损坏), 换单文件格式重试..."
                 continue
             task["line"] = f"P{p} 失败, 重试一次..."
             continue

@@ -1326,16 +1326,21 @@ html[data-ui="pipboy"] #pctrl{border-color:rgba(60,255,110,.28)}html[data-ui="ca
 .cov img,.pv img,#pthumbImg img{transition:transform .3s ease,filter .3s ease}
 .vcard:hover .cov img,.pv:hover img{transform:scale(1.045)}
 html[data-ui="synthwave"] .cov img,html[data-ui="synthwave"] .pv img,
-html[data-ui="synthwave"] .cthumb,html[data-ui="synthwave"] #pthumbImg img{
+html[data-ui="synthwave"] .cthumb,html[data-ui="synthwave"] #pthumbImg img,
+html[data-ui="synthwave"] .resume .rcov{
   filter:saturate(1.22) contrast(1.07)}
 html[data-ui="synthwave"] .vcard:hover .cov img{filter:saturate(1.35) contrast(1.1) brightness(1.05)}
-html[data-ui="pipboy"] .cov img,html[data-ui="pipboy"] .pv img,html[data-ui="pipboy"] .cthumb,html[data-ui="pipboy"] .histcard img{
+html[data-ui="pipboy"] .cov img,html[data-ui="pipboy"] .pv img,html[data-ui="pipboy"] .cthumb,html[data-ui="pipboy"] .histcard img,
+html[data-ui="pipboy"] .resume .rcov{
   filter:sepia(1) hue-rotate(55deg) saturate(2.2) brightness(.82) contrast(1.05)}
-html[data-ui="retro"] .cov img,html[data-ui="retro"] .pv img,html[data-ui="retro"] .cthumb{
+html[data-ui="retro"] .cov img,html[data-ui="retro"] .pv img,html[data-ui="retro"] .cthumb,
+html[data-ui="retro"] .resume .rcov{
   filter:contrast(.96) sepia(.2) saturate(.9)}
-html[data-ui="catppuccin"] .cov img,html[data-ui="catppuccin"] .pv img,html[data-ui="catppuccin"] .cthumb{
+html[data-ui="catppuccin"] .cov img,html[data-ui="catppuccin"] .pv img,html[data-ui="catppuccin"] .cthumb,
+html[data-ui="catppuccin"] .resume .rcov{
   filter:saturate(1.09) brightness(1.03)}
-html[data-ui="geist"] .cov img,html[data-ui="geist"] .pv img,html[data-ui="geist"] .cthumb{
+html[data-ui="geist"] .cov img,html[data-ui="geist"] .pv img,html[data-ui="geist"] .cthumb,
+html[data-ui="geist"] .resume .rcov{
   filter:saturate(1.05) contrast(1.02)}
 /* v21.7: pipboy 封面统一绿磷光单色 — 彩色封面在终端主题里是穿帮 */
 html[data-ui="pipboy"] .cov img,html[data-ui="pipboy"] .pv img,html[data-ui="pipboy"] .cthumb{
@@ -1431,7 +1436,7 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
 
 </style>
 </head>
-<body data-ver="v22.2-20261105"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
+<body data-ver="v22.3-20261105"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
 <script>
 /* v21.9: 真机诊断浮层 — URL 带 ?dbg=1 时显示核心状态, Kiwi 截一张图即可回报全部 */
 (function () {
@@ -1640,6 +1645,11 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
   </div>
   <div class="libtop">
     <input type="text" id="q" oninput="libSearchDebounced()">
+    <!-- v22.2: 播放列表原来只能从播放器里打开, 关了播放器就再也摸不到(真机投诉"列表不见了")。
+         这里给一个常驻入口, 媒体库页随时能开出同一个面板。 -->
+    <button class="icbtn" id="libListBtn" title="播放列表" aria-label="播放列表" style="width:34px;height:34px;flex:none">
+      <svg class="ic"><use href="#i-clist"/></svg>
+    </button>
   </div>
   <div class="chips" id="filterChips">
     <span class="chip on" data-tag="" data-i18n="fAll">全部</span>
@@ -1746,6 +1756,7 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
       <select id="fxSel" class="qsel" style="flex:1;min-width:0">
         <option value="off" data-i18n="fxOff">关闭</option>
         <option value="crt" data-i18n="fxCrt">CRT 电视</option>
+        <option value="term" data-i18n="fxTerm">终端绿屏</option>
         <option value="vhs" data-i18n="fxVhs">VHS 录像</option>
         <option value="film" data-i18n="fxFilm">胶片颗粒</option>
         <option value="neon" data-i18n="fxNeon">霓虹辉光</option>
@@ -1907,7 +1918,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
 
 /* ═══ i18n ═══ */
 const I18N = {
-  zh: {fxFallback:'渲染异常, 已回退原画', tabSet:'设置', setSleep:'睡眠定时', setSleepHint:'到点自动暂停', sOff:'关', sMin:'%d分钟', setStats:'统计', stTotal:'文件', stSize:'总大小', stFav:'收藏', dlBatchTip:'支持多行批量: 每行一个链接', bFilter:'过滤文件…', agoNow:'刚刚', agoS:'%d秒前', agoM:'%d分钟前', agoH:'%d小时前', agoD:'%d天前', agoW:'%d周前', fxTitle:'画质特效',fxVhs:'VHS 录像',fxHint:'GPU 后处理, 发热或卡顿请关闭。',fxLabel:'特效',fxOff:'关闭',fxCrt:'CRT 电视',fxFilm:'胶片颗粒',fxNeon:'霓虹辉光',ambLabel:'氛围光',uiStyle:'界面风格',uiMono:'单色',uiGeist:'极简',uiCat:'柔和',uiSynth:'复古未来',uiRetro:'复古',uiPip:'终端',uiHint:'界面皮肤, 明暗跟随右上角主题按钮。', parse:'解析', all:'全选', none:'全不选', audio:'仅音频', dl:'下载所选', importLocal:'导入本地', impMove:'移动(省空间)', impCopy:'复制', impGo:'导入所选', impEmpty:'扫描目录里没有可导入的视频', impPick:'从手机选择视频文件', impPickHint:'或把视频放进扫描目录后点「扫描全盘」', uploading:'上传中', impDone:'导入完成', impFail2:'个失败',
+  zh: {fxFallback:'渲染异常, 已回退原画', tabSet:'设置', setSleep:'睡眠定时', setSleepHint:'到点自动暂停', sOff:'关', sMin:'%d分钟', setStats:'统计', stTotal:'文件', stSize:'总大小', stFav:'收藏', dlBatchTip:'支持多行批量: 每行一个链接', bFilter:'过滤文件…', agoNow:'刚刚', agoS:'%d秒前', agoM:'%d分钟前', agoH:'%d小时前', agoD:'%d天前', agoW:'%d周前', fxTitle:'画质特效',fxVhs:'VHS 录像',fxHint:'GPU 后处理, 发热或卡顿请关闭。',fxLabel:'特效',fxOff:'关闭',fxCrt:'CRT 电视',fxTerm:'终端绿屏',fxFilm:'胶片颗粒',fxNeon:'霓虹辉光',ambLabel:'氛围光',uiStyle:'界面风格',uiMono:'单色',uiGeist:'极简',uiCat:'柔和',uiSynth:'复古未来',uiRetro:'复古',uiPip:'终端',uiHint:'界面皮肤, 明暗跟随右上角主题按钮。', parse:'解析', all:'全选', none:'全不选', audio:'仅音频', dl:'下载所选', importLocal:'导入本地', impMove:'移动(省空间)', impCopy:'复制', impGo:'导入所选', impEmpty:'扫描目录里没有可导入的视频', impPick:'从手机选择视频文件', impPickHint:'或把视频放进扫描目录后点「扫描全盘」', uploading:'上传中', impDone:'导入完成', impFail2:'个失败',
     tasks:'下载任务', noTask:'暂无任务', library:'媒体库', scan:'扫描全盘', export:'导出备份',
     loose:'散文件', sNew:'最新', sSeq:'下载顺序', sOld:'最早', sName:'名称',
     tabDl:'下载', tabTask:'任务', tabLib:'媒体库', searchPh:'搜索标题', emptyLib:'库里还空着', emptySearch:'没搜到', resume:'继续观看',
@@ -1963,7 +1974,7 @@ const I18N = {
     installTip:'浏览器菜单 →「添加到主屏幕 / 安装应用」, 之后点桌面图标即可用',
     uniRun:'生成通用版中…', uniOk:'已生成全平台通用版', uniAlready:'已经是 mp4',
     uniFail:'生成失败', uniCompat:'生成通用版(全平台都能播)'},
-  en: {fxFallback:'Render error, fell back to plain video', tabSet:'Settings', setSleep:'Sleep timer', setSleepHint:'Auto-pause when time is up', sOff:'Off', sMin:'%d min', setStats:'Statistics', stTotal:'Files', stSize:'Total size', stFav:'Favorites', dlBatchTip:'Batch: one URL per line', bFilter:'Filter files…', agoNow:'just now', agoS:'%ds ago', agoM:'%dm ago', agoH:'%dh ago', agoD:'%dd ago', agoW:'%dw ago', fxTitle:'Video FX',fxVhs:'VHS Tape',fxHint:'GPU post-processing; turn off if hot or laggy.',fxLabel:'Effects',fxOff:'Off',fxCrt:'CRT TV',fxFilm:'Film Grain',fxNeon:'Neon Glow',ambLabel:'Ambient light',uiStyle:'UI style',uiMono:'Mono',uiGeist:'Minimal',uiCat:'Soft',uiSynth:'Retro-Future',uiRetro:'Retro',uiPip:'Terminal',uiHint:'Interface skin; light/dark follows the theme button.', parse:'Parse', all:'All', none:'None', audio:'Audio only', dl:'Download', importLocal:'Import', impMove:'Move (save space)', impCopy:'Copy', impGo:'Import selected', impEmpty:'No importable videos in scan dirs', impPick:'Pick video files', impPickHint:'Or drop videos into a scan dir and hit "Scan"', uploading:'Uploading', impDone:'Imported', impFail2:'failed',
+  en: {fxFallback:'Render error, fell back to plain video', tabSet:'Settings', setSleep:'Sleep timer', setSleepHint:'Auto-pause when time is up', sOff:'Off', sMin:'%d min', setStats:'Statistics', stTotal:'Files', stSize:'Total size', stFav:'Favorites', dlBatchTip:'Batch: one URL per line', bFilter:'Filter files…', agoNow:'just now', agoS:'%ds ago', agoM:'%dm ago', agoH:'%dh ago', agoD:'%dd ago', agoW:'%dw ago', fxTitle:'Video FX',fxVhs:'VHS Tape',fxHint:'GPU post-processing; turn off if hot or laggy.',fxLabel:'Effects',fxOff:'Off',fxCrt:'CRT TV',fxTerm:'Terminal',fxFilm:'Film Grain',fxNeon:'Neon Glow',ambLabel:'Ambient light',uiStyle:'UI style',uiMono:'Mono',uiGeist:'Minimal',uiCat:'Soft',uiSynth:'Retro-Future',uiRetro:'Retro',uiPip:'Terminal',uiHint:'Interface skin; light/dark follows the theme button.', parse:'Parse', all:'All', none:'None', audio:'Audio only', dl:'Download', importLocal:'Import', impMove:'Move (save space)', impCopy:'Copy', impGo:'Import selected', impEmpty:'No importable videos in scan dirs', impPick:'Pick video files', impPickHint:'Or drop videos into a scan dir and hit "Scan"', uploading:'Uploading', impDone:'Imported', impFail2:'failed',
     tasks:'Tasks', noTask:'No tasks', library:'Library', scan:'Scan videos', export:'Export backup',
     loose:'Loose files', sNew:'Newest', sSeq:'Order', sOld:'Oldest', sName:'Name',
     tabDl:'Download', tabTask:'Tasks', tabLib:'Library', searchPh:'Search titles', emptyLib:'Library is empty', emptySearch:'No results', resume:'Resume',
@@ -2569,6 +2580,8 @@ const FX_PRESETS = {
   vhs:  { scan: 0,   aberr: 1.2, vig: .3,  grain: .08, glow: 0,   warp: .08, mask: 0, jit: 1, tint: .1,   roll: 0,   flick: .3,  trk: .7  },
   film: { scan: 0,   aberr: .25, vig: .38, grain: .15, glow: 0,   warp: 0,    mask: 0, jit: 0, tint: 0,    roll: 0,   flick: .45, trk: 0   },
   neon: { scan: .12, aberr: .7,  vig: .26, grain: .02, glow: .85, warp: 0,    mask: 0, jit: 0, tint: 0,    roll: .3,  flick: 0,   trk: 0   },
+  /* v22.2: 终端 —— 对着 pipboy 主题做的: 去色→P1 磷光绿 + 扫描线/荫罩/暗角/微曲率 */
+  term: { scan: .85, aberr: .18, vig: .44, grain: .05, glow: .32, warp: .14, mask: .55, jit: 0, tint: .35, roll: .22, flick: .32, trk: 0, fade: .1, pglow: .35, hs: .92 },
 };
 let FX_MODE = localStorage.getItem('take_fx') || 'off';
 if ((localStorage.getItem('take_amb') || 'on') === 'off') document.documentElement.classList.add('no-amb');   /* v22.0: 氛围光开关恢复(默认开) */
@@ -2608,7 +2621,7 @@ function fxEnsure() {
   if (!fxPr) {
   const vs = 'attribute vec2 p;varying vec2 vUv;void main(){vUv=vec2(p.x*.5+.5,p.y*.5+.5);gl_Position=vec4(p,0.,1.);}';
   const fs = `precision highp float;varying vec2 vUv;uniform sampler2D T;uniform highp float t;uniform vec2 r;
-uniform float s,a,v,g,w,k,m,j,n,q,f,trk,fd,pg;
+uniform float s,a,v,g,w,k,m,j,n,q,f,trk,fd,pg,hs;
 float rnd(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453);}
 void main(){
   vec2 uv=vUv;
@@ -2642,6 +2655,7 @@ void main(){
   c*=1.+f*(0.015*sin(tm*47.0)+0.012*sin(tm*3.3));                                 /* 亮度呼吸 */
   c+=(rnd(uv*r+vec2(tm*61.7,tm*37.3))-.5)*g;
   if(fd>0.001){float lum=dot(c,vec3(.299,.587,.114));c=mix(c,vec3(lum)*vec3(1.06,1.0,.88)+.045,fd);} /* v13 CRT 褪色+暖绿偏色 */
+  if(hs>0.001){float lum2=dot(c,vec3(.299,.587,.114));vec3 phos=vec3(lum2*.30,lum2*1.06,lum2*.40);c=mix(c,phos+c*.10,hs);} /* v22.2 终端: P1 磷光绿(去色→绿磷光, 保留一点原色层次) */
   if(pg>0.001){vec2 px=1.0/r;vec3 nb=texture2D(T,uv+vec2(px.x,0.)).rgb+texture2D(T,uv-vec2(px.x,0.)).rgb+texture2D(T,uv+vec2(0.,px.y)).rgb+texture2D(T,uv-vec2(0.,px.y)).rgb;c+=nb*0.25*pg*0.35;} /* v15 像素微发光: 4邻域溢出 */                                      /* 颗粒: 连续时间, 无秒级跳变 */
   if(w>0.5&&s<0.2){c+=0.025*vec3(sin(tm*0.6),sin(tm*0.6+2.094),sin(tm*0.6+4.189));} /* 霓虹彩虹慢呼吸 */
   gl_FragColor=vec4(c,1.);
@@ -2671,7 +2685,7 @@ void main(){
   fxGl.texParameteri(fxGl.TEXTURE_2D, fxGl.TEXTURE_MIN_FILTER, fxGl.LINEAR);
   fxGl.pixelStorei(fxGl.UNPACK_FLIP_Y_WEBGL, true);
   window._fxTInit = 0;   /* v19.2: 新纹理首帧须 texImage2D 初始化 */
-  const fxNames = ['T','t','r','s','a','v','g','w','k','m','j','n','q','f','trk','fd','pg'];
+  const fxNames = ['T','t','r','s','a','v','g','w','k','m','j','n','q','f','trk','fd','pg','hs'];
   for (let i = 0; i < fxNames.length; i++) {
     fxU[fxNames[i]] = fxGl.getUniformLocation(fxPr, fxNames[i]);
   }
@@ -2743,6 +2757,7 @@ function fxRender(ts) {
     fxGl.uniform1f(fxU.trk, P.trk || 0);
     fxGl.uniform1f(fxU.fd, P.fade || 0);
     fxGl.uniform1f(fxU.pg, P.pglow || 0);
+    fxGl.uniform1f(fxU.hs, P.hs || 0);   /* v22.2: 终端绿磷光强度 */
     fxGl.drawArrays(fxGl.TRIANGLES, 0, 3);
   }
   /* v19.5: 黑屏自愈 — 不猜根因, 让"看到黑屏"不可能发生。每30帧读回中心像素, 连续3次全黑
@@ -2822,11 +2837,11 @@ function fxSet(m) {
 }
 $('fxSel').onchange = e => fxSet(e.target.value);
 
-const FX_NAMES = { off: 'fxOff', crt: 'fxCrt', vhs: 'fxVhs', film: 'fxFilm', neon: 'fxNeon' };
+const FX_NAMES = { off: 'fxOff', crt: 'fxCrt', term: 'fxTerm', vhs: 'fxVhs', film: 'fxFilm', neon: 'fxNeon' };
 function fxPopSync() {
   const el = $('fxPop');
   if (!el) return;
-  const modes = ['off', 'crt', 'vhs', 'film', 'neon'];
+  const modes = ['off', 'crt', 'term', 'vhs', 'film', 'neon'];
   el.innerHTML = modes.map(m => `<div data-fx="${m}" class="${FX_MODE === m ? 'on' : ''}">${t(FX_NAMES[m])}</div>`).join('') +
     `<div data-amb class="${document.documentElement.classList.contains('no-amb') ? '' : 'on'}" style="margin-top:4px;border-top:1px solid var(--line)">${t('ambLabel')} · ${document.documentElement.classList.contains('no-amb') ? t('sOff') : 'ON'}</div>`;
 }
@@ -2930,12 +2945,19 @@ $('listBody').addEventListener('click', e => {
   startPart(+r.dataset.pli);
   renderList();
 });
-$('pList').onclick = () => {
+/* v22.2: 播放列表统一入口 —— 播放器里的「列表」和媒体库搜索框旁边那颗按钮都走它。
+   以前只有播放器能开, 关了播放器面板就"消失"了, 用户以为列表坏了。 */
+function togglePlaylist() {
   const on = $('listPanel').classList.toggle('show');
   $('qpanel').classList.remove('show');
-  if (on) renderList();
-  poke();
-};
+  /* v22.2: 从媒体库直接开时 FLAT 可能还是空的(它只在开播/切源时构建) ——
+     不先 buildFlat 的话面板打开了却一条都没有, 用户以为列表坏了。 */
+  if (on) { if (!FLAT.length) FLAT = buildFlat(); renderList(); poke(); }
+  return on;
+}
+$('pList').onclick = togglePlaylist;
+const _libListBtn = $('libListBtn');
+if (_libListBtn) _libListBtn.onclick = togglePlaylist;
 $('listClose').onclick = () => $('listPanel').classList.remove('show');
 
 /* ═══ v22.0: 媒体库列数切换(1/2/3/auto) + 顶/底跳转 ═══ */

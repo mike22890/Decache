@@ -1,5 +1,32 @@
 # Changelog
 
+## v22.3 (2026-11-05)
+
+### 真机第二轮 · More on-device fixes
+Mike 又跑了一轮，三个问题：
+
+- **播放列表彻底摸不到了**：面板只有播放器里的「列表」按钮能开，关了播放器就再也开不了。
+  现在媒体库搜索框旁边多了一颗常驻按钮，和播放器共用同一个 `togglePlaylist()`；
+  而且从媒体库直接开时会先 `buildFlat()`（以前 FLAT 只在开播时才构建，直接开就是空面板）。
+- **下载还是失败**（`Invalid data found when processing input`）：根因是 DASH 音视频分离后
+  ffmpeg 合并阶段拿到的分片是坏的（反爬/网络中断）。现在第一次失败会自动改用
+  **单文件兜底格式**（`b[ext=mp4]/b`）重试 —— 不下分离流就不需要合并，整条合并链直接绕开。
+  判定函数 `_is_merge_err()` 认 `invalid data found` / `error opening input files` /
+  `decoding failed` / `corrupt`。
+- **「继续观看」缩略图不吃主题**：六个主题的封面滤镜规则里没有它。已全部补上
+  （synthwave 饱和提升 / pipboy 绿磷光 / retro 做旧 / catppuccin 柔化 / geist 轻对比）。
+
+### 新功能 · 终端绿屏着色器
+设置 → 特效里多了一档 **「终端绿屏」**，对着 pipboy 主题做的：
+去色 → P1 磷光绿 + 扫描线/荫罩/暗角/微曲率/滚动亮带。
+新增 `hs`（phosphor）uniform，其余预设不受影响（`P.hs || 0` = 0 时整段跳过）。
+
+### 验证
+`py_compile` / 语法闸 / `selftest` / `chaos_test` / `fake_yt_dlp_test` / `frontcheck`(8闸) / `smoke`(12项) 全绿，
+`sync_install.mjs` + `bash -n install.sh` 通过。
+浏览器实测（390×844 移动视口）：特效下拉出现 `term:终端绿屏`；媒体库有 34×34 的列表按钮；
+点它直接开出 22 行的列表面板（含分组封面 `url(.../api/cover/EXT_532bb42570)`）。
+
 ## v22.2 (2026-11-05)
 
 ### 真机反馈修复 · On-device fixes
