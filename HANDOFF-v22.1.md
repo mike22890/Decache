@@ -101,3 +101,37 @@ bash -n install.sh        OK, stderr 无 heredoc warning, 9 个终止符各 1 �
   `MSYS2_ARG_CONV_EXCL='*' taskkill /PID <pid> /F`（不加这个环境变量，`//PID` 会被 MSYS 吃掉）。
 - 本机外网：国外域名 DNS 解析成 fake-ip 198.18.0.0/15，Hermes 需要 `security.fake_ip_ranges`；
   GitHub raw 可通（curl 200）。
+
+
+---
+
+# 追加：v22.2（2026-11-05 当天第二轮 · 真机反馈修复）
+
+Mike 在手机上（Kiwi + Termux）实测提了 8 个问题，全部修掉。**未 commit、未 push**（按项目铁律）。
+
+## 修了什么
+| # | 问题 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | 播放列表里导入的视频没缩略图 | `plrowHtml` 和分组头都 gate 在 `/^BV/i`，而导入/扫描条目的 bvid 是 `EXT_xxx`/`LOC_xxx` | 改成只要有 bvid 就要封面（服务端懒生成抽帧） |
+| 2 | 「继续观看」卡没缩略图 | `renderResume` 的卡片 HTML 里根本没有 img | 补 56×38 封面 + `onerror` 自删 |
+| 3 | 卡片封面失败时显示破图 | `<img>` 无 onerror | 加 `onerror="this.style.opacity='0'"` |
+| 4 | 顶部页签栏会跟着内容滚走 | v21.9 把 `sticky` 改成了 `relative` | 改回 `sticky`（贴视口顶，切页签不用再滑回去） |
+| 5 | 右下角浮球一直悬着盖住卡片 | `#libNav` 是 `position:fixed` | 改 `sticky`（仍在文档流，贴右下跟随，不压内容） |
+| 6 | 关播放器后列表面板留在原地 | 面板是全局 fixed 浮层，`closePlayer()` 没收 | `closePlayer()` 里加 `$('listPanel').classList.remove('show')` |
+| 7 | 粘贴按钮弹「剪贴板不可用」就完事 | `navigator.clipboard.readText()` 在安卓 WebView/Kiwi 上经常 reject | 失败时聚焦输入框 + 提示"长按输入框粘贴" |
+| 8 | 播放器顶栏没跟上主题 | 只有背景渐变是各主题的，文字/按钮是通用色 | 六个主题的 `#phead` 标题/副标题/按钮全部收进各自语言 |
+| 9 | 下载失败只给一句英文 | `Invalid data found` 不匹配任何 ERROR_HINTS | 加提示 + 失败时清临时分片（否则补下永远跳过） |
+| 10 | 标签页标题还写 `Decache v15.1` | `<title>` 从没更新过 | 改成 `Decache` |
+
+## 验证
+- 全套闸门绿：`py_compile` / 语法闸 / `selftest` / `chaos_test` / `fake_yt_dlp_test` / `frontcheck`(8) / `smoke`(12) / `sync_install` + `bash -n`
+- 浏览器实测（390×844 移动视口，`Emulation.setDeviceMetricsOverride`）：
+  - `.tabbar` = sticky、`#libNav` = sticky（位置 [692,332,38,136]，在媒体库末尾、右对齐、不压卡片）
+  - 播放列表分组头 `background-image: url(.../api/cover/EXT_532bb42570...)` ✓
+  - 媒体库卡片封面 `naturalWidth=480` ✓
+  - `/api/cover/EXT_532bb42570` 返回真实 JPEG（14228 字节，`ÿØÿ`）✓
+  - `<title>` = `🐴 Decache` ✓
+
+## 环境备忘（新增）
+- 手机上的 Decache 是 **Termux 本机**（地址栏 `127.0.0.1:8765`），不是 PC。改完 `build/` 的代码要**重新在手机上跑 install.sh** 才会生效。
+- 测滚动行为一定要先让页面真的能滚：测试库里如果只有一个文件夹，扫描会合并成**一个条目**（多 part），页面根本没高度。

@@ -86,7 +86,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "22.1"
+VERSION = "22.2"
 
 # 观看进度账本(前端每10s心跳上报; key=相对路径)
 PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_progress.json")
@@ -780,6 +780,11 @@ ERROR_HINTS = [
     ("ffmpeg", "ffmpeg 没装 —— pkg install ffmpeg"),
     ("destination", "写入失败 —— 检查下载目录权限"),
     ("permission denied", "权限不足 —— 检查目录权限"),
+    # v22.2: 真机(Kiwi/Termux)下载 B 站常见 —— 引擎下回来的分片是坏的(反爬/网络断),
+    # ffmpeg 合并时报 "Invalid data found when processing input"。
+    # 原来这条不匹配任何提示, 用户只看到一句英文, 完全不知道该怎么办。
+    ("invalid data found", "下载到的数据是坏的(站点反爬或网络中断) —— 点补下重试; 反复失败就换引擎或装 nodejs"),
+    ("error opening input files", "下载到的数据是坏的(站点反爬或网络中断) —— 点补下重试; 反复失败就换引擎或装 nodejs"),
     ("unsupported url", "这个链接 yt-dlp 不支持"),
 ]
 
@@ -2439,6 +2444,15 @@ def _worker_once():
             task["failed"].append(p)
             # 失败原因在 _run_part 里已存(引擎原话); 这里兜底
             task["error"] = task.get("error") or f"P{p} failed"
+            # v22.2: 清掉引擎留下的临时分片(*.part / *.ytdl / P{n}.f* 片段) ——
+            # 不清的话补下时引擎会认为"这P已经下过了"直接跳过, 用户怎么点都是同一个坏文件。
+            try:
+                for _f in list(folder.glob(f"P{p}.*.part")) + list(folder.glob(f"P{p}.*.ytdl")) \
+                         + list(folder.glob(f"P{p}.f*")):
+                    if _f.is_file():
+                        _f.unlink(missing_ok=True)
+            except OSError:
+                pass
     task.pop("_before", None)
     save_tasks()                                  # 队列有变动就落盘
     if snapshot_thumb(task["bvid"]):           # 下载完顺手抽帧, 媒体库立刻有脸
@@ -3235,7 +3249,7 @@ cat > "$APP"/index.html.tmp <<'HTMLEOF'
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="icon" type="image/png" href="/icons/icon-192.png">
 <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-<title>Decache v15.1</title>
+<title>Decache</title>
 <style>
 /* ═══════════════ Decache UI v6 · timeless mono ═══════════════
    设计原则: UI 单色退后, 封面是唯一的彩色; 排版层级拉大;
@@ -3365,7 +3379,9 @@ html.gpute *{backdrop-filter:none!important;-webkit-backdrop-filter:none!importa
 h2{font-size:11px;color:var(--tx3);font-weight:600;margin:22px 0 10px;letter-spacing:1.6px;text-transform:uppercase}
 
 /* ── 页签栏(改为顶部 sticky 跟随: 原来固定在屏幕底部, 每次用都得滑到最底) ── */
-.tabbar{position:relative;z-index:30;margin:0 auto 16px;width:max-content;
+/* v22.2: 改回 sticky —— 真机(Kiwi)上相对定位会跟着内容滚走, 用户切个页签得先滑回顶部,
+   等于每次点导航都要多滑一次。sticky 让它一直贴在视口顶, 同时仍在文档流里。 */
+.tabbar{position:sticky;top:env(safe-area-inset-top, 0px);z-index:30;margin:0 auto 16px;width:max-content;
   display:flex;max-width:calc(100vw - 16px);
   background:color-mix(in srgb, var(--bg) 86%, transparent);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
   border:1px solid var(--line);border-radius:999px;padding:4px;box-shadow:0 6px 20px rgba(0,0,0,.16);
@@ -3519,7 +3535,10 @@ input[type=text]::placeholder{color:var(--tx3)}
 #lib[data-c="1"]{grid-template-columns:1fr}
 #lib[data-c="2"]{grid-template-columns:repeat(2,1fr)}
 #lib[data-c="3"]{grid-template-columns:repeat(3,1fr)}
-#libNav{position:fixed;right:18px;bottom:92px;z-index:30;display:none;flex-direction:column;gap:8px}
+/* v22.2: 从 fixed 改成 sticky —— 真机上它一直悬在右下角盖住卡片, 而且滚到哪儿都在。
+   sticky + margin-left:auto: 仍在文档流里(排在媒体库末尾), 但贴着视口右下角跟随滚动。 */
+#libNav{position:sticky;bottom:16px;z-index:30;display:none;flex-direction:column;gap:8px;
+  width:max-content;margin-left:auto;margin-top:18px;padding-bottom:6px}
 #libNav .icbtn{width:38px;height:38px;font-size:16px;color:var(--tx2);background:var(--srf);border:1px solid var(--line)}
 /* v22.0: 本地导入候选行 */
 .improw{display:flex;gap:9px;align-items:center;padding:9px 2px;border-bottom:1px solid var(--line);font-size:13px;color:var(--tx);cursor:pointer}
@@ -3887,6 +3906,9 @@ html.no-amb #ambCv,html.no-amb #ambCv2{display:none!important}   /* v22.0: 氛�
 .resume .rprog{height:3px;border-radius:2px;background:var(--line2);margin-top:7px;overflow:hidden}
 .resume .rprog i{display:block;height:100%;border-radius:2px;background:var(--tx);
   transition:width var(--d3) var(--e-out)}
+/* v22.2: 继续观看卡补缩略图(以前只有播放钮+文字, 卡片左边空一块) */
+.resume .rcov{width:56px;height:38px;object-fit:cover;border-radius:var(--rs);flex:none;
+  background:var(--srf2);border:1px solid var(--line)}
 
 /* ═══════════════ UI v8 · 主题系统 (2026-10-24) ═══════════════
    设计依据: 2026 趋势调研 —
@@ -4088,6 +4110,29 @@ html[data-ui="catppuccin"] #phead{background:linear-gradient(rgba(24,24,37,.85),
 html[data-ui="synthwave"] #phead{background:linear-gradient(rgba(12,2,33,.85),rgba(12,2,33,.4) 60%,transparent)}
 html[data-ui="retro"] #phead{background:linear-gradient(rgba(31,30,27,.85),rgba(31,30,27,.4) 60%,transparent)}
 html[data-ui="pipboy"] #phead{background:linear-gradient(rgba(5,9,5,.88),rgba(5,9,5,.45) 60%,transparent)}
+/* v22.2: 播放器顶栏跟上主题 —— 以前只有背景渐变是各主题自己的, 标题/副标题/按钮还是通用色,
+   真机上看着就是"上半截没换主题"。这里把文字与按钮也收进各主题的语言里。 */
+html[data-ui="geist"] #phead .ttl{color:#FAFAFA}
+html[data-ui="geist"] #phead .sub2{color:#A1A1A1}
+html[data-ui="geist"] #phead .icbtn{color:#C9C9C9}
+html[data-ui="catppuccin"] #phead .ttl{color:#CDD6F4}
+html[data-ui="catppuccin"] #phead .sub2{color:#A6ADC8}
+html[data-ui="catppuccin"] #phead .icbtn{color:#A6ADC8}
+html[data-ui="catppuccin"] #phead .icbtn.on{color:#CBA6F7}
+html[data-ui="synthwave"] #phead .ttl{color:#FFD9EE;text-shadow:0 0 10px rgba(255,45,149,.55)}
+html[data-ui="synthwave"] #phead .sub2{color:#A68CCF}
+html[data-ui="synthwave"] #phead .icbtn{color:#8BE9FD;text-shadow:0 0 8px rgba(0,240,255,.45)}
+html[data-ui="synthwave"] #phead .icbtn.on{color:#FF2D95}
+html[data-ui="retro"] #phead .ttl{color:var(--tx)}
+html[data-ui="retro"] #phead .sub2{color:var(--tx2)}
+html[data-ui="retro"] #phead .icbtn{border-radius:0;color:var(--tx2);
+  box-shadow:inset -2px -2px 0 rgba(0,0,0,.35),inset 2px 2px 0 rgba(255,255,255,.28)}
+html[data-ui="retro"] #phead .icbtn.on{color:var(--acc)}
+html[data-ui="pipboy"] #phead .ttl{color:#6CFF7E;text-shadow:0 0 8px rgba(60,255,110,.55)}
+html[data-ui="pipboy"] #phead .sub2{color:#3FA34F}
+html[data-ui="pipboy"] #phead .icbtn{color:#3FA34F;border-radius:2px}
+html[data-ui="pipboy"] #phead .icbtn.on{color:#22FF55;text-shadow:0 0 8px rgba(34,255,85,.8)}
+html[data-ui="mono"] #phead .ttl{color:var(--tx)}
 #phead .ttl{color:var(--tx)}   /* v13: 原来继承写死的 #FAFAFA, 主题进不来 */
 #phead .icbtn{color:var(--tx)}
 /* ═══════ v14 · 主题性格化: 每个主题有自己的语言, 不只是换色 ═══════ */
@@ -4621,7 +4666,7 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
 
 </style>
 </head>
-<body data-ver="v22.1-20261104"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
+<body data-ver="v22.2-20261105"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
 <script>
 /* v21.9: 真机诊断浮层 — URL 带 ?dbg=1 时显示核心状态, Kiwi 截一张图即可回报全部 */
 (function () {
@@ -5376,8 +5421,20 @@ document.querySelector('.tabbar').addEventListener('click', e => {
 });
 const switchTab = x => document.querySelector(`.tabbar button[data-tab="${x}"]`).click();
 const pasteFromClipboard = async () => {
-  try { $('url').value = await navigator.clipboard.readText(); }
-  catch { toast(t('pasteFail')); }
+  /* v22.2: 安卓 WebView / Kiwi 上 navigator.clipboard.readText() 经常直接 reject
+     (非安全上下文、权限没给、或内核太老), 以前只弹一句"剪贴板不可用"就完事 —— 用户还是没链接可粘。
+     现在失败时把光标送进输入框并提示长按粘贴, 保证这条路永远走得通。 */
+  const ta = $('url');
+  try {
+    if (!navigator.clipboard || !navigator.clipboard.readText) throw new Error('no clipboard api');
+    const txt = (await navigator.clipboard.readText() || '').trim();
+    if (!txt) throw new Error('empty clipboard');
+    ta.value = txt;
+    ta.focus();
+  } catch (e) {
+    ta.focus();
+    toast(t('pasteFail') + ' —— 长按输入框粘贴');
+  }
 };
 const fmtT = t0 => {
   if (!t0) return '';
@@ -6045,7 +6102,10 @@ function plrowHtml(i, sub) {
   const x = FLAT[i];
   const vd = x.vd || {};
   const bvid = vd.bvid || '';
-  const cov = bvid && /^BV/i.test(bvid)
+  /* v22.2: 以前只在 bvid 是 BV 开头时才要封面 —— 本地导入/全盘扫描的条目 bvid 是
+     EXT_xxx / LOC_xxx, 于是播放列表里它们永远没缩略图(只剩灰底)。
+     改成只要有 bvid 就要: 服务端 /api/cover 会懒生成抽帧, 404 也只是没背景图, 不会出破图。 */
+  const cov = bvid
     ? `style="background-image:url(/api/cover/${encodeURIComponent(bvid)}?v=${vd.cover_rev||0})"` : '';
   const title = (vd.title || x.rel || '').slice(0, 60);
   const pno = x.p && x.p.p ? `P${x.p.p}` : '';
@@ -6078,7 +6138,8 @@ function renderList() {
     const first = FLAT[g.items[0]];
     const vd = first.vd || {};
     const isCur = g.items.indexOf(FI) >= 0;
-    const cov = /^BV/i.test(g.bvid)
+    /* v22.2: 同 plrowHtml —— 分组头也按 bvid 要封面, 本地导入/扫描的 EXT_/LOC_ 才不空 */
+    const cov = g.bvid
       ? `style="background-image:url(/api/cover/${encodeURIComponent(g.bvid)}?v=${vd.cover_rev||0})"` : '';
     html.push(`<div class="plrow plgrp${isCur ? ' cur' : ''}" data-plg="${esc(g.bvid)}">
       <span class="plth" ${cov}></span>
@@ -6672,6 +6733,8 @@ function renderResume() {
   const pct = best.dur0 > 0 ? Math.min(100, Math.round(best.pos / best.dur0 * 100)) : 0;
   $('resumeSlot').innerHTML = `
     <div class="resume" data-open="${esc(best.rel)}">
+      <img class="rcov" src="/api/cover/${encodeURIComponent(best.vd.bvid)}?v=${best.vd.cover_rev||0}" loading="lazy" alt=""
+           onerror="this.remove()">
       <span class="ric"><svg class="ic" style="width:16px;height:16px;fill:currentColor;stroke:none"><use href="#i-play"/></svg></span>
       <div style="flex:1;min-width:0"><b>${t('resume')}</b>
         <div class="sub">${esc(best.vd.title)} · P${best.p.p} · ${fmtDur(best.pos)}${pct ? ' · ' + pct + '%' : ''}</div>
@@ -6699,7 +6762,7 @@ function renderLib() {
   $('libCount').textContent = LIB.videos.length;
   $('lib').innerHTML = vids.length ? vids.slice(0, LIB_SHOW).map(v => `
     <div class="vcard${SEL_MODE ? ' sel' : ''}">
-      <div class="cov" data-play="${esc(v.bvid)}">${SEL_MODE ? `<span class="selbox${SEL.has(v.bvid) ? ' on' : ''}" data-sel="${esc(v.bvid)}"></span>` : ''}<img src="/api/cover/${encodeURIComponent(v.bvid)}?t=${Math.floor(v.updated)||0}&v=${v.cover_rev||0}" loading="lazy" alt="${esc(v.title)}"><span class="n">${v.parts.length}P</span></div>
+      <div class="cov" data-play="${esc(v.bvid)}">${SEL_MODE ? `<span class="selbox${SEL.has(v.bvid) ? ' on' : ''}" data-sel="${esc(v.bvid)}"></span>` : ''}<img src="/api/cover/${encodeURIComponent(v.bvid)}?t=${Math.floor(v.updated)||0}&v=${v.cover_rev||0}" loading="lazy" alt="${esc(v.title)}" onerror="this.style.opacity='0'"><span class="n">${v.parts.length}P</span></div>
       <button class="favbtn${v.fav ? ' on' : ''}" data-fav="${esc(v.bvid)}" title="${t('fFav')}" aria-label="${t('fFav')}">
         <svg class="ic"><use href="#i-star"/></svg></button>
       <div class="bd">
@@ -7412,6 +7475,9 @@ function closePlayer() {
   setBuf(0);
   v.pause(); v.removeAttribute('src'); v.load();
   $('pmodal').classList.remove('open', 'playing'); document.body.classList.remove('pm-open');
+  /* v22.2: 列表面板是全局 fixed 浮层, 关播放器时必须一起收 ——
+     否则它会留在原地, 用户切回媒体库就看见"播放列表挂在媒体库上"(真机投诉)。 */
+  $('listPanel').classList.remove('show');
   keepAwake(false);
   if (document.fullscreenElement) document.exitFullscreen();
   renderResume();          // 旧 bug: 关掉播放器回媒体库, 卡片还是老样子, 不刷新

@@ -24,7 +24,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "22.1"
+VERSION = "22.2"
 
 # 观看进度账本(前端每10s心跳上报; key=相对路径)
 PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_progress.json")
@@ -718,6 +718,11 @@ ERROR_HINTS = [
     ("ffmpeg", "ffmpeg 没装 —— pkg install ffmpeg"),
     ("destination", "写入失败 —— 检查下载目录权限"),
     ("permission denied", "权限不足 —— 检查目录权限"),
+    # v22.2: 真机(Kiwi/Termux)下载 B 站常见 —— 引擎下回来的分片是坏的(反爬/网络断),
+    # ffmpeg 合并时报 "Invalid data found when processing input"。
+    # 原来这条不匹配任何提示, 用户只看到一句英文, 完全不知道该怎么办。
+    ("invalid data found", "下载到的数据是坏的(站点反爬或网络中断) —— 点补下重试; 反复失败就换引擎或装 nodejs"),
+    ("error opening input files", "下载到的数据是坏的(站点反爬或网络中断) —— 点补下重试; 反复失败就换引擎或装 nodejs"),
     ("unsupported url", "这个链接 yt-dlp 不支持"),
 ]
 
@@ -2377,6 +2382,15 @@ def _worker_once():
             task["failed"].append(p)
             # 失败原因在 _run_part 里已存(引擎原话); 这里兜底
             task["error"] = task.get("error") or f"P{p} failed"
+            # v22.2: 清掉引擎留下的临时分片(*.part / *.ytdl / P{n}.f* 片段) ——
+            # 不清的话补下时引擎会认为"这P已经下过了"直接跳过, 用户怎么点都是同一个坏文件。
+            try:
+                for _f in list(folder.glob(f"P{p}.*.part")) + list(folder.glob(f"P{p}.*.ytdl")) \
+                         + list(folder.glob(f"P{p}.f*")):
+                    if _f.is_file():
+                        _f.unlink(missing_ok=True)
+            except OSError:
+                pass
     task.pop("_before", None)
     save_tasks()                                  # 队列有变动就落盘
     if snapshot_thumb(task["bvid"]):           # 下载完顺手抽帧, 媒体库立刻有脸
