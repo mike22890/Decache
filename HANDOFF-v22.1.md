@@ -189,3 +189,37 @@ Mike 在手机上（Kiwi + Termux）实测提了 8 个问题，全部修掉。**
   当时只想到 `#pmodal` 内部，没想到兄弟浮层。
 - 真机排查播放器浮层，**必须真的点一次**并看屏幕，只看 DOM class 会被骗
   （我前面几轮就是只看 class 说"能开"，白改三轮）。
+
+
+---
+
+# 追加：v22.5（2026-11-05 当天第五轮）—— 下载到的是网页
+
+## 真因（真机日志直接给出）
+```
+P1.html has already been downloaded | [download] 100% of 6.59KiB |
+[VideoRemuxer] Remuxing video from html to mp4; Destination: .../P1.mp4 |
+ERROR: Postprocessing: Error opening input files: Invalid data found when processing input
+```
+下回来的是 **6.59 KiB 的 HTML 网页**（B 站反爬/未登录），yt-dlp 当媒体处理，
+再让 ffmpeg 把 HTML remux 成 mp4 → 报错。且 `P1.html` 留在盘上 →
+重试时引擎 "has already been downloaded" 直接跳过 → 补下永远失败。
+
+## 修法
+- `_is_html_bogus(folder, p, reason)`：认出这个真因（`remuxing video from html` 或目录里有 `P{n}.html`）。
+- 命中后**第一次就判失败**，不做无意义重试。
+- 提示改成：「B站返回的是网页不是视频(反爬/未登录) —— 去设置页『站点凭据』填 B 站 cookie 后重试」。
+- `_cleanup_part_files(folder, p, before)`：失败时清掉这一 P 的所有残留（含 .html），但保留 `_before` 里的旧文件。
+- **合并两份重复的报错提示清单**（`ERROR_HINTS` / `_ERR_ZH`）—— 之前往 ERROR_HINTS 加的提示
+  因为 `friendly_err()` 用的是 `_ERR_ZH` 而根本没生效。
+
+## 真正的解法（要 Mike 做）
+**给 B 站填 cookie**：设置页 → 站点凭据 → 填 `SESSDATA=...; bili_jct=...; buvid3=...`
+（从已登录的浏览器 DevTools 里复制）。填完再点补下。
+
+## 教训
+- **引擎输出里的 `Remuxing ... from html` / `P{n}.html` 是关键证据** ——
+  看到 "Invalid data found" 别只想到分片损坏，先想"下回来的是不是根本不是视频"。
+- **别让失败文件留在盘上**：引擎的 "has already been downloaded" 会让重试彻底失效，
+  必须清掉残留（但别删下载前就存在的好文件）。
+- **同一语义的常量别维护两份** —— 两份就一定会只改一份。

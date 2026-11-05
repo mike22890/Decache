@@ -1,5 +1,43 @@
 # Changelog
 
+## v22.5 (2026-11-05)
+
+### 真机第四轮 · "下载到的根本是网页"
+真机日志把真因暴露出来了：
+
+```
+P1.html has already been downloaded | [download] 100% of 6.59KiB |
+[VideoRemuxer] Remuxing video from html to mp4; Destination: .../P1.mp4 |
+ERROR: Postprocessing: Error opening input files: Invalid data found when processing input
+```
+
+**下回来的不是视频，是一个 6.59 KiB 的网页**（B 站反爬 / 未登录），yt-dlp 把它当媒体，
+再按 `--remux-video mp4` 让 ffmpeg 把 HTML 转成 mp4 → "Invalid data found"。
+更糟的是那个 `P1.html` **留在盘上**，重试时引擎直接 "has already been downloaded" 跳过 ——
+所以补下按钮点一次没用一次。
+
+修掉：
+- **认出这个真因**：`_is_html_bogus()` 看两条证据（引擎输出里的 `remuxing video from html`、
+  目录里留下的 `P{n}.html/.htm`），命中就直接给一句能行动的话：
+  「B站返回的是网页不是视频(反爬/未登录) —— 去设置页『站点凭据』填 B 站 cookie 后重试」。
+- **不再做无意义的重试**：命中后第一次就判失败（没 cookie 的话重试同一个 URL 只会再拿一次网页）。
+- **失败时清掉这一 P 的所有残留**（`P{n}.*`，含 `.html`/`.part`/`.ytdl`/分片），
+  但保留下载开始前就存在的文件（`_before`）—— 那些不能删。
+- **两份重复的报错提示清单合并成一份**（`ERROR_HINTS` / `_ERR_ZH`）：
+  2026-11-05 踩过 —— 往 `ERROR_HINTS` 里加的提示根本没生效，`friendly_err()` 用的是另一份。
+  顺带把 `requested format is not available` 的措辞改回更行动导向的
+  「这个清晰度没有可用的格式 —— 换一个清晰度, 或者选『自动(最优)』」。
+
+### 验证
+`selftest`（含 `friendly_err` 的三条断言）/ `chaos_test` / `fake_yt_dlp_test` /
+`frontcheck`(8闸) / `smoke`(12项) 全绿。
+实测：`friendly_err("Remuxing video from html to mp4")` → 中文提示；
+`_is_html_bogus()` 对含 "remuxing video from html" 的输出返回 True、对普通错误返回 False。
+
+### 还没做
+- **真正的解法是给 B 站填 cookie**（设置页 → 站点凭据）。Decache 只能把话说清楚，
+  不能替用户登录。填完 cookie 后再补下，才能下到真视频。
+
 ## v22.4 (2026-11-05)
 
 ### 真机第三轮 · 播放列表在播放页终于能看见了

@@ -86,7 +86,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "22.4"
+VERSION = "22.5"
 
 # 观看进度账本(前端每10s心跳上报; key=相对路径)
 PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_progress.json")
@@ -767,7 +767,8 @@ ERROR_HINTS = [
     ("private video", "私密视频 —— 换个公开的链接"),
     ("members-only", "会员/付费内容 —— 本工具不碰这类内容"),
     ("this video is not available", "该视频不可用(可能已删除或地区限制)"),
-    ("requested format is not available", "该站没有可用的视频格式 —— 换个链接试试"),
+    ("requested format is not available", "这个清晰度没有可用的格式 —— 换一个清晰度, 或者选「自动(最优)」"),
+    ("requested format not available", "这个清晰度没有可用的格式 —— 换一个清晰度, 或者选「自动(最优)」"),
     ("unable to extract", "解析失败 —— 更新 yt-dlp 试试"),
     ("nsig", "需要 JS runtime —— 装 nodejs(pkg install nodejs)"),
     ("signature extraction failed", "需要 JS runtime —— 装 nodejs(pkg install nodejs)"),
@@ -783,9 +784,12 @@ ERROR_HINTS = [
     # v22.2: 真机(Kiwi/Termux)下载 B 站常见 —— 引擎下回来的分片是坏的(反爬/网络断),
     # ffmpeg 合并时报 "Invalid data found when processing input"。
     # 原来这条不匹配任何提示, 用户只看到一句英文, 完全不知道该怎么办。
+    ("remuxing video from html", "B站返回的是网页不是视频(反爬/未登录) —— 去设置页「站点凭据」填 B 站 cookie 后重试"),
     ("invalid data found", "下载到的数据是坏的(站点反爬或网络中断) —— 点补下重试; 反复失败就换引擎或装 nodejs"),
     ("error opening input files", "下载到的数据是坏的(站点反爬或网络中断) —— 点补下重试; 反复失败就换引擎或装 nodejs"),
     ("unsupported url", "这个链接 yt-dlp 不支持"),
+    ("sign in", "需要登录 —— 去设置里填 cookie"),
+    ("members-only", "会员专享, 没会员下不了"),
 ]
 
 
@@ -2181,21 +2185,9 @@ _EXISTS = object()      # 哨兵: 下载成功但文件本来就在(重下场景
 
 # 引擎(yt-dlp)的英文报错, 翻成用户能行动的话。
 # 以前直接把英文原话扔给用户(还截断到 120 字), 用户只能干瞪眼。
-_ERR_ZH = [
-    ("requested format is not available",
-     "这个清晰度没有可用的格式 —— 换一个清晰度, 或者选「自动(最优)」"),
-    ("requested format not available",
-     "这个清晰度没有可用的格式 —— 换一个清晰度, 或者选「自动(最优)」"),
-    ("sign in to confirm", "这个视频要登录才能下 —— 去设置里填 cookie"),
-    ("private video", "私密视频, 没权限"),
-    ("members-only", "会员专享, 没会员下不了"),
-    ("http error 403", "被拒了(403) —— 可能要登录 cookie, 或者被限流了"),
-    ("http error 404", "链接失效了(404)"),
-    ("no space left", "磁盘满了"),
-    ("ffmpeg", "ffmpeg 报错 —— 确认机器上装了 ffmpeg"),
-    ("sign in", "需要登录 —— 去设置里填 cookie"),
-    ("unsupported url", "这个链接引擎不支持"),
-]
+# v22.5: 以前这里还有一份重复的 _ERR_ZH —— 两份清单只会改一份(2026-11-05 就踩过:
+# 往 ERROR_HINTS 里加的提示根本没生效, 用户看到的还是英文原话)。统一成一份。
+_ERR_ZH = ERROR_HINTS
 
 
 def friendly_err(reason):
@@ -2205,6 +2197,33 @@ def friendly_err(reason):
         if k in low:
             return v
     return ""
+
+
+def _is_html_bogus(folder, p, reason=""):
+    """v22.5: 判断这次失败是不是"下回来的是网页"。
+    两条证据: 引擎输出里出现 remuxing from html / 目录里留下 P{n}.html|.htm。"""
+    low = (reason or "").lower()
+    if "remuxing video from html" in low or "already been downloaded" in low and ".html" in low:
+        return True
+    try:
+        return any(f.is_file() for f in
+                   list(folder.glob(f"P{p}.html")) + list(folder.glob(f"P{p}.htm")))
+    except OSError:
+        return False
+
+
+def _cleanup_part_files(folder, p, before=()):
+    """v22.5: 清掉这一P的所有残留文件(*.part/*.ytdl/*.f* 片段, 以及下回来的 P{n}.html)。
+    不清的话: 引擎看到 P1.html 还在 → "has already been downloaded" 直接跳过 →
+    补下按钮点一次没用一次, 用户怎么点都是同一个失败。
+    `before` = 这次下载**开始前**就存在的文件 —— 那些不能删(可能是别的分P/旧文件)。"""
+    keep = set(before or ())
+    try:
+        for _f in list(folder.glob(f"P{p}.*")):
+            if _f.is_file() and _f not in keep:
+                _f.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _is_merge_err(reason):
@@ -2306,6 +2325,10 @@ def _run_part(task, p, folder):
         # 第一次失败: 换个策略再试一次
         # (以前这里是直接 return False —— 文档写着"重试1次", 实际**从来没重试过**)
         if attempt == 1:
+            if _is_html_bogus(folder, p, full):
+                # v22.5: 没有 cookie 的话, 重试同一个 URL 只会再拿一次网页 —— 直接判失败,
+                # 把"去填 cookie"这句话递到用户脸上, 别让他白等两轮。
+                break
             if q and _is_format_err(full):
                 # 这个清晰度选不出格式 -> 改用"自动(最优)"再试。
                 # 用户选清晰度是**偏好**, 不是"必须失败"的理由。
@@ -2321,8 +2344,16 @@ def _run_part(task, p, folder):
                 continue
             task["line"] = f"P{p} 失败, 重试一次..."
             continue
+        # v22.5: 真机 B 站最常见的失败 —— 引擎报 "P1.html has already been downloaded" +
+        # "Remuxing video from html to mp4"。也就是说**下回来的根本是网页**(反爬/未登录),
+        # ffmpeg 拿着 HTML 去 remux → "Invalid data found when processing input"。
+        # 原样重试永远没用(文件还在, 引擎直接 skip), 必须先清掉。
+        _html_bogus = _is_html_bogus(folder, p, full)
+        _cleanup_part_files(folder, p, task.get("_before") or ())
         # 两次都失败: 把引擎说的原话留下来(用户要看到"为什么失败", 不是"P1 失败")
         hint = friendly_err(reason)
+        if _html_bogus:
+            hint = "B站返回的是网页不是视频(反爬/未登录) —— 去设置页「站点凭据」填 B 站 cookie 后重试"
         task["error"] = (hint + " || " + reason) if hint else (reason or f"exit={proc.returncode}")
         return False
 
@@ -2463,15 +2494,7 @@ def _worker_once():
             task["failed"].append(p)
             # 失败原因在 _run_part 里已存(引擎原话); 这里兜底
             task["error"] = task.get("error") or f"P{p} failed"
-            # v22.2: 清掉引擎留下的临时分片(*.part / *.ytdl / P{n}.f* 片段) ——
-            # 不清的话补下时引擎会认为"这P已经下过了"直接跳过, 用户怎么点都是同一个坏文件。
-            try:
-                for _f in list(folder.glob(f"P{p}.*.part")) + list(folder.glob(f"P{p}.*.ytdl")) \
-                         + list(folder.glob(f"P{p}.f*")):
-                    if _f.is_file():
-                        _f.unlink(missing_ok=True)
-            except OSError:
-                pass
+
     task.pop("_before", None)
     save_tasks()                                  # 队列有变动就落盘
     if snapshot_thumb(task["bvid"]):           # 下载完顺手抽帧, 媒体库立刻有脸
@@ -4693,7 +4716,7 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
 
 </style>
 </head>
-<body data-ver="v22.4-20261105"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
+<body data-ver="v22.5-20261105"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
 <script>
 /* v21.9: 真机诊断浮层 — URL 带 ?dbg=1 时显示核心状态, Kiwi 截一张图即可回报全部 */
 (function () {
