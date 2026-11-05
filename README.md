@@ -6,7 +6,7 @@
 
 Self-hosted local media library & video player — turn "stuff in your cache" into "files you own".
 
-![version](https://img.shields.io/badge/version-v22.5-0E7490) ![python](https://img.shields.io/badge/Python-3.9%2B%20panel%20%7C%203.11%2B%20yt-dlp-3776AB?logo=python&logoColor=white) ![license](https://img.shields.io/badge/License-MIT-green) ![platform](https://img.shields.io/badge/Android%20%7C%20Win%20%7C%20macOS%20%7C%20Linux-5B6774)
+![version](https://img.shields.io/badge/version-v22.6-0E7490) ![python](https://img.shields.io/badge/Python-3.9%2B%20panel%20%7C%203.11%2B%20yt-dlp-3776AB?logo=python&logoColor=white) ![license](https://img.shields.io/badge/License-MIT-green) ![platform](https://img.shields.io/badge/Android%20%7C%20Win%20%7C%20macOS%20%7C%20Linux-5B6774)
 
 </div>
 

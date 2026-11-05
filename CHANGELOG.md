@@ -1,5 +1,32 @@
 # Changelog
 
+## v22.6 (2026-11-05)
+
+### 真机第五轮 · 站点凭据为什么等于没填
+Mike 填了 B 站 cookie 还是下到网页。查出来是**两件事叠在一起**：
+
+- **cookie 名写成了 `KEY`**：他照着输入框的提示 "KEY=VALUE" 抄，于是真的把键名写成了 `KEY`。
+  发出去的是一个叫 `KEY` 的 cookie，B 站根本不认 → 还是返回网页。
+  （cookie 名必须是站点真实的名字，B 站要 `SESSDATA` / `bili_jct` / `buvid3`。）
+- **值是 URL 编码的**：从 DevTools/地址栏复制出来的 SESSDATA 里，`,` 变成 `%2C`、`*` 变成 `%2A`。
+  原样发出去站点不认。
+
+修掉：
+- `cookie_pairs()` 现在会 **`urllib.parse.unquote()` 还原值**（`%2C`→`,`、`%2A`→`*`）。
+  实测：`KEY=4ca027cf%2C1809415352%2C5a06f%2Ab1Cj…` → `4ca027cf,1809415352,5a06f*b1Cj…`。
+- **保存时点破可疑键名**：键名是 `KEY` / `VALUE` / `COOKIE` / `TOKEN` 时，
+  返回 `warn` 并在界面弹一句「第一个键名是 KEY —— 这多半不对: 要填站点真实的 cookie 名(如 SESSDATA)」。
+- **输入框的提示改写**：placeholder 直接给 `SESSDATA=xxx; bili_jct=xxx; buvid3=xxx`，
+  说明文字写明「键名必须是站点真实的 cookie 名(别写 KEY)」。
+
+### 验证
+`selftest` / `chaos_test` / `fake_yt_dlp_test` / `frontcheck`(8闸) / `smoke`(12项) 全绿。
+实测 `cookie_pairs()` 对 URL 编码值的还原结果正确。
+
+### 还没做
+- 真正下载成功仍需**正确的 cookie**（名字对、值对，最好三件套齐全）。
+  Decache 只能把话说清楚，不能替用户登录。
+
 ## v22.5 (2026-11-05)
 
 ### 真机第四轮 · "下载到的根本是网页"

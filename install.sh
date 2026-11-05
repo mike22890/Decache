@@ -86,7 +86,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "22.5"
+VERSION = "22.6"
 
 # 观看进度账本(前端每10s心跳上报; key=相对路径)
 PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_progress.json")
@@ -531,7 +531,10 @@ def cookie_pairs(raw):
             k, v = part.split("=", 1)
             k = k.strip()
             if k:
-                out[k] = v.strip()
+                # v22.5: 从 DevTools / 地址栏复制出来的 cookie 值常是 URL 编码的
+                # (B站 SESSDATA 里有 , 和 *, 复制出来变成 %2C / %2A)。
+                # 不还原的话引擎发出去的是编码后的串, 站点不认 → 还是拿到网页。
+                out[k] = urllib.parse.unquote(v.strip())
     return out
 
 def host_of(url):
@@ -3079,7 +3082,14 @@ class Handler(BaseHTTPRequestHandler):
             SESSION_COOKIE = sd                              # 热生效, 无需重启
             COOKIE_FILE.unlink(missing_ok=True)        # 旧 cookies 缓存作废
             log_op(f"已保存 cookie ({len(pairs)} 项: {', '.join(list(pairs.keys())[:6])})")
-            return self._json({"ok": True, "keys": list(pairs.keys())[:8]})
+            # v22.5: 真机踩过 —— 用户把 cookie 名写成 "KEY"(照着输入框提示 "KEY=VALUE" 抄的),
+            # 结果发出去的是名为 KEY 的 cookie, 站点根本不信 → 还是拿到网页。
+            # 这里直接点破, 别让他又白试一轮。
+            _ks = list(pairs.keys())
+            _warn = ""
+            if _ks and _ks[0].strip().upper() in ("KEY", "VALUE", "COOKIE", "TOKEN"):
+                _warn = f"第一个键名是 {_ks[0]} —— 这多半不对: 要填站点真实的 cookie 名(如 SESSDATA), 不是 KEY"
+            return self._json({"ok": True, "keys": _ks[:8], "warn": _warn})
         if u.path == "/api/tag":
             bvid = str(body.get("bvid", ""))
             tag = str(body.get("tag", ""))[:16]
@@ -4716,7 +4726,7 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
 
 </style>
 </head>
-<body data-ver="v22.5-20261105"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
+<body data-ver="v22.6-20261105"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
 <script>
 /* v21.9: 真机诊断浮层 — URL 带 ?dbg=1 时显示核心状态, Kiwi 截一张图即可回报全部 */
 (function () {
@@ -4984,8 +4994,8 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
   </div>
   
 <div class="card">
-    <div class="meta" style="margin-bottom:8px" data-i18n="sessHint">站点登录 cookie（可选）</div>
-    <input type="text" id="cfgCookie" data-i18n-ph="sessPh" placeholder="粘贴 cookie" autocomplete="off" style="-webkit-text-security:disc">
+    <div class="meta" style="margin-bottom:8px" data-i18n="sessHint">站点登录 cookie（可选）：整串粘贴，键名用站点真实的 cookie 名（如 SESSDATA），别写 KEY</div>
+    <input type="text" id="cfgCookie" data-i18n-ph="sessPh" placeholder="SESSDATA=xxx; bili_jct=xxx; buvid3=xxx" autocomplete="off" style="-webkit-text-security:disc">
     <div class="row">
       <button class="btn sm" onclick="saveSess()" data-i18n="save">保存</button>
       <span class="meta" id="sessState"></span>
@@ -5210,7 +5220,7 @@ const I18N = {
     scanAdded:'新导入', exportOk1:'备份已生成', exportOk2:'换机: 解压覆盖到 decache 文件夹即可',
     pipNo:'此浏览器不支持画中画', fsNo:'这个浏览器不支持全屏', offline:'离线', submitFail:'提交失败', pasteFail:'剪贴板不可用',
     seqMode:'顺序', loopAll:'全部循环', loopOne:'单集循环', shuffle:'随机',
-    settings:'设置', sessHint:'站点登录 cookie（可选）：从浏览器开发者工具复制 "KEY=VALUE; ..."；域名按链接自动推断',
+    settings:'设置', sessHint:'站点登录 cookie（可选）：整串粘贴, 形如 SESSDATA=xxx; bili_jct=xxx; buvid3=xxx —— 键名必须是站点真实的 cookie 名(别写 KEY), 值里的 %2C/%2A 自动还原; 域名按链接自动推断',
     save:'保存', sessOn:'已配置', sessOff:'未配置',
     dlDone:'下载完成', dlFail:'有下载失败', nextOff:'本集不自动连播',
     fAll:'全部', fFav:'收藏', queue:'播放队列', qClear:'清空队列', qEmpty:'队列是空的',
@@ -5266,7 +5276,7 @@ const I18N = {
     scanAdded:'Imported', exportOk1:'Backup saved', exportOk2:'New device: extract over the decache folder',
     pipNo:'PiP not supported', fsNo:'Fullscreen not supported here', offline:'Offline', submitFail:'Submit failed', pasteFail:'Clipboard unavailable',
     seqMode:'Seq', loopAll:'Loop all', loopOne:'Loop one', shuffle:'Shuffle',
-    settings:'Settings', sessHint:'Site login cookie (optional): copy "KEY=VALUE; ..." from DevTools; domain inferred from the link',
+    settings:'Settings', sessHint:'Site login cookie (optional): paste the whole string, e.g. SESSDATA=xxx; bili_jct=xxx; buvid3=xxx — the name must be the real cookie name (not "KEY"); %2C/%2A are decoded automatically; domain inferred from the link',
     save:'Save', sessOn:'Configured', sessOff:'Not set',
     dlDone:'Download finished', dlFail:'Some downloads failed', nextOff:'Autoplay off for this one',
     fAll:'All', fFav:'Favorites', queue:'Queue', qClear:'Clear queue', qEmpty:'Queue is empty',
@@ -7770,6 +7780,7 @@ async function saveSess() {
     if (r.error) { toast(r.error); return; }
     $('cfgCookie').value = '';
     toast(t('cookieOk') + (r.keys?.length ? ' (' + r.keys.join(',') + ')' : ''));
+    if (r.warn) toast(r.warn);   /* v22.5: 键名可疑时直接点破 */
     loadCfg();
   } catch (e) { toast(t('cookieSaveFail')); }
 }

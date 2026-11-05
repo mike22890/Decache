@@ -1439,7 +1439,7 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
 
 </style>
 </head>
-<body data-ver="v22.5-20261105"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
+<body data-ver="v22.6-20261105"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
 <script>
 /* v21.9: 真机诊断浮层 — URL 带 ?dbg=1 时显示核心状态, Kiwi 截一张图即可回报全部 */
 (function () {
@@ -1707,8 +1707,8 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
   </div>
   
 <div class="card">
-    <div class="meta" style="margin-bottom:8px" data-i18n="sessHint">站点登录 cookie（可选）</div>
-    <input type="text" id="cfgCookie" data-i18n-ph="sessPh" placeholder="粘贴 cookie" autocomplete="off" style="-webkit-text-security:disc">
+    <div class="meta" style="margin-bottom:8px" data-i18n="sessHint">站点登录 cookie（可选）：整串粘贴，键名用站点真实的 cookie 名（如 SESSDATA），别写 KEY</div>
+    <input type="text" id="cfgCookie" data-i18n-ph="sessPh" placeholder="SESSDATA=xxx; bili_jct=xxx; buvid3=xxx" autocomplete="off" style="-webkit-text-security:disc">
     <div class="row">
       <button class="btn sm" onclick="saveSess()" data-i18n="save">保存</button>
       <span class="meta" id="sessState"></span>
@@ -1933,7 +1933,7 @@ const I18N = {
     scanAdded:'新导入', exportOk1:'备份已生成', exportOk2:'换机: 解压覆盖到 decache 文件夹即可',
     pipNo:'此浏览器不支持画中画', fsNo:'这个浏览器不支持全屏', offline:'离线', submitFail:'提交失败', pasteFail:'剪贴板不可用',
     seqMode:'顺序', loopAll:'全部循环', loopOne:'单集循环', shuffle:'随机',
-    settings:'设置', sessHint:'站点登录 cookie（可选）：从浏览器开发者工具复制 "KEY=VALUE; ..."；域名按链接自动推断',
+    settings:'设置', sessHint:'站点登录 cookie（可选）：整串粘贴, 形如 SESSDATA=xxx; bili_jct=xxx; buvid3=xxx —— 键名必须是站点真实的 cookie 名(别写 KEY), 值里的 %2C/%2A 自动还原; 域名按链接自动推断',
     save:'保存', sessOn:'已配置', sessOff:'未配置',
     dlDone:'下载完成', dlFail:'有下载失败', nextOff:'本集不自动连播',
     fAll:'全部', fFav:'收藏', queue:'播放队列', qClear:'清空队列', qEmpty:'队列是空的',
@@ -1989,7 +1989,7 @@ const I18N = {
     scanAdded:'Imported', exportOk1:'Backup saved', exportOk2:'New device: extract over the decache folder',
     pipNo:'PiP not supported', fsNo:'Fullscreen not supported here', offline:'Offline', submitFail:'Submit failed', pasteFail:'Clipboard unavailable',
     seqMode:'Seq', loopAll:'Loop all', loopOne:'Loop one', shuffle:'Shuffle',
-    settings:'Settings', sessHint:'Site login cookie (optional): copy "KEY=VALUE; ..." from DevTools; domain inferred from the link',
+    settings:'Settings', sessHint:'Site login cookie (optional): paste the whole string, e.g. SESSDATA=xxx; bili_jct=xxx; buvid3=xxx — the name must be the real cookie name (not "KEY"); %2C/%2A are decoded automatically; domain inferred from the link',
     save:'Save', sessOn:'Configured', sessOff:'Not set',
     dlDone:'Download finished', dlFail:'Some downloads failed', nextOff:'Autoplay off for this one',
     fAll:'All', fFav:'Favorites', queue:'Queue', qClear:'Clear queue', qEmpty:'Queue is empty',
@@ -4493,6 +4493,7 @@ async function saveSess() {
     if (r.error) { toast(r.error); return; }
     $('cfgCookie').value = '';
     toast(t('cookieOk') + (r.keys?.length ? ' (' + r.keys.join(',') + ')' : ''));
+    if (r.warn) toast(r.warn);   /* v22.5: 键名可疑时直接点破 */
     loadCfg();
   } catch (e) { toast(t('cookieSaveFail')); }
 }

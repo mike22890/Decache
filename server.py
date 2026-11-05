@@ -24,7 +24,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "22.5"
+VERSION = "22.6"
 
 # 观看进度账本(前端每10s心跳上报; key=相对路径)
 PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_progress.json")
@@ -469,7 +469,10 @@ def cookie_pairs(raw):
             k, v = part.split("=", 1)
             k = k.strip()
             if k:
-                out[k] = v.strip()
+                # v22.5: 从 DevTools / 地址栏复制出来的 cookie 值常是 URL 编码的
+                # (B站 SESSDATA 里有 , 和 *, 复制出来变成 %2C / %2A)。
+                # 不还原的话引擎发出去的是编码后的串, 站点不认 → 还是拿到网页。
+                out[k] = urllib.parse.unquote(v.strip())
     return out
 
 def host_of(url):
@@ -3017,7 +3020,14 @@ class Handler(BaseHTTPRequestHandler):
             SESSION_COOKIE = sd                              # 热生效, 无需重启
             COOKIE_FILE.unlink(missing_ok=True)        # 旧 cookies 缓存作废
             log_op(f"已保存 cookie ({len(pairs)} 项: {', '.join(list(pairs.keys())[:6])})")
-            return self._json({"ok": True, "keys": list(pairs.keys())[:8]})
+            # v22.5: 真机踩过 —— 用户把 cookie 名写成 "KEY"(照着输入框提示 "KEY=VALUE" 抄的),
+            # 结果发出去的是名为 KEY 的 cookie, 站点根本不信 → 还是拿到网页。
+            # 这里直接点破, 别让他又白试一轮。
+            _ks = list(pairs.keys())
+            _warn = ""
+            if _ks and _ks[0].strip().upper() in ("KEY", "VALUE", "COOKIE", "TOKEN"):
+                _warn = f"第一个键名是 {_ks[0]} —— 这多半不对: 要填站点真实的 cookie 名(如 SESSDATA), 不是 KEY"
+            return self._json({"ok": True, "keys": _ks[:8], "warn": _warn})
         if u.path == "/api/tag":
             bvid = str(body.get("bvid", ""))
             tag = str(body.get("tag", ""))[:16]

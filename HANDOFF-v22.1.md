@@ -223,3 +223,34 @@ ERROR: Postprocessing: Error opening input files: Invalid data found when proces
 - **别让失败文件留在盘上**：引擎的 "has already been downloaded" 会让重试彻底失效，
   必须清掉残留（但别删下载前就存在的好文件）。
 - **同一语义的常量别维护两份** —— 两份就一定会只改一份。
+
+
+---
+
+# 追加：v22.6（2026-11-05 当天第六轮）—— cookie 名写成了 KEY
+
+## 真因（两件事叠加）
+1. **cookie 名写成 `KEY`** —— 用户照着输入框提示 "KEY=VALUE" 抄，真把键名写成 `KEY`。
+   发出去的是名叫 `KEY` 的 cookie，站点不认。B 站要的是 `SESSDATA` / `bili_jct` / `buvid3`。
+2. **值是 URL 编码的** —— DevTools/地址栏复制出来的 SESSDATA 里 `,`→`%2C`、`*`→`%2A`。
+
+## 修法
+- `cookie_pairs()` 用 `urllib.parse.unquote()` 还原值。
+- 保存时若键名是 `KEY`/`VALUE`/`COOKIE`/`TOKEN`，返回 `warn` 并在界面点破。
+- placeholder 改成 `SESSDATA=xxx; bili_jct=xxx; buvid3=xxx`；说明写明「键名必须真实，别写 KEY」。
+
+## 正确的 cookie 填法（给 Mike）
+从已登录 B 站的浏览器 F12 → Application → Cookies → 选 `https://www.bilibili.com`，
+把这三个的 **Name 和 Value** 一起复制（值里可能有 `,` 和 `*`，直接粘，程序会还原）：
+```
+SESSDATA=<值>; bili_jct=<值>; buvid3=<值>
+```
+粘进 设置 → 站点凭据 → 保存，再点补下。
+
+## 安全提醒
+- **SESSDATA 等同于 B 站登录态**，别往聊天/截图/公开地方贴。本次对话里已经出现过一次，
+  建议用完在 B 站「退出登录」一次让旧 SESSDATA 失效。
+
+## 教训
+- **输入框提示里的 "KEY=VALUE" 是占位示例，但用户会照抄** —— 提示语必须写明「键名要真实」。
+- **从浏览器复制的值常带 URL 编码**，凡是替用户传 cookie/token 的地方都要考虑还原。
