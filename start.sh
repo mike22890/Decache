@@ -9,11 +9,15 @@
 # 修法: 所有 termux-* 调用限时(timeout) + 后台化, 主循环立刻起 server。
 set -u
 cd ~/decache || { echo "找不到 ~/decache, 先跑 install.sh"; exit 1; }
+# v22.1: 用 python3 —— Termux 的 python 包不保证有 `python` 这个命令名,
+#   缺了会 3 秒一轮空转, 面板永远起不来。
+PY=python3
+command -v python3 >/dev/null 2>&1 || PY=python
 ( timeout 10 termux-wake-lock 2>/dev/null ) &
 ( sleep 2; timeout 10 termux-notification --title "Decache" --content "媒体库运行中" --id decache --priority low 2>/dev/null ) &
 while true; do
   if ! pgrep -f "python.*server.py" >/dev/null 2>&1; then
-    python server.py
+    "$PY" server.py
   fi
   sleep 3
 done

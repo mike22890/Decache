@@ -14,7 +14,7 @@ from pathlib import Path
 
 BASE = Path(__file__).parent
 HOME = Path(tempfile.mkdtemp(prefix="decache-test-"))
-DL = HOME / "downloads"
+DL = HOME / "dlroot"
 DL.mkdir(parents=True, exist_ok=True)
 
 os.environ["HOME"] = str(HOME)
@@ -43,6 +43,10 @@ server.CONFIG_FILE = HOME / "config.ini"      # 隔离! 否则测试会写坏用
 # config.ini 也隔离: import 时 load_config() 会在项目目录生成一个(若原本不存在)→ 删掉,
 # 之后所有配置读写都指向临时 HOME, 用户真实 config.ini 一个字节都不碰
 server.CONFIG_FILE = HOME / "config.ini"
+# v22.1: 观看进度账本也要隔离 —— PROGRESS_FILE 默认落在脚本目录(项目根),
+#   不隔离的话测试里 POST /api/progress 会把用户的真实 _progress.json 写脏。
+server.PROGRESS_FILE = str(HOME / "_progress.json")
+server.PROGRESS = {}
 
 # 平台相关的"白名单外路径"——写死 Windows 路径在 Linux 上是相对路径, 会被拼进下载目录
 # (CI 在 ubuntu 上就是这么红的: safe_dir_path / browse 越权 三条全挂)
@@ -294,6 +298,45 @@ with urllib.request.urlopen(req, timeout=5) as r:
         r.headers.get("Content-Range"))
 s, b = get("/api/stream?rel=../../etc/passwd")
 chk("GET /api/stream 越权 404", s == 404, f"{s}")
+
+# ── Range 边界(v22.1: 以前会算出负 Content-Length, 客户端直接卡死) ──
+_req = urllib.request.Request(BASEURL + "/api/stream?rel=movies/a.mp4",
+                              headers={"Range": "bytes=99999999999-"})
+try:
+    with urllib.request.urlopen(_req, timeout=5) as _r:
+        chk("Range 起点越界回 416", _r.status == 416, str(_r.status))
+except urllib.error.HTTPError as _e:
+    chk("Range 起点越界回 416", _e.code == 416, str(_e.code))
+_req = urllib.request.Request(BASEURL + "/api/stream?rel=movies/a.mp4",
+                              headers={"Range": "bytes=90-10"})
+try:
+    with urllib.request.urlopen(_req, timeout=5) as _r:
+        _cl = _r.headers.get("Content-Length")
+        chk("Range 倒挂不产生负长度", int(_cl) >= 0, str(_cl))
+except urllib.error.HTTPError as _e:
+    chk("Range 倒挂不产生负长度", True, str(_e.code))
+_req = urllib.request.Request(BASEURL + "/api/stream?rel=movies/a.mp4",
+                              headers={"Range": "bytes=-10"})
+with urllib.request.urlopen(_req, timeout=5) as _r:
+    chk("Range bytes=-N 取末尾", (_r.headers.get("Content-Range") or "").startswith("bytes 90-99/"),
+        _r.headers.get("Content-Range"))
+
+# ── 观看进度账本(v22.1: 以前只有 POST 没有 GET, 前端合并服务端进度永远拿 404) ──
+_s, _b = post("/api/progress", {"path": "movies/a.mp4", "pos": 12, "dur": 100})
+chk("POST /api/progress 写成功", _s == 200, f"{_s} {_b[:80]}")
+_s, _b = get("/api/progress")
+_d = json.loads(_b) if _s == 200 else {}
+chk("GET /api/progress 读得到账本", _s == 200 and "movies/a.mp4" in _d, f"{_s} {str(_d)[:80]}")
+
+# ── 上传/导入的文件名穿越(v22.1: 前端能传带路径的名字, 会写到下载目录外) ──
+_s, _b = get("/api/upload?name=..%2F..%2Fevil.mp4")
+chk("上传不接受越界文件名", _s in (400, 404), f"{_s} {_b[:80]}")
+_src = DL / "_evil_src.mp4"
+_src.write_bytes(b"x" * 32)
+_out = server.import_local([str(_src)], "copy", {str(_src): "../../PWNED.mp4"})
+chk("导入的重命名不逃出下载目录",
+    not any(p.name == "PWNED.mp4" for p in DL.parent.glob("PWNED*")),
+    str(_out)[:120])
 
 # m3u 导入导出
 s, b = get("/api/playlist.m3u")

@@ -8,11 +8,18 @@ if grep -q $'\r' "$0" 2>/dev/null; then
 fi
 set -e; cd ~
 APP=~/decache
-OLD=~/decache
+# v22.1: 原来还有 OLD=~/decache 的"旧目录迁移"块 —— 它和 APP 是同一个目录,
+#   cp -a X X 只会报 "are the same file" 然后被 2>/dev/null 吞掉(迁移功能根本不存在)。
+#   历史版本从没换过安装目录, 升级天然是原地覆盖(配置/媒体库不动), 整块删掉。
 echo "════ 1/4 依赖 ════"
 # 死镜像自愈: librehat 等镜像仓库停在 2021, 拉新版 ffmpeg 却拉不到配套 libplacebo → 链接断裂
 if grep -rq "termux.librehat.com" "$PREFIX/etc/apt/sources.list" "$PREFIX/etc/apt/sources.list.d/" 2>/dev/null; then
-  sed -i 's|termux.librehat.com|packages.termux.dev|g' "$PREFIX/etc/apt/sources.list" "$PREFIX/etc/apt/sources.list.d/"* 2>/dev/null
+  # v22.1: 目录为空时 glob 不展开 → sed 收到字面路径退出码 2 → set -e 直接杀掉安装器。
+  #   改成逐个文件处理 + || true, 不再让这条"自愈"变成杀死安装器的那一刀。
+  sed -i 's|termux.librehat.com|packages.termux.dev|g' "$PREFIX/etc/apt/sources.list" 2>/dev/null || true
+  for _lf in "$PREFIX"/etc/apt/sources.list.d/*.list; do
+    [ -f "$_lf" ] && sed -i 's|termux.librehat.com|packages.termux.dev|g' "$_lf" 2>/dev/null || true
+  done
   echo "  ✓ 检测到过时镜像(librehat), 已切回官方源"
 fi
 # 网络自愈: 主源为空或探测不通 → 自动切清华 TUNA(国内直连快), 不让用户干等 apt 摸死镜像
@@ -27,29 +34,32 @@ fi
 pkg update -y >/dev/null 2>&1 || pkg update -y
 # 半残依赖自愈: 部分升级留下的 broken 状态全量补齐, 失败不中断安装
 pkg upgrade -y >/dev/null 2>&1 || apt-get -f install -y >/dev/null 2>&1 || true
-pkg install -y python ffmpeg termux-api || {
+# v22.1: 补 procps —— start.sh 用 pgrep 判断服务是否活着, 缺了会 3 秒一轮空转
+pkg install -y python ffmpeg termux-api procps || {
   echo "  ⚠ 依赖装失败, 尝试修复断裂依赖后重试..."
   apt-get -f install -y || true
-  pkg install -y python ffmpeg termux-api
+  pkg install -y python ffmpeg termux-api procps
 }
 # nodejs: yt-dlp 解析部分站点(尤其 YouTube)需要 JS runtime, 缺了会报解析失败
 command -v node >/dev/null 2>&1 || pkg install -y nodejs || echo "  ⚠ nodejs 没装上(某些站点解析可能失败)"
 echo "════ 2/4 引擎 ════"
-pkg install -y yt-dlp 2>/dev/null || pip install -q --upgrade yt-dlp || true
+# v22.1: Termux 官方仓库里的包名是 python-yt-dlp(不是 yt-dlp), 另有 yt-dlp-ejs。
+#   yt-dlp 2026.06.09 起解 YouTube 还要 Deno>=2.3 / Node>=22。
+pkg install -y python-yt-dlp yt-dlp-ejs deno 2>/dev/null || true
+command -v yt-dlp >/dev/null 2>&1 || pip install -q --upgrade yt-dlp || {
+  echo "  ❌ yt-dlp 没装上(Termux 包名是 python-yt-dlp, 也可 pip install yt-dlp)"
+}
 pip install -q --upgrade you-get || true
 pip install -q --upgrade yutto || true
-command -v yt-dlp >/dev/null 2>&1 && echo "  ✓ yt-dlp 就绪" || echo "  ⚠ yt-dlp 没装上(可改 config.ini 的 engine)"
+if command -v yt-dlp >/dev/null 2>&1; then
+  echo "  ✓ yt-dlp 就绪($(yt-dlp --version 2>/dev/null | head -1))"
+else
+  echo "  ⚠ yt-dlp 没装上(可改 config.ini 的 engine)"
+fi
 echo "════ 3/4 面板文件(保留媒体库/配置/已下载内容) ════"
 mkdir -p "$APP" ~/.shortcuts ~/.termux/boot
-# 旧目录迁移(一次性): 把配置/媒体库搬到新目录, 避免升级后新旧并存
-if [ -d "$OLD" ] && [ ! -f "$APP/config.ini" ]; then
-  for f in config.ini library.json playlist.json tasks.json cookies.txt; do
-    [ -f "$OLD/$f" ] && cp -a "$OLD/$f" "$APP/$f" && echo "  迁移 $f"
-  done
-  [ -d "$OLD/covers" ] && cp -a "$OLD/covers" "$APP/" 2>/dev/null && echo "  迁移 covers/"
-fi
 
-cat > "$APP"/server.py <<'PYEOF'
+cat > "$APP"/server.py.tmp <<'PYEOF'
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -76,9 +86,9 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "15.1"
+VERSION = "22.1"
 
-# v17: 观看进度记忆 (前端每10s心跳上报; key=相对路径)
+# 观看进度账本(前端每10s心跳上报; key=相对路径)
 PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_progress.json")
 PROGRESS = {}
 try:
@@ -380,19 +390,26 @@ def run_ffmpeg(args, timeout=300):
 def open_external(path):
     """跨平台外部打开文件: Windows os.startfile / macOS open / Linux xdg-open / Termux termux-open。"""
     p = str(path)
+    # v22.1: 所有外部打开都限时 + 断标准流 ——
+    #   termux-open 走 Termux:API 的 IPC, 断电重启后 IPC 未就绪时调用会**永久挂起**,
+    #   不限时就是一个卡住主线程的僵尸进程(start.sh 的策略也是"termux-* 全部限时")。
     try:
         if IS_TERMUX:
-            subprocess.Popen(["termux-open", p])
+            subprocess.run(["termux-open", p], timeout=10,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         elif IS_WIN:
             os.startfile(p)                      # noqa: S606 - Windows 专属 API
         elif IS_MAC:
-            subprocess.Popen(["open", p])
+            subprocess.run(["open", p], timeout=10,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            subprocess.Popen(["xdg-open", p])
+            subprocess.run(["xdg-open", p], timeout=10,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except Exception:
         try:
-            subprocess.Popen(["gio", "open", p])
+            subprocess.run(["gio", "open", p], timeout=10,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True
         except Exception as e:
             return False, str(e)
@@ -423,6 +440,10 @@ def diagnostics():
                      "win" if IS_WIN else "mac" if IS_MAC else "linux", ""))
     if sys.version_info < MIN_PY:
         hints.append(f"Python {sys.version_info.major}.{sys.version_info.minor} 过低, 需 ≥3.9")
+    # v22.1: 面板本体只要 3.9(Path.is_relative_to), 但下载引擎 yt-dlp 2026.10.26 起要求 ≥3.11
+    #   (3.9 于 2025.10.22 弃用, 3.10 于 2026.10.26 弃用) —— 两级口径, 别混。
+    if sys.version_info < (3, 11):
+        hints.append("下载引擎 yt-dlp 2026.10.26 起要求 Python ≥3.11(面板本体 3.9 仍能跑, 只是 pip 装不上 yt-dlp)")
     return {"platform": sys.platform, "termux": IS_TERMUX, "python": sys.version.split()[0],
             "ffmpeg": ff or "", "ffmpeg_ok": bool(ff), "hints": hints,
             "min_python": "3.9"}
@@ -1174,8 +1195,15 @@ def upload_save(name, rfile, length):
     if "." + name.rsplit(".", 1)[-1].lower() not in VIDEO_EXTS:
         return None, "只能上传视频文件", ""
     stem = name.rsplit(".", 1)[0] or "import"
+    # 名字里只留路径的一层: stem 可能是 "." / ".." / 含分隔符 → 会写到下载目录外面
+    stem = nfc(os.path.basename(stem)).strip() or "import"
+    if stem in (".", "..") or os.sep in stem or "/" in stem:
+        return None, "文件名不合法", ""
     dest_dir = DOWNLOAD_DIR / stem
     dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir = dest_dir.resolve()   # v21.9: 统一真实形态(解析 ~/storage symlink), 否则账本 relative_to 炸
+    if not dest_dir.is_relative_to(DOWNLOAD_DIR.resolve()):
+        return None, "路径不合法", ""
     dest = dest_dir / name
     i = 2
     while dest.exists():                          # 重名加序号, 决不覆盖
@@ -1220,9 +1248,10 @@ def upload_save(name, rfile, length):
     return dest, None, key
 
 
-def import_local(paths, mode):
-    """把选中的本地视频搬进面板结构: <标题>/<原文件名>, 写账本, 抽帧封面。
-    mode: 'move'(默认, 省空间) / 'copy'。文件先落地, 账本后写, 封面最后(失败无害)。"""
+def import_local(paths, mode, names=None):
+    """把选中的本地视频搬进面板结构: <新名或原文件名>, 写账本, 抽帧封面。
+    mode: 'move'(默认, 省空间) / 'copy'。names: {源路径: 新文件名}。文件先落地, 账本后写, 封面最后(失败无害)。"""
+    names = names or {}
     done, failed = [], []
     for p in (paths or [])[:200]:
         try:
@@ -1230,16 +1259,33 @@ def import_local(paths, mode):
             if not src.is_file() or src.suffix.lower() not in VIDEO_EXTS:
                 failed.append({"path": p, "err": "not a video"})
                 continue
-            stem = nfc(src.stem) or "import"
+            newname = (names.get(str(src)) or '').strip()
+            # 只留文件名本体: 前端可以传 "../../x.mp4" 这种带路径的名字 → 会写到下载目录外面
+            newname = nfc(os.path.basename(newname.replace("\\", "/"))).strip()
+            stem = nfc(Path(newname or src.name).stem) or "import"
+            stem = os.path.basename(stem).strip() or "import"
+            if stem in (".", ".."):
+                stem = "import"
             dest_dir = DOWNLOAD_DIR / stem
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / src.name
+            dest_dir = dest_dir.resolve()   # v21.9: 统一真实形态, 否则账本 relative_to 炸(symlink 双形态)
+            if not dest_dir.is_relative_to(DOWNLOAD_DIR.resolve()):
+                failed.append({"path": p, "err": "路径不合法"})
+                continue
+            dest = dest_dir / (newname or src.name)
+            if not dest.is_relative_to(dest_dir):   # 双保险: 落地路径必须在目标目录内
+                failed.append({"path": p, "err": "文件名不合法"})
+                continue
             if dest.exists():                     # 重名加序号, 决不覆盖
+                base_ext = Path(newname or src.name)
                 i = 2
-                while (dest_dir / f"{src.stem}_{i}{src.suffix}").exists():
+                while (dest_dir / f"{base_ext.stem}_{i}{base_ext.suffix}").exists():
                     i += 1
-                dest = dest_dir / f"{src.stem}_{i}{src.suffix}"
-            (shutil.move if mode == "move" else shutil.copy2)(str(src), str(dest))
+                dest = dest_dir / f"{base_ext.stem}_{i}{base_ext.suffix}"
+            try:
+                (shutil.move if mode == "move" else shutil.copy2)(str(src), str(dest))
+            except PermissionError:
+                shutil.copy2(str(src), str(dest))   # Android 11+ 共享存储禁删源文件 → 自动降级 copy(费点空间保导入成功)
         except Exception as e:
             failed.append({"path": p, "err": str(e)})
             continue
@@ -2646,6 +2692,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.wfile.write(body)
         if u.path == "/api/version":
             return self._json({"v": VERSION})
+        if u.path == "/api/progress":                 # v22.1: 观看进度账本(读侧)
+            # 以前只有 POST 写、没有 GET 读 → 前端"把服务端进度合并进本地账本"永远拿到 404,
+            # 重装/换浏览器丢进度这个功能其实是死的。
+            return self._json(PROGRESS)
         if u.path == "/api/config":
             masked = ((SESSION_COOKIE[:4] + "…" + SESSION_COOKIE[-4:]) if len(SESSION_COOKIE) > 12
                       else ("已填" if SESSION_COOKIE else ""))
@@ -2825,17 +2875,30 @@ class Handler(BaseHTTPRequestHandler):
             size = target.stat().st_size
             range_h = self.headers.get("Range", "")
             start, end = 0, size - 1
+            code = 206 if range_h else 200
             if range_h.startswith("bytes="):           # 浏览器拖动进度条会发 Range 请求
                 try:
                     s_, e_ = range_h[6:].split("-", 1)
                     if s_:
                         start = int(s_)
-                    if e_:
-                        end = min(int(e_), size - 1)
+                        # 起点超出文件 → 416(以前会算出负 Content-Length, 客户端直接卡死)
+                        if start >= size:
+                            self.send_response(416)
+                            self.send_header("Content-Range", f"bytes */{size}")
+                            self.send_header("Content-Length", "0")
+                            self.end_headers()
+                            return
+                        if e_:
+                            end = min(int(e_), size - 1)
+                    else:
+                        # bytes=-N → 最后 N 字节(以前当成从头发, 拖进度条会跳错位置)
+                        start = max(0, size - int(e_ or 0))
+                        end = size - 1
+                    if end < start:                         # bytes=500-100 这种倒挂 → 退化成整段
+                        start, end = 0, size - 1
                 except Exception:
                     start, end = 0, size - 1
             length = end - start + 1
-            code = 206 if range_h else 200
             ctype = AUDIO_CT.get(target.suffix.lower(), "video/mp4")
             self.send_response(code)
             self.send_header("Content-Type", ctype)
@@ -2862,7 +2925,7 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         if u.path == "/api/upload":                    # v22.0: 手机选视频直传(裸字节, 文件名在 query) — 必须在 JSON 解析前分流
             qs = urllib.parse.parse_qs(u.query)
-            dest, err = upload_save((qs.get("name") or [""])[0], self.rfile, length)
+            dest, err, _upkey = upload_save((qs.get("name") or [""])[0], self.rfile, length)
             if err:
                 return self._json({"error": err}, 400)
             return self._json({"ok": True, "key": "", "path": str(dest)})
@@ -2873,12 +2936,12 @@ class Handler(BaseHTTPRequestHandler):
                 body = {}
         except Exception:
             return self._json({"error": "请求格式不对(不是合法 JSON)"}, 400)
-        if u.path == "/api/import_local":              # v22.0: 本地导入执行(move/copy)
+        if u.path == "/api/import_local":              # v22.0: 本地导入执行(move/copy/重命名)
             paths = body.get("paths") or []
             if not isinstance(paths, list) or not paths:
                 return self._json({"error": "没有选中任何文件"}, 400)
-            mode = "move" if body.get("mode") == "copy" else "move"
-            out = import_local([str(x) for x in paths], mode)
+            mode = "copy" if body.get("mode") == "copy" else "move"
+            out = import_local([str(x) for x in paths], mode, body.get("names") or {})
             log_op(f"本地导入完成: {out['done']} 个, 失败 {len(out['failed'])}")
             return self._json(out)
         if u.path == "/api/redownload":                 # 重下: 先下到临时名, 成功才替换(失败不丢原文件)
@@ -2910,16 +2973,18 @@ class Handler(BaseHTTPRequestHandler):
             log_op(f"重新下载: {e.get('title', '')[:40]} P{p}")
             return self._json({"id": t["id"]})
         if u.path == "/api/progress":                   # v17 观看进度
-            if method == "POST":
-                ln = int(self.headers.get("Content-Length") or 0)
-                body = self.rfile.read(ln).decode("utf-8", "ignore") if ln else ""
-                try:
-                    d = json.loads(body)
-                    if d.get("path"):
-                        PROGRESS[str(d["path"])] = {"pos": float(d.get("pos") or 0), "dur": float(d.get("dur") or 0)}
+            if self.command == "POST":
+                # v22.1: 请求体在 _do_POST 开头已经被 read 过一次并解析成 body 了。
+                # 这里再 read 一次 → 读到空 → 解析失败; 更糟的是 rfile.read 会**阻塞**
+                # 等下一个 Content-Length 的字节, 客户端直接超时(实测 POST /api/progress timed out)。
+                d = body if isinstance(body, dict) else {}
+                if d.get("path"):
+                    try:
+                        PROGRESS[str(d["path"])] = {"pos": float(d.get("pos") or 0),
+                                                   "dur": float(d.get("dur") or 0)}
                         save_progress()
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
                 self._json({})
             else:
                 self._json(PROGRESS)
@@ -3152,8 +3217,8 @@ def main():
 if __name__ == "__main__":
     main()
 PYEOF
-
-cat > "$APP"/index.html <<'HTMLEOF'
+mv -f "$APP"/server.py.tmp "$APP"/server.py
+cat > "$APP"/index.html.tmp <<'HTMLEOF'
 ﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -3300,7 +3365,7 @@ html.gpute *{backdrop-filter:none!important;-webkit-backdrop-filter:none!importa
 h2{font-size:11px;color:var(--tx3);font-weight:600;margin:22px 0 10px;letter-spacing:1.6px;text-transform:uppercase}
 
 /* ── 页签栏(改为顶部 sticky 跟随: 原来固定在屏幕底部, 每次用都得滑到最底) ── */
-.tabbar{position:sticky;top:0;z-index:30;margin:0 auto 16px;width:max-content;
+.tabbar{position:relative;z-index:30;margin:0 auto 16px;width:max-content;
   display:flex;max-width:calc(100vw - 16px);
   background:color-mix(in srgb, var(--bg) 86%, transparent);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
   border:1px solid var(--line);border-radius:999px;padding:4px;box-shadow:0 6px 20px rgba(0,0,0,.16);
@@ -3317,9 +3382,9 @@ h2{font-size:11px;color:var(--tx3);font-weight:600;margin:22px 0 10px;letter-spa
 }
 
 /* ── 播放列表面板(缩略图+名称, 点一下就切) ── */
-#listPanel{position:fixed;right:12px;top:calc(var(--pTop,118px) + env(safe-area-inset-top));bottom:calc(96px + env(safe-area-inset-bottom));
-  z-index:150;width:min(340px,calc(100% - 24px));display:none;flex-direction:column;
-  background:color-mix(in srgb, var(--srf3) 96%, transparent);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);   /* v18: 播放器面板跟主题 */
+#listPanel{position:fixed;right:12px;z-index:200;top:calc(var(--pTop,118px) + env(safe-area-inset-top));bottom:calc(96px + env(safe-area-inset-bottom));
+  z-index:200;width:min(340px,calc(100% - 24px));display:none;flex-direction:column;
+  background:rgba(30,28,42,.97);background:color-mix(in srgb, var(--srf3) 96%, transparent);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);   /* v21.7: 老 WebView 无 color-mix → rgba 兜底, 否则播放器里面板透明隐形 */
   border:1px solid rgba(255,255,255,.13);border-radius:14px;overflow:hidden;
   box-shadow:0 16px 50px rgba(0,0,0,.5);touch-action:pan-y}
 #listPanel.show{display:flex}
@@ -3443,7 +3508,7 @@ input[type=text]::placeholder{color:var(--tx3)}
 
 /* ── 媒体库 ── */
 .libtop{display:flex;gap:8px;margin-bottom:12px;align-items:center;
-  position:sticky;top:0;z-index:25;padding:10px 2px;margin-left:-2px;margin-right:-2px;
+  position:relative;z-index:25;padding:10px 2px;margin-left:-2px;margin-right:-2px;
   background:color-mix(in srgb, var(--bg) 90%, transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
   border-radius:0 0 var(--r,10px) var(--r,10px)}   /* v22.0: 搜索框吸顶跟随, 滚多深都能搜 */
 .libtop input{flex:1}
@@ -3588,8 +3653,7 @@ input[type=text]::placeholder{color:var(--tx3)}
 .chitem .cdel{width:22px;height:22px;flex:none;border:0;background:rgba(255,255,255,.08);color:#bbb;
   border-radius:5px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
 .chitem .cdel svg.ic{width:11px;height:11px}/* ── 工具面板 ── */
-#sheet{position:fixed;left:50%;bottom:78px;transform:translateX(-50%) translateY(12px);z-index:120;
-  width:min(560px,calc(100% - 24px));max-height:72vh;display:none;flex-direction:column;
+#sheet{position:fixed;inset:0;margin:auto;width:min(560px,calc(100% - 24px));max-height:72vh;height:fit-content;z-index:120;display:none;flex-direction:column;
   background:var(--srf);border:1px solid var(--line);border-radius:16px;overflow:hidden;
   box-shadow:0 16px 50px rgba(0,0,0,.4)}
 #sheet.show{display:flex}
@@ -3627,7 +3691,9 @@ input[type=text]::placeholder{color:var(--tx3)}
 /* v21.4→v22.0: Ambient Mode 氛围光画布 — 垫在视频后面, 低分辨率+放大, 黑边变画面延伸。
    v22.0 双层交叉淡入(YouTube 官方同款 crossfade): 采样 15fps 配 320ms opacity 过渡, 省电且丝滑不闪 */
 #ambCv,#ambCv2{position:absolute;inset:0;width:100%;height:100%;z-index:0;display:none;pointer-events:none;
-  filter:saturate(1.4) brightness(.82);transform:scale(1.12);transition:opacity .32s linear}   /* 1.35硬边外扩→1.12贴身: 光从画面边缘自然长出而非贴一圈; 46px大模糊在画布内部(ctx.filter), 全屏CSS blur会拖死低端机 */
+  filter:saturate(1.4) brightness(.66);transform:scale(1.12);transition:opacity .32s linear;
+  -webkit-mask-image:radial-gradient(ellipse 75% 75% at center, transparent 34%, #000 82%);
+          mask-image:radial-gradient(ellipse 75% 75% at center, transparent 34%, #000 82%)}   /* v21.7: 中央淡出贴近视频+压暗, 帧率差导致的延迟不显眼 */
 #ambCv2{opacity:0}
 html.no-amb #ambCv,html.no-amb #ambCv2{display:none!important}   /* v22.0: 氛围光总开关(take_amb) */
 @supports not (filter: blur(4px)){#ambCv,#ambCv2{display:none!important}}
@@ -3928,20 +3994,7 @@ html[data-ui="synthwave"][data-theme="light"]{
   }
 }
 /* 场景: 落日 + 地平线辉光 + 透视网格 (纯渐变, 合成层, 不随滚动重绘) */
-html[data-ui="synthwave"] body::before{
-  content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
-  background:
-    linear-gradient(to top, rgba(255,120,50,.22), rgba(255,150,80,.08) 34%, transparent 55%),
-    conic-gradient(from 165deg at 50% 104px, transparent 0deg, rgba(255,185,95,.12) 11deg, rgba(255,228,160,.26) 17deg, rgba(255,185,95,.12) 23deg, transparent 34deg),
-    linear-gradient(180deg, rgba(255,140,60,.15), rgba(255,90,120,.05) 28%, transparent 46%),
-    radial-gradient(circle 210px at 50% 104px, rgba(255,180,80,.35), rgba(255,100,140,.16) 50%, transparent 74%),
-    radial-gradient(circle 64px at 50% 104px, #FFD319 0 34%, #FF2975 62%, #B967FF 82%, transparent 83%),
-    linear-gradient(180deg, transparent 129px, rgba(255,45,149,.55) 130px, transparent 131px),
-    radial-gradient(ellipse 90% 55% at 50% 130px, rgba(185,103,255,.28), transparent 70%),
-    repeating-linear-gradient(90deg, rgba(0,240,255,.06) 0 1px, transparent 1px 56px),
-    repeating-linear-gradient(0deg, rgba(255,45,149,.05) 0 1px, transparent 1px 56px),
-    linear-gradient(180deg, #170633 0%, #0C0221 55%);
-}
+
 /* 组件语言: 霓虹只给主元素; 标题宽字距大写; 主按钮品红+辉光; 进度条青色 */
 html[data-ui="synthwave"] h2,html[data-ui="synthwave"] .t,html[data-ui="synthwave"] .vt,
 html[data-ui="synthwave"] .logo{text-transform:uppercase;letter-spacing:.1em;
@@ -3956,10 +4009,6 @@ html[data-ui="synthwave"] .tabbar button.on{color:#00F0FF;
 html[data-ui="synthwave"] .card{border:1px solid var(--line);
   background:color-mix(in srgb, var(--srf) 82%, transparent)}
 html[data-ui="synthwave"] .cur{box-shadow:0 0 10px var(--pink)}
-html[data-ui="synthwave"][data-theme="light"] body::before{display:none}
-@media (prefers-color-scheme:light){
-  html[data-ui="synthwave"]:not([data-theme="dark"]) body::before{display:none}
-}
 
 /* ── retro · Win95 (保留) ── */
 html[data-ui="retro"]{
@@ -4045,17 +4094,7 @@ html[data-ui="pipboy"] #phead{background:linear-gradient(rgba(5,9,5,.88),rgba(5,
 
 /* ── retro · 像素庄园(星露谷×MC×WinXP 融合) ── */
 /* 星露谷: 暖木纸感面板; MC: 物品栏格硬边+内阴影; WinXP: 凸起按钮已有, 补像素云+草地天际线 */
-html[data-ui="retro"] body::before{content:"";position:fixed;left:0;right:0;bottom:0;height:120px;z-index:-1;pointer-events:none;
-  background:
-    radial-gradient(circle 7px at 12% 34%, #E8E4DA 98%, transparent),
-    radial-gradient(circle 10px at 15.5% 31%, #E8E4DA 98%, transparent),
-    radial-gradient(circle 7px at 19.5% 35%, #E8E4DA 98%, transparent),
-    radial-gradient(circle 8px at 61% 21%, #E8E4DA 98%, transparent),
-    radial-gradient(circle 11px at 64.5% 18%, #E8E4DA 98%, transparent),
-    radial-gradient(circle 7px at 68.5% 22%, #E8E4DA 98%, transparent),
-    radial-gradient(circle 6px at 85% 42%, #E8E4DA 98%, transparent),
-    radial-gradient(circle 9px at 88% 39%, #E8E4DA 98%, transparent),
-    linear-gradient(transparent 0 60px, rgba(94,157,52,.16) 60px 78px, rgba(74,130,40,.20) 78px 96px, rgba(56,102,32,.24) 96px 120px)}
+/* ── 媒体库 ── */
 html[data-ui="retro"] .card{border:2px solid #0F0E0C;border-radius:0;
   box-shadow:inset 0 0 0 2px #4B4941, inset 0 0 0 4px rgba(15,14,12,.55), 4px 4px 0 rgba(0,0,0,.4);
   background-image:linear-gradient(rgba(255,248,230,.035), rgba(0,0,0,.07))}
@@ -4097,14 +4136,15 @@ html[data-ui="synthwave"] .page::before{content:"";position:fixed;inset:0;z-inde
     radial-gradient(circle 1.5px at 83% 18%, #FFF 98%, transparent),
     radial-gradient(circle 1px at 91% 8%, #FFF 98%, transparent),
     radial-gradient(circle 2px at 96% 24%, #FFD319 98%, transparent);
-  animation:synTwk 3.6s ease-in-out infinite alternate}
+  animation:synTwk 2.4s ease-in-out infinite alternate}
 @keyframes synTwk{from{opacity:.3}to{opacity:1}}
 html[data-ui="synthwave"][data-theme="light"] .page::before{display:none}
 @media (prefers-color-scheme:light){
   html[data-ui="synthwave"]:not([data-theme="dark"]) .page::before{display:none}}
 
-/* v21.2: 透视网格地板 — 复古未来的灵魂件。transform 走合成器, reduce 归零由全局块管 */
-html[data-ui="synthwave"] .page::after{content:"";position:fixed;left:-60%;right:-60%;bottom:-6vh;
+/* v21.2: 透视网格地板 — 复古未来的灵魂件。真元素 #synFloor 挂 body 直下(fixed 视口坐标,
+   不吃 .page pageIn 动画的坐标坑); transform 走合成器, reduce 归零由全局块管 */
+#synFloor{display:none;position:fixed;left:-60%;right:-60%;bottom:-6vh;
   height:52vh;z-index:-1;pointer-events:none;
   background:
     repeating-linear-gradient(90deg, rgba(0,240,255,.18) 0 2px, transparent 2px 70px),
@@ -4112,13 +4152,67 @@ html[data-ui="synthwave"] .page::after{content:"";position:fixed;left:-60%;right
   transform:perspective(300px) rotateX(61deg);transform-origin:50% 0;
   -webkit-mask-image:linear-gradient(180deg,transparent 0,#000 26%);
           mask-image:linear-gradient(180deg,transparent 0,#000 26%)}
-@media (prefers-reduced-motion:no-preference){
-  html[data-ui="synthwave"] .page::after{animation:synFloor 1.6s linear infinite}
-  @keyframes synFloor{to{transform:perspective(300px) rotateX(61deg) translateY(58px)}}
-}
-html[data-ui="synthwave"][data-theme="light"] .page::after{display:none}
+html[data-ui="synthwave"] #synFloor{display:block}
+html[data-ui="synthwave"][data-theme="light"] #synFloor{display:none}
 @media (prefers-color-scheme:light){
-  html[data-ui="synthwave"]:not([data-theme="dark"]) .page::after{display:none}}
+html[data-ui="synthwave"]:not([data-theme="dark"]) #synFloor{display:none}}
+@media (prefers-reduced-motion:no-preference){
+html[data-ui="synthwave"] #synFloor{animation:synFloor 2.4s linear infinite}
+@keyframes synFloor{to{transform:perspective(300px) rotateX(61deg) translateY(58px)}}
+}
+
+/* ═══ v21.8: 场景层真元素化 — body::before/::after 的 fixed 在 Kiwi 老内核合成滚动时
+   错位成文档坐标(草地处文档中/底部几屏空白全是它)。全部迁到 #sceneFx(背景主层)/
+   #sceneFx2(次层: 滚动带/云), body 直下真元素, 视口坐标纯血统。 ═══ */
+#sceneFx,#sceneFx2{display:none;position:fixed;inset:0;z-index:-1;pointer-events:none}
+/* synthwave: 落日+地平线+夜幕 → sceneFx; 品红滚动细带 → sceneFx2 */
+html[data-ui="synthwave"] #sceneFx{display:block;background:
+  linear-gradient(to top, rgba(255,120,50,.22), rgba(255,150,80,.08) 34%, transparent 55%),
+  conic-gradient(from 165deg at 50% 104px, transparent 0deg, rgba(255,185,95,.12) 11deg, rgba(255,228,160,.26) 17deg, rgba(255,185,95,.12) 23deg, transparent 34deg),
+  linear-gradient(180deg, rgba(255,140,60,.15), rgba(255,90,120,.05) 28%, transparent 46%),
+  radial-gradient(circle 210px at 50% 104px, rgba(255,180,80,.35), rgba(255,100,140,.16) 50%, transparent 74%),
+  radial-gradient(circle 64px at 50% 104px, #FFD319 0 34%, #FF2975 62%, #B967FF 82%, transparent 83%),
+  linear-gradient(180deg, transparent 129px, rgba(255,45,149,.55) 130px, transparent 131px),
+  radial-gradient(ellipse 90% 55% at 50% 130px, rgba(185,103,255,.28), transparent 70%),
+  linear-gradient(180deg, #170633 0%, #0C0221 55%)}
+html[data-ui="synthwave"] #sceneFx2{display:block;background:repeating-linear-gradient(0deg,rgba(255,45,149,.07) 0 1px,transparent 1px 56px)}
+html[data-ui="synthwave"][data-theme="light"] #sceneFx,html[data-ui="synthwave"][data-theme="light"] #sceneFx2,
+html[data-ui="synthwave"]:not([data-theme="dark"]) #sceneFx,html[data-ui="synthwave"]:not([data-theme="dark"]) #sceneFx2{display:none}
+/* retro: 晚霞天空+像素太阳+草地带 → sceneFx(静态)
+   v22.1: 草地带的 linear-gradient 以前是 top-anchored(0 60px 起)→ 草地跑到了视口**顶部**,
+   顶栏正下方横着一道绿边。改成 bottom-anchored: 100% 120px 的层贴到视口底。 */
+html[data-ui="retro"] #sceneFx{display:block;background:
+  radial-gradient(circle 26px at 78% 5%, #E8E4DA 0 30%, #F5C542 32% 58%, #E8E4DA 60%, transparent 62%) 0 0/100% 100% no-repeat,
+  linear-gradient(180deg, rgba(255,190,120,.28), rgba(240,160,150,.14) 30%, rgba(160,140,180,.08) 58%, transparent 78%) 0 0/100% 100% no-repeat,
+  linear-gradient(180deg, transparent 0 60px, rgba(94,157,52,.16) 60px 78px, rgba(74,130,40,.20) 78px 96px, rgba(56,102,32,.24) 96px 120px) 0 100%/100% 120px no-repeat}
+/* mono: 纸纹颗粒+顶部微光 → sceneFx */
+html[data-ui="mono"] #sceneFx{display:block;background:
+  radial-gradient(ellipse 80% 46% at 50% -8%, rgba(255,255,255,.055), transparent 72%),
+  repeating-radial-gradient(circle at 18% 34%, rgba(255,255,255,.013) 0 1px, transparent 1px 3px)}
+/* retro: 像素云漂移层 → sceneFx2(200% 宽 translateX 循环) */
+html[data-ui="retro"] #sceneFx2{display:block;left:0;right:auto;width:200%;top:13%;bottom:auto;height:70px;opacity:.85;background:
+  radial-gradient(circle 12px at 4% 40%, #EDEAE0 98%, transparent),
+  radial-gradient(circle 16px at 5.5% 34%, #EDEAE0 98%, transparent),
+  radial-gradient(circle 11px at 7% 42%, #EDEAE0 98%, transparent),
+  radial-gradient(circle 14px at 23% 58%, #EDEAE0 98%, transparent),
+  radial-gradient(circle 18px at 25% 52%, #EDEAE0 98%, transparent),
+  radial-gradient(circle 12px at 27% 60%, #EDEAE0 98%, transparent),
+  radial-gradient(circle 13px at 41% 38%, #EDEAE0 98%, transparent),
+  radial-gradient(circle 17px at 43% 32%, #EDEAE0 98%, transparent),
+  radial-gradient(circle 11px at 45% 42%, #EDEAE0 98%, transparent)}
+@media (prefers-reduced-motion:no-preference){
+  html[data-ui="retro"] #sceneFx2{animation:retroCloud 60s linear infinite}
+  @keyframes retroCloud{to{transform:translateX(-50%)}}}
+/* geist: 三色极光 → sceneFx */
+html[data-ui="geist"] #sceneFx{display:block;background:
+  radial-gradient(38% 30% at 22% 18%,rgba(0,114,245,.16),transparent 70%),
+  radial-gradient(34% 28% at 82% 78%,rgba(255,77,141,.10),transparent 70%),
+  radial-gradient(30% 26% at 65% 25%,rgba(62,207,142,.08),transparent 70%)}
+/* catppuccin: pastel 云雾 → sceneFx */
+html[data-ui="catppuccin"] #sceneFx{display:block;background:
+  radial-gradient(36% 30% at 25% 22%,rgba(203,166,247,.14),transparent 70%),
+  radial-gradient(32% 26% at 78% 72%,rgba(245,194,231,.12),transparent 70%),
+  radial-gradient(28% 24% at 60% 30%,rgba(166,227,161,.09),transparent 70%)}
 
 /* ── catppuccin · 奶油玻璃: 毛玻璃卡 + 粉彩渐变按钮 ── */
 html[data-ui="catppuccin"] .card{background:color-mix(in srgb, var(--srf) 84%, transparent);
@@ -4140,6 +4234,19 @@ html[data-ui="geist"] .page::before{content:"";position:fixed;inset:0;z-index:-1
 html[data-ui="geist"] .tabbar button{letter-spacing:.05em;font-weight:500}
 html[data-ui="geist"] .tabbar button.on{box-shadow:inset 0 -2px 0 var(--acc)}
 html[data-ui="geist"] .card{border:1px solid var(--line);box-shadow:0 1px 2px rgba(0,0,0,.18)}
+
+/* v21.5: mono · 编辑部美学 — 顶部微光+纸纹颗粒+印刷画框, 红印章色只留给 logo */
+/* v21.8: mono 场景迁 sceneFx(见 consolidated 块), 原 body::before 删除 */
+html[data-ui="mono"] body::after{content:"";position:fixed;inset:10px;z-index:60;pointer-events:none;
+  border:1px solid rgba(255,255,255,.085)}
+
+/* v21.5: retro · 天空带+像素云漂移 — 星露谷的天上也得有活物 */
+/* v21.5b: 像素云漂移 — 动画挂在 #sceneFx2 真元素上(见上方 consolidated 块),
+   以前这里重复声明了一遍 retroCloud + 同名 @keyframes → 同一动画写两遍, 白占行数。 */
+
+/* v21.5: pipboy · CRT 曲率暗角 — 屏幕四角塌下去的既视感 */
+html[data-ui="pipboy"] body::before{content:"";position:fixed;inset:0;z-index:69;pointer-events:none;
+  background:radial-gradient(ellipse at center, transparent 56%, rgba(0,0,0,.40) 100%)}
 
 @media (prefers-reduced-motion:reduce){
   html:not(.force-fx)[data-ui="pipboy"] .logo,html:not(.force-fx)[data-ui="synthwave"] .page::before{animation:none}
@@ -4197,6 +4304,29 @@ html[data-ui="pipboy"] #gtoast{border-radius:2px;border-color:#2B4A2B;box-shadow
 html[data-ui="retro"] #gtoast{border-radius:0;border:2px solid #0F0E0C;box-shadow:4px 4px 0 rgba(0,0,0,.4),inset 0 0 0 2px #4B4941;backdrop-filter:none}
 html[data-ui="catppuccin"] #gtoast{border-color:rgba(203,166,247,.32)}
 html[data-ui="geist"] #gtoast{box-shadow:0 0 0 1px var(--edge),0 8px 28px rgba(0,0,0,.4)}
+
+/* ═══ v21.6 · 组件融合补完(mono 组件语言 + 全主题滚动条, 全吃令牌) ═══ */
+html[data-ui="mono"] #gtoast{border-radius:0;border-left:3px solid var(--acc);box-shadow:0 6px 18px rgba(0,0,0,.5);backdrop-filter:none}
+html[data-ui="mono"] ::-webkit-scrollbar{width:6px;height:6px}
+html[data-ui="mono"] ::-webkit-scrollbar-thumb{border-radius:0;background:rgba(255,255,255,.14)}
+html[data-ui="mono"] ::-webkit-scrollbar-thumb:hover{background:var(--acc)}
+html[data-ui="geist"] ::-webkit-scrollbar{width:6px;height:6px}
+html[data-ui="geist"] ::-webkit-scrollbar-thumb{border-radius:3px;background:rgba(120,140,255,.28)}
+html[data-ui="catppuccin"] ::-webkit-scrollbar{width:8px;height:8px}
+html[data-ui="catppuccin"] ::-webkit-scrollbar-thumb{border-radius:99px;background:rgba(203,166,247,.35)}
+html[data-ui="catppuccin"] ::-webkit-scrollbar-thumb:hover{background:rgba(203,166,247,.55)}
+html[data-ui="synthwave"] ::-webkit-scrollbar{width:8px;height:8px}
+html[data-ui="synthwave"] ::-webkit-scrollbar-track{background:rgba(255,45,149,.06)}
+html[data-ui="synthwave"] ::-webkit-scrollbar-thumb{border-radius:0;background:linear-gradient(180deg,#FF2D95,#00F0FF);box-shadow:0 0 8px rgba(255,45,149,.4)}
+html[data-ui="pipboy"] ::-webkit-scrollbar{width:10px;height:10px}
+html[data-ui="pipboy"] ::-webkit-scrollbar-track{background:#0E180E;border-left:1px solid #1D331D}
+html[data-ui="pipboy"] ::-webkit-scrollbar-thumb{border-radius:0;border:1px solid #2B4A2B;background:#3FA34F}
+/* mono 播放器: 黑玻璃 + 红缝进度 */
+html[data-ui="mono"] #pctrl{background:rgba(10,10,12,.86);border-color:rgba(255,255,255,.1);border-radius:0}
+html[data-ui="mono"] #pfill{background:var(--acc);box-shadow:0 0 10px rgba(255,45,85,.35)}
+html[data-ui="mono"] #pknob{border-radius:0;border-color:var(--acc)}
+html[data-ui="mono"] #pctrl .icbtn.on{color:var(--acc)}
+html[data-ui="mono"] #ptitle{letter-spacing:.04em}
 
 /* 顶栏底缘融合: 主题色缝线 + 场景透上来(原来 88% 近实色, 交界是一条硬线) */
 .appbar{background:color-mix(in srgb, var(--bg) 58%, transparent);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px)}
@@ -4274,7 +4404,7 @@ html[data-ui="retro"] #pfill{background:repeating-linear-gradient(90deg,#7BC96F 
 #pmodal:has(#pctrl.hide) #pCPlay{opacity:0;pointer-events:none}   /* v17.5: 显隐100%跟随控制条, 单击/pause等野路径也罩 */
 
 /* v17.4: 播放器打开期间直接隐藏场景层 — 全屏被不透明 pmodal 盖死本就看不清; fixed 层(video 解码层冲突黑屏的元凶, retro 静态层也中招)一律摘除 */
-body.pm-open::before,body.pm-open::after,body.pm-open .page::before,body.pm-open .page::after{display:none!important}
+body.pm-open::before,body.pm-open::after,body.pm-open .page::before,body.pm-open .page::after,body.pm-open #synFloor,body.pm-open #sceneFx,body.pm-open #sceneFx2{display:none!important}
 
 /* v15: 窄屏紧凑 — 控制条/头部按钮缩小, pipboy括号收起, 最大化不再被挤出屏 */
 @media (max-width:560px){
@@ -4296,8 +4426,7 @@ body.pm-open::before,body.pm-open::after,body.pm-open .page::before,body.pm-open
 .btn:active,.icbtn:active,.chip:active,.tabbar button:active{transform:scale(.93)}
 .tabbar button:active{transform:scale(.9)}
 
-/* 页面切换: 淡入+上浮(覆盖旧 fadein) */
-@keyframes pageIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+/* 页面切换: 淡入+上浮(覆盖旧 fadein) —— @keyframes pageIn 只在前面定义一次, 这里不重复 */
 .page{animation:pageIn .32s cubic-bezier(.22,1,.36,1)}
 
 /* 输入框聚焦: 主题色光环 */
@@ -4348,7 +4477,7 @@ input:focus-visible,select:focus-visible,button:focus-visible{outline:none;
   @keyframes shim{to{background-position:-200% 0}}
   #gtoast.show{animation:tin .22s ease both}
   @keyframes tin{from{opacity:0;transform:translate(-50%,12px)}}
-  html[data-ui="pipboy"] .logo b::after{animation:uiblink 1.1s steps(1) infinite}
+  html[data-ui="pipboy"] .logo b::after{animation:uiblink 1.4s steps(1) infinite}
   .track:hover{height:8px}
 }
 @media (prefers-reduced-motion:reduce){
@@ -4357,7 +4486,7 @@ input:focus-visible,select:focus-visible,button:focus-visible{outline:none;
 
 
 /* ═══════ 播放器 v8.2 · 全面重设计 (纯样式层, JS 逻辑零改动) ═══════ */
-body{font-family:var(--font)}
+body{font-family:var(--font);overflow-x:hidden}
 #fxCanvas{position:absolute;z-index:2;pointer-events:none;display:none;background:#000}
 #pctrl{left:10px;right:10px;bottom:calc(10px + env(safe-area-inset-bottom));
   background:rgba(10,10,14,.72);backdrop-filter:blur(16px) saturate(1.4);-webkit-backdrop-filter:blur(16px) saturate(1.4);
@@ -4390,7 +4519,7 @@ html[data-ui="synthwave"] .cov img,html[data-ui="synthwave"] .pv img,
 html[data-ui="synthwave"] .cthumb,html[data-ui="synthwave"] #pthumbImg img{
   filter:saturate(1.22) contrast(1.07)}
 html[data-ui="synthwave"] .vcard:hover .cov img{filter:saturate(1.35) contrast(1.1) brightness(1.05)}
-html[data-ui="pipboy"] .cov img,html[data-ui="pipboy"] .pv img,html[data-ui="pipboy"] .cthumb{
+html[data-ui="pipboy"] .cov img,html[data-ui="pipboy"] .pv img,html[data-ui="pipboy"] .cthumb,html[data-ui="pipboy"] .histcard img{
   filter:sepia(1) hue-rotate(55deg) saturate(2.2) brightness(.82) contrast(1.05)}
 html[data-ui="retro"] .cov img,html[data-ui="retro"] .pv img,html[data-ui="retro"] .cthumb{
   filter:contrast(.96) sepia(.2) saturate(.9)}
@@ -4398,6 +4527,9 @@ html[data-ui="catppuccin"] .cov img,html[data-ui="catppuccin"] .pv img,html[data
   filter:saturate(1.09) brightness(1.03)}
 html[data-ui="geist"] .cov img,html[data-ui="geist"] .pv img,html[data-ui="geist"] .cthumb{
   filter:saturate(1.05) contrast(1.02)}
+/* v21.7: pipboy 封面统一绿磷光单色 — 彩色封面在终端主题里是穿帮 */
+html[data-ui="pipboy"] .cov img,html[data-ui="pipboy"] .pv img,html[data-ui="pipboy"] .cthumb{
+  filter:grayscale(1) sepia(1) saturate(2.4) hue-rotate(62deg) brightness(1.02)}
 
 /* ═══ 播放列表折叠分组 (v8.5, 与媒体库同款交互) ═══ */
 .plgrp{cursor:pointer}
@@ -4414,41 +4546,27 @@ html[data-ui="geist"] .cov img,html[data-ui="geist"] .pv img,html[data-ui="geist
 
 /* ═══════ v9.1 · 主题动态场景(仅 transform/opacity, 合成器路径) ═══════ */
 /* synthwave: 前景网格滚动层(body::after, z 与 pipboy 扫描线错开使用) */
-html[data-ui="synthwave"] body::after{content:"";position:fixed;left:0;right:0;top:0;
-  height:calc(100% + 112px);z-index:-1;pointer-events:none;
-  background:repeating-linear-gradient(0deg,rgba(255,45,149,.07) 0 1px,transparent 1px 56px)}
+/* v21.8: 滚动细带迁 sceneFx2 */
 @media (prefers-reduced-motion:no-preference){
-  html[data-ui="synthwave"] body::after{animation:synRoll 3.2s linear infinite}
-  @keyframes synRoll{to{transform:translateY(56px)}}
-  html[data-ui="synthwave"] body::before{animation:synPulse 5.5s ease-in-out infinite}
-  @keyframes synPulse{50%{opacity:.82}}
+  html[data-ui="synthwave"] #sceneFx{animation:synPulse 5.5s ease-in-out infinite}
+  @keyframes synPulse{50%{opacity:.62}}
+  html[data-ui="synthwave"] #sceneFx2{animation:synRoll 3.2s linear infinite}
   html[data-ui="synthwave"] .btn{animation:synBtn 2.8s ease-in-out infinite}
-  @keyframes synBtn{50%{box-shadow:0 0 22px rgba(255,45,149,.65)}}
+  @keyframes synBtn{50%{box-shadow:0 0 34px rgba(255,45,149,.95),0 0 64px rgba(0,240,255,.28)}}
+  @keyframes synRoll{to{transform:translateY(56px)}}
 
   /* geist: 三色极光漂移 + 主按钮扫光 */
-  html[data-ui="geist"] body::before{content:"";position:fixed;inset:-20%;z-index:-1;pointer-events:none;
-    background:
-      radial-gradient(38% 30% at 22% 18%,rgba(0,114,245,.16),transparent 70%),
-      radial-gradient(34% 28% at 82% 78%,rgba(255,77,141,.10),transparent 70%),
-      radial-gradient(30% 26% at 65% 25%,rgba(62,207,142,.08),transparent 70%)}
-  html[data-ui="geist"] body::before{animation:geistDrift 26s ease-in-out infinite alternate}
-  @keyframes geistDrift{to{transform:translate3d(4%,3%,0) scale(1.06)}}
+  /* v21.8: mono 场景迁 sceneFx(见 consolidated 块) */
   html[data-ui="geist"] .btn{background-image:linear-gradient(110deg,transparent 40%,rgba(255,255,255,.22) 50%,transparent 60%);
     background-size:250% 100%;background-position:130% 0;transition:background-position .7s ease,transform .12s}
   html[data-ui="geist"] .btn:hover{background-position:-130% 0}
 
-  /* catppuccin:  pastel 云雾慢漂 */
-  html[data-ui="catppuccin"] body::before{content:"";position:fixed;inset:-20%;z-index:-1;pointer-events:none;
-    background:
-      radial-gradient(36% 30% at 25% 22%,rgba(203,166,247,.14),transparent 70%),
-      radial-gradient(32% 26% at 78% 72%,rgba(245,194,231,.12),transparent 70%),
-      radial-gradient(28% 24% at 60% 30%,rgba(166,227,161,.09),transparent 70%)}
-  html[data-ui="catppuccin"] body::before{animation:catDrift 30s ease-in-out infinite alternate}
-  @keyframes catDrift{to{transform:translate3d(-4%,4%,0) scale(1.08)}}
+  html[data-ui="geist"] #sceneFx{animation:geistDrift 26s ease-in-out infinite alternate}
+  @keyframes geistDrift{to{transform:translate3d(4%,3%,0) scale(1.06)}}
 
-  /* pipboy: 扫描线微闪 + 慢滚 */
-  html[data-ui="pipboy"] body::after{animation:pipFlick 4s steps(12) infinite,pipRoll 9s linear infinite}
-  @keyframes pipFlick{0%,100%{opacity:1}50%{opacity:.94}}
+  /* pipboy: 扫描线慢滚 */
+  html[data-ui="pipboy"] body::after{animation:pipFlick 5s steps(12) infinite,pipRoll 9s linear infinite}
+  @keyframes pipFlick{0%,100%{opacity:1}50%{opacity:.96}}
   @keyframes pipRoll{to{transform:translateY(3px)}}
 }
 
@@ -4503,7 +4621,44 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
 
 </style>
 </head>
-<body data-ver="v15.1-20261024">
+<body data-ver="v22.1-20261104"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
+<script>
+/* v21.9: 真机诊断浮层 — URL 带 ?dbg=1 时显示核心状态, Kiwi 截一张图即可回报全部 */
+(function () {
+  try {
+    if (location.search.indexOf('dbg=1') < 0) return;
+    var el = document.createElement('div');
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:rgba(0,0,0,.85);color:#0f0;font:11px/1.5 monospace;padding:6px 8px;white-space:pre-wrap;pointer-events:none';
+    document.addEventListener('DOMContentLoaded', function () {
+      document.body.appendChild(el);
+      setInterval(function () {
+        var v = document.getElementById('pvideo');
+        var ps = document.getElementById('pstage');
+        var doc = document.documentElement;
+        var kids = [];
+        for (var i = 0; i < document.body.children.length; i++) {
+          var k = document.body.children[i];
+          if (k.offsetHeight > 200 && k.id !== 'app' && k.id) kids.push(k.id + ':' + Math.round(k.offsetHeight) + 'px');
+        }
+        var vv = window.visualViewport;
+        var fcv = document.getElementById('fxCanvas');
+        var vr = v && v.getBoundingClientRect ? v.getBoundingClientRect() : null;
+        var fr = fcv && fcv.style.display !== 'none' ? fcv.getBoundingClientRect() : null;
+        var th = document.documentElement.getAttribute('data-theme');
+        var ui = document.documentElement.getAttribute('data-ui');
+        el.textContent = 'ver:' + (document.body.getAttribute('data-ver') || '?')
+          + ' ui:' + ui + ' theme:' + th
+          + ' | v:' + (v ? 'rs' + v.readyState + ' ' + (v.videoWidth || 0) + 'x' + (v.videoHeight || 0) + ' t=' + (v.currentTime || 0).toFixed(1) + (v.error ? ' ERR' + v.error.code : '') : 'null')
+          + ' | vRect:' + (vr ? Math.round(vr.width) + 'x' + Math.round(vr.height) : '-')
+          + ' | fxCv:' + (fr ? Math.round(fr.left) + ',' + Math.round(fr.top) + ' ' + Math.round(fr.width) + 'x' + Math.round(fr.height) : 'off')
+          + ' | vv.scale:' + (vv ? vv.scale.toFixed(2) : '-') + ' vvW:' + (vv ? Math.round(vv.width) : '-')
+          + ' | win:' + window.innerWidth + 'x' + window.innerHeight + ' docW:' + Math.round(doc.scrollWidth) + ' docH:' + Math.round(doc.scrollHeight)
+          + ' | 高块: ' + (kids.join(' ') || '-');
+      }, 500);
+    });
+  } catch (e) {}
+})();
+</script>
 
 <!-- SVG 图标库(内联 · 零外部资源) -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -4719,6 +4874,9 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
         <span class="chip" data-uiopt="synthwave" data-i18n="uiSynth">复古未来</span>
         <span class="chip" data-uiopt="retro" data-i18n="uiRetro">复古</span>
         <span class="chip" data-uiopt="pipboy" data-i18n="uiPip">终端</span>
+        <!-- v22.1: 「自适应」chip 已删 —— mauto 主题在 v22.0 就被移除了(JS 侧喂色逻辑 mautoTick 也没了),
+             但这颗 chip 忘了摘。点它会把 data-ui 设成 mauto → 主题只剩半截 CSS,
+             而且 take_ui=mauto 还被存进 localStorage(下次启动才被白名单打回 mono)。 -->
         <span class="chip" id="fxAllChip" title="省电模式/系统减动效会强制关闭主题动效,此开关强制全开">特效全开</span>
       </span>
     </div>
@@ -4822,7 +4980,7 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
 <div id="selbar" class="selbar">
   <span id="selCount">已选 0</span>
   <span class="spacer"></span>
-  <button class="btn ghost sm" onclick="selAll()"><span data-i18n="selAll">全选</span></button>
+  <button class="btn ghost sm" onclick="selAllLib()"><span data-i18n="selAll">全选</span></button>
   <button class="btn ghost sm" onclick="selFav()"><span data-i18n="selFav">收藏</span></button>
   <button class="btn danger sm" onclick="selDelete()"><span data-i18n="selDel">删除</span></button>
   <button class="btn ghost sm" onclick="toggleSelMode()"><span data-i18n="selExit">退出</span></button>
@@ -5120,15 +5278,12 @@ function prunePos() {
    上次看了 40 分钟的老片永远压过昨天看了 2 分钟的新片 → 卡片万年不动。
    现在另存一张带时间戳的账本, 取 **最近一次** 看的; 看完的自动跳过。 */
 const HIST_KEY = 'take_hist_v1';
-let _histMigrated = false;
 function histLoad() {
   let raw = null;
   try { raw = localStorage.getItem(HIST_KEY); } catch (e) {}
   if (raw) { try { const a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
-  if (_histMigrated) return [];
   /* 老用户第一次升到 v6.17: 旧进度键没有时间戳, 只能按"看到第几秒"倒序搬进账本,
      at 记 0 → 永远排在有时间戳的记录后面。不搬的话卡片会突然空掉。 */
-  _histMigrated = true;
   let out = [];
   try {
     const ks = [];
@@ -5142,6 +5297,9 @@ function histLoad() {
       .slice(0, 40);
     if (out.length) histSave(out);
   } catch (e) {}
+  /* v22.1: 以前有个 _histMigrated 一次性锁, 页面启动时第一次 histLoad() 没找到旧键
+     就把锁扣上 → 之后旧键(比如另一个还开着的旧版标签页)再出现也永远搬不进来。
+     锁删掉: 账本为空就重扫一遍 take_pos_*, 搬到了就写回账本, 下次 raw 命中直接返回。 */
   return out;
 }
 function histSave(a) { try { localStorage.setItem(HIST_KEY, JSON.stringify(a.slice(0, 40))); } catch (e) {} }
@@ -5149,6 +5307,7 @@ function histSave(a) { try { localStorage.setItem(HIST_KEY, JSON.stringify(a.sli
 function savePos(rel, t, d) {
   try { localStorage.setItem('take_pos_' + rel, t); } catch (e) {}
   if (!rel) return;
+  prunePos();                 // v22.1: take_pos_* 键每看一个新视频就多一条, 不裁剪会撑爆 localStorage 配额
   const a = histLoad().filter(x => x && x.r !== rel);
   a.unshift({ r: rel, t: Math.round(t || 0), d: Math.round(d || 0), at: Date.now() });
   histSave(a);       // 账本就这么大(≤40 条), 每次整写比"算增量"简单也不会错
@@ -5325,6 +5484,7 @@ async function download(partsOverride) {
 /* ═══ 任务 ═══ */
 let LAST_TASKS = [];
 let _lastPending = new Map();     // 完成检测: 上轮 pending 中消失的 id → toast
+let _lastTasksHtml = '';          // v22.1: 上次渲染的 HTML, 用来避免 3 秒轮询无脑重建 DOM
 async function refreshTasks() {
   const ts = await api('/api/tasks');
   LAST_TASKS = ts;
@@ -5336,14 +5496,14 @@ async function refreshTasks() {
     else if (cur?.status_code === 'partial') toast(`${t('dlFail')} · ${(cur.title || '').slice(0, 26)}`);
   }
   _lastPending = pending;
-  $('tasks').innerHTML = ts.length ? ts.slice().reverse().map(x => {
+  const html = ts.length ? ts.slice().reverse().map(x => {
     const m = /([\d.]+)%/.exec(x.line || '');
     const retry = (x.status_code === 'partial' && x.failed?.length)
       ? `<button class="btn sm" data-retry="${x.id}">↻</button>` : '';
     const cancel = (x.status_code === 'downloading' || x.status_code === 'queued')
       ? `<button class="btn danger sm" data-cancel="${x.id}">✕</button>` : '';
     return `<div class="card tcard"><div class="tt">${esc(x.title || x.bvid)}
-      <span class="pill ${x.status_code}">${t('st')[x.status] || x.status}</span>
+      <span class="pill ${esc(x.status_code || '')}">${esc(t('st')[x.status] || x.status || '')}</span>
       <span class="pct">${m ? m[1] + '%' : ''}</span></div>
       <div class="ln">${esc(x.line || '')}</div>
       ${x.error ? `<div class="errbox">${esc(x.error)}${x.error_hint ? `<div class="ehint">${esc(x.error_hint)}</div>` : ''}</div>` : ''}
@@ -5353,6 +5513,12 @@ async function refreshTasks() {
   }).join('') : `<div class="empty"><span class="big"><svg class="ic"><use href="#i-inbox"/></svg></span>
       <div>${t('noTask')}</div>
       <div class="emptyActs"><button class="btn sm" onclick="switchTab('dl')">${t('goDl')}</button></div></div>`;
+  /* v22.1: 内容没变就别碰 DOM —— 3 秒轮询每轮都重建整块 tasks,
+     会打断滚动位置和点击中的按钮(用户点"取消"结果按钮被换掉了)。 */
+  if (html !== _lastTasksHtml) {
+    _lastTasksHtml = html;
+    $('tasks').innerHTML = html;
+  }
 }
 const renderTasks = refreshTasks;
 $('tasks').addEventListener('click', e => {
@@ -5476,12 +5642,15 @@ function applyTheme() {
   localStorage.setItem('take_theme', THEME);
 }
 /* ═══ UI 主题包 (v8): data-ui 换肤, 明暗照旧归 data-theme ═══ */
+/* v22.1: 主题白名单提成常量 —— applyUiTheme() 里也要用(运行时校验),
+   免得两处各写一份、改一处忘另一处。mauto 已于 v22.0 移除, 不在名单里。 */
+const UI_THEMES = ['mono','geist','catppuccin','synthwave','retro','pipboy'];
 let UI_THEME = localStorage.getItem('take_ui') || 'mono';
 if (UI_THEME === 'refactor') UI_THEME = 'geist';      /* v7 存档迁移 */
 if (UI_THEME === '8bit') UI_THEME = 'synthwave';      /* v7 存档迁移 */
 /* v10.2: 智障保护 — 无效值回退 mono */
-if (['mono','geist','catppuccin','synthwave','retro','pipboy'].indexOf(UI_THEME) < 0) UI_THEME = 'mono';
-/* v17 自适应主题已删除(v22.0): 旧存档 take_ui=mauto 由下方白名单回退 mono */
+if (UI_THEMES.indexOf(UI_THEME) < 0) UI_THEME = 'mono';
+/* v17 自适应主题已删除(v22.0): 旧存档 take_ui=mauto 由上方白名单回退 mono */
 
 /* v19.9: 着色器定期保养 — 每60秒(播放中)无缝重建纹理对象, Chrome 的 video-texture 路径
    重走一遍干净初始化, 清掉"越用越卡"的渐进累积(ml5/Chromium 案例: GPU 进程随时长劣化)。
@@ -5503,6 +5672,9 @@ window._fxCare = setInterval(() => {
 }, 60000);   /* v19.10: 60s一清 */
 
 function applyUiTheme() {
+  /* v22.1: 白名单校验搬进函数里 —— 以前只在初始化时校验一次,
+     之后任何一次 UI_THEME 赋值都能塞进非法值(旧存档 take_ui=mauto 就够把主题打成半残)。 */
+  if (UI_THEMES.indexOf(UI_THEME) < 0) UI_THEME = 'mono';
   document.documentElement.setAttribute('data-ui', UI_THEME);
   localStorage.setItem('take_ui', UI_THEME);
   const rs = document.documentElement.style;
@@ -5518,7 +5690,29 @@ function applyUiTheme() {
     if ($('pmodal').classList.contains('open') && pv && pv.getAttribute('src') &&
         !pv.paused && !$('pstage').classList.contains('audio')) {
       setTimeout(() => {
-        try { reattachVideo(); nudgeDecoder(); } catch (e) {}
+        try {
+          /* v21.9: Kiwi 真机实测 DOM 重插会打乱视频绘制(画面放大) — 换 pause/play 循环
+             重建解码表面(无 DOM 操作), 450ms 后 2D 抓帧验黑, 真黑才动 DOM 重插。 */
+          const wasP = pv.paused;
+          if (!wasP) pv.pause();
+          setTimeout(() => {
+            try {
+              if (!wasP) pv.play().catch(function() {});
+              setTimeout(() => {
+                const tc = document.createElement('canvas'); tc.width = 8; tc.height = 8;
+                const c2 = tc.getContext('2d');
+                let black = false;
+                try {
+                  c2.drawImage(pv, 0, 0, 8, 8);
+                  const d = c2.getImageData(0, 0, 8, 8).data;
+                  let lit = 0; for (let i = 0; i < d.length; i += 4) if (d[i] + d[i+1] + d[i+2] > 30) lit++;
+                  black = lit === 0;
+                } catch (e) { black = true; }
+                if (black) { reattachVideo(); nudgeDecoder(); if (typeof fxFit === 'function') fxFit(); }
+              }, 500);
+            } catch (e) {}
+          }, 400);
+        } catch (e) {}
       }, 700);
     }
   } catch (e) { /* 初始化早于播放器模块时静默跳过 */ }
@@ -5536,6 +5730,11 @@ const applyFxAll = () => {
   const chip = $('fxAllChip'); if (chip) chip.classList.toggle('on', on);
 };
 applyFxAll();
+
+/* v21.9: 播放列表/列表面板挪进 pmodal — Kiwi 老内核 z-index 跨 body 兄弟排序不可靠,
+   DOM 移进去后靠 pmodal 内部顺序压视频层, 播放页里必定可见。fixed 定位不受父级影响。 */
+/* v21.9c: 列表面板回 body 直下 — v21.9 的 visibility 穿透方案让 Kiwi 老内核的 video
+   表面在隐藏/恢复循环里不复活(切视频转圈/播的还是上一个), 宁可回到 z-index 方案 */
 $('fxAllChip').onclick = () => {
   localStorage.setItem('take_forcefx', FX_ALL_ON() ? '0' : '1');
   applyFxAll();
@@ -5669,6 +5868,15 @@ function fxFit() {
   const w = Math.max(2, Math.round(vEl.videoWidth * scale));
   const h = Math.max(2, Math.round(vEl.videoHeight * scale));
   const dpr = Math.min(window.devicePixelRatio || 1, 2.0);   /* v19.3: 原生清晰度 — 用户点名不降画质, DPR 上限恢复到 2.0 */
+  if (fxCv.width === Math.max(2, Math.round(w * dpr)) && fxCv.height === Math.max(2, Math.round(h * dpr))) {
+    /* 背板尺寸没变 → 只更新定位, 不碰 width/height(不重分配纹理) */
+    fxCv.style.transform = 'translateZ(0)';
+    fxCv.style.left = ((sw - w) / 2) + 'px';
+    fxCv.style.top = ((sh - h) / 2) + 'px';
+    fxCv.style.width = w + 'px';
+    fxCv.style.height = h + 'px';
+    return;
+  }
   fxCv.style.transform = 'translateZ(0)';   /* v19.8: 合成层快路径(Android 实测+35%, web_search:269#9) */
   fxCv.style.left = ((sw - w) / 2) + 'px';
   fxCv.style.top = ((sh - h) / 2) + 'px';
@@ -5820,7 +6028,8 @@ fxPopSync();
   vEl.addEventListener('pause', fxStop);
   vEl.addEventListener('emptied', fxStop);
   vEl.addEventListener('loadedmetadata', () => { if (fxCv && fxCv.style.display !== 'none') fxFit(); });
-  window.addEventListener('resize', () => { if (fxCv && fxCv.style.display !== 'none') fxFit(); });
+  /* v22.1: resize 节流统一到下面那一个监听器(本块不再单独注册)——
+     两个监听器共用一个 rAF 标志会互相吞掉对方的重绘。 */
   document.addEventListener('visibilitychange', () => { fxStop(); fxStart(); });
 }
 fxSyncUI();
@@ -5915,36 +6124,15 @@ function libJump(top) { window.scrollTo({ top: top ? 0 : document.body.scrollHei
 
 /* ═══ v22.0: 本地视频导入 — 列候选/选文件/移动或复制/抽帧封面 ═══ */
 async function openImport() {
-  openSheet(t('importLocal'), '<div class="empty">…</div>');
-  let d;
-  try { d = await api('/api/import_list'); } catch (e) { $('sheetBody').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; return; }
-  const cs = d.cands || [];
-  if (!cs.length) {
-    $('sheetBody').innerHTML =
-      `<div class="empty">${t('impEmpty')}</div>
-       <button class="btn" style="width:100%;margin-top:14px" onclick="impPick()">⤓ ${t('impPick')}</button>
-       <div style="font-size:11.5px;color:var(--tx3);margin-top:8px;text-align:center">${t('impPickHint')}</div>`;
-    return;
-  }
-  $('sheetBody').innerHTML =
-    `<div class="row" style="margin-bottom:10px">
-       <button class="btn ghost sm" onclick="impPick()">⤓ ${t('impPick')}</button>
-       <span style="flex:1"></span>
-       <button class="btn ghost sm" onclick="impSelAll(true)">${t('all')}</button>
-       <button class="btn ghost sm" onclick="impSelAll(false)">${t('none')}</button>
-       <span style="flex:1"></span>
-       <label style="font-size:12.5px;color:var(--tx2);white-space:nowrap"><input type="radio" name="impm" value="move" checked> ${t('impMove')}</label>
-       <label style="font-size:12.5px;color:var(--tx2);white-space:nowrap"><input type="radio" name="impm" value="copy"> ${t('impCopy')}</label>
-     </div>` +
-    cs.map(c => `<label class="improw"><input type="checkbox" class="impc" value="${esc(c.path)}" checked>
-       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</span>
-       <span style="font-size:11px;color:var(--tx3);flex:none">${c.size}MB</span></label>`).join('') +
-    `<button class="btn" style="width:100%;margin-top:12px" onclick="impGo()">${t('impGo')} (<span id="impN">${cs.length}</span>)</button>`;
-  $('sheetBody').querySelectorAll('.impc').forEach(cb => cb.onchange = impCount);
-  impCount();
+  /* v21.9b: 全盘扫描导入(import_list/import_local)在共享存储上 rglob 全盘 = 阻塞报废源,
+     按 Mike 需求移除 — 只留「从手机选视频直传」链路(/api/upload, 修复解包后可用)。 */
+  openSheet(t('importLocal'),
+    `<button class="btn" style="width:100%;padding:14px;font-size:14px" onclick="impPick()">⤓ ${t('impPick')}</button>
+     <div style="font-size:11.5px;color:var(--tx3);margin-top:10px;text-align:center">${t('impPickHint')}</div>
+     <div style="font-size:11.5px;color:var(--tx3);margin-top:6px;text-align:center">Termux 需已装 ffmpeg: pkg install ffmpeg（导入后自动抽封面）</div>`);
 }
-function impCount() { const n = document.querySelectorAll('.impc:checked').length; const el = $('impN'); if (el) el.textContent = n; }
-function impSelAll(on) { document.querySelectorAll('.impc').forEach(cb => { cb.checked = on; }); impCount(); }
+/* v21.9c: 孤儿清理 — 全盘扫描 UI 已移除, impCount/impSelAll/impGo 全部删除(闸1 impN 悬空) */
+
 /* v22.0: 从手机/电脑直接选视频文件上传 — 不依赖扫描目录配置, 空态也能真导入 */
 async function impPick() {
   const inp = document.createElement('input');
@@ -5967,19 +6155,7 @@ async function impPick() {
   };
   inp.click();
 }
-async function impGo() {
-  const paths = [...document.querySelectorAll('.impc:checked')].map(cb => cb.value);
-  if (!paths.length) return;
-  const mode = (document.querySelector('input[name="impm"]:checked') || {}).value || 'move';
-  const btn = $('sheetBody').querySelector('button.btn:not(.ghost)');
-  if (btn) { btn.disabled = true; btn.textContent = '…'; }
-  try {
-    const out = await api('/api/import_local', { paths, mode });
-    const fail = out.failed && out.failed.length ? `, ${out.failed.length} ${t('impFail2')}` : '';
-    $('sheetBody').innerHTML = `<div class="empty">${t('impDone')}: ${out.done}${fail}</div>`;
-    loadLib();
-  } catch (e) { $('sheetBody').innerHTML = `<div class="empty">${esc(errText(e))}</div>`; }
-}
+/* v21.9c: impGo(全盘扫描导入) 已移除 — 该链路会 rglob 全手机存储 */
 document.addEventListener('click', e => {
   const c = e.target.closest('[data-colc]');
   if (!c) return;
@@ -5987,15 +6163,17 @@ document.addEventListener('click', e => {
   if (LIBC) localStorage.setItem('take_cols', LIBC); else localStorage.removeItem('take_cols');
   libColsSync();
 });
-window.addEventListener('scroll', () => {
+/* v22.1: scroll 监听删掉 —— 它和下面 MutationObserver 做的是同一件事(按 page-lib.active
+   显示/隐藏媒体库浮球导航)。留着只是每次滚动都读一次 classList, 白花开销。 */
+function libNavSync() {
   const nav = $('libNav');
   if (nav) nav.style.display = $('page-lib').classList.contains('active') ? 'flex' : 'none';
-}, { passive: true });
+}
 /* 进媒体库页即显示浮球组(旧版滚 420px 才出现 = 用户以为按钮不存在) */
 new MutationObserver(() => {
-  const nav = $('libNav');
-  if (nav) nav.style.display = $('page-lib').classList.contains('active') ? 'flex' : 'none';
+  libNavSync();
 }).observe($('page-lib'), { attributes: true, attributeFilter: ['class'] });
+libNavSync();
 libColsSync();
 
 /* ═══ 媒体库多选(批量删除/收藏) ═══ */
@@ -6055,7 +6233,18 @@ function syncPanelTop() {
   if (!r.height) return;          // 播放器还没开时量到 0, 别把值清零(否则浮层会盖住顶栏)
   document.documentElement.style.setProperty('--pTop', Math.round(r.height) + 'px');
 }
-window.addEventListener('resize', syncPanelTop);
+/* v22.1: resize 节流 —— 手机键盘弹收起会连发几十次 resize,
+   每次都 getBoundingClientRect(强制重排) + setProperty。改成 rAF 合并, 一帧只做一次。
+   fxFit 也并进来: 它也要读 clientWidth, 拖窗口时每帧重排一次外加重分配 GPU 背板。 */
+let _resizeTk = 0;
+window.addEventListener('resize', () => {
+  if (_resizeTk) return;
+  _resizeTk = requestAnimationFrame(() => {
+    _resizeTk = 0;
+    syncPanelTop();
+    if (fxCv && fxCv.style.display !== 'none') fxFit();
+  });
+});
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', syncPanelTop);
 else syncPanelTop();
 
@@ -6410,6 +6599,7 @@ $('browseList').addEventListener('click', e => {
     FLAT = [{rel, vd:{title: rel.split(/[\\/]/).pop()}, p:{p:1, name:''}}];
     startPart(0);
     $('pmodal').classList.add('open'); document.body.classList.add('pm-open'); setTimeout(() => { if (typeof repairSurface === 'function') repairSurface(); }, 60);
+    if (typeof ambResume === 'function') ambResume();   /* v22.1: 氛围光 rAF 现在只在播放器开着时续, 开播时点火 */
   syncPanelTop();
   }
 });
@@ -6695,6 +6885,7 @@ function openRel(rel) {
   if (i < 0) { FLAT = [{rel, vd: {title: rel.split(/[\\/]/).pop()}, p: {p: 1, name: ''}}]; i = 0; }
   startPart(i);
   $('pmodal').classList.add('open'); document.body.classList.add('pm-open'); setTimeout(() => { if (typeof repairSurface === 'function') repairSurface(); }, 60);
+  if (typeof ambResume === 'function') ambResume();   /* v22.1: 氛围光 rAF 只在播放器开着时续, 开播点火 */
   syncPanelTop();
   poke();                        // 控制条立刻显示, 别让用户干等
   renderList();                  // 播放列表面板同步刷新
@@ -6704,7 +6895,6 @@ function openRel(rel) {
       localStorage.setItem('take_hint_done', '1'); }, 4200);
   }
 }
-function partRel(i) { return FLAT[i].rel; }
 const fmtDur = s => { s = Math.max(0, Math.floor(s || 0));
   return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
 
@@ -6732,7 +6922,10 @@ function startPart(i) {
   const {rel, vd, p} = FLAT[i];
   $('ptitle').textContent = vd.title || p.name;
   $('psub').textContent = `P${p.p ?? i + 1} ${p.name ?? ''} · ${i + 1}/${FLAT.length}`;
-  v.src = '/api/stream?rel=' + encodeURIComponent(rel);
+  /* v21.9c: 换片先彻底断旧流(pause+清 src+load), 新 URL 带 cache-buster —
+     同一 URL 重赋值不触发 reload, 老 WebView 旧流未 abort = 播的还是上一个 */
+  try { v.pause(); v.removeAttribute('src'); v.load(); } catch (e) {}
+  v.src = '/api/stream?rel=' + encodeURIComponent(rel) + '&t=' + Date.now();
   v.playbackRate = RATES[RATE_I];
   $('pRate').textContent = RATES[RATE_I] + 'x';
   const saved = parseFloat(localStorage.getItem(posKey(rel)) || 0);
@@ -7329,19 +7522,29 @@ setInterval(() => {
    24x14 重绘成本可忽略, 双层交叉淡入在此分辨率纯属自杀: 每 66ms 强制互换两层
    opacity, 320ms 过渡永远爬不完 = 高频狂闪(2026-11-03 真机实锤, YouTube 同款
    crossfade 只适合大图, 小画布直接画就完事)。暂停冻结最后帧; 页面隐藏 rAF 停摆。═══ */
+/* v22.1: 氛围光的点火函数(见下方 IIFE)—— openVideo 时调用, 让 rAF 只在播放器开着时续。
+   顶层 let 而不是 window.属性: 闸2 追踪顶层声明, window.属性赋值它看不见。 */
+let ambResume = null;
 (function () {
   const cv = $('ambCv'); if (!cv) return;
   const cx = cv.getContext('2d'); if (!cx) return;
-  let last = 0, shown = null;
+  let last = 0, shown = null, raf = 0;
   function tick(ts) {
-    requestAnimationFrame(tick);
+    raf = 0;
     const now = ts || 0;
-    if (now - last < 66) return;               /* 15fps 采样上限: 氛围光要氛围不要流畅 */
+    if (now - last < 66) { raf = requestAnimationFrame(tick); return; }  /* 15fps 采样上限: 氛围光要氛围不要流畅 */
     last = now;
     try {
+      /* want = 该不该继续跑(播放器开着且有源); show = 这一帧能不能画(视频元数据就绪) */
+      const want = $('pmodal').classList.contains('open') && v && v.getAttribute('src') &&
+                   !$('pstage').classList.contains('audio');
+      if (!want) {                                  /* 播放器没开 → 彻底停 rAF, 不再续 */
+        if (shown !== false) { shown = false; cv.style.display = 'none'; }
+        return;
+      }
+      raf = requestAnimationFrame(tick);            /* 只要播放器开着就续(暂停时也续, 靠 paused 分支冻结) */
       const show = !document.documentElement.classList.contains('no-amb') &&
-                   $('pmodal').classList.contains('open') && v && v.getAttribute('src') &&
-                   !$('pstage').classList.contains('audio') && v.readyState >= 2 && v.videoWidth;
+                   v.readyState >= 2 && v.videoWidth;
       if (show !== shown) {                    /* 开关/开合状态变化才碰 display, 避免每帧改样式 */
         shown = show;
         cv.style.display = show ? 'block' : 'none';
@@ -7353,7 +7556,9 @@ setInterval(() => {
       try { cx.filter = 'none'; } catch (e) {}
     } catch (e) {}
   }
-  requestAnimationFrame(tick);
+  /* v22.1: 以前这个 rAF 从页面加载一直自续到关页 —— 播放器没开也 60fps 唤醒,
+     手机端纯白耗电。改成"播放器开着才续", 由 openVideo 调 ambResume() 点火。 */
+  ambResume = function () { if (!raf) { last = 0; raf = requestAnimationFrame(tick); } };
 })();
 
 function onForeground() {
@@ -7532,8 +7737,8 @@ loadLan(); loadCreds();
 </body>
 </html>
 HTMLEOF
-
-cat > "$APP"/start.sh <<'SHEOF'
+mv -f "$APP"/index.html.tmp "$APP"/index.html
+cat > "$APP"/start.sh.tmp <<'SHEOF'
 #!/data/data/com.termux/files/usr/bin/bash
 # decache · 一键启动(前台保活)
 # 为什么前台跑: Android 的前台服务有通知, 系统不会像后台进程那样随手杀。
@@ -7545,17 +7750,21 @@ cat > "$APP"/start.sh <<'SHEOF'
 # 修法: 所有 termux-* 调用限时(timeout) + 后台化, 主循环立刻起 server。
 set -u
 cd ~/decache || { echo "找不到 ~/decache, 先跑 install.sh"; exit 1; }
+# v22.1: 用 python3 —— Termux 的 python 包不保证有 `python` 这个命令名,
+#   缺了会 3 秒一轮空转, 面板永远起不来。
+PY=python3
+command -v python3 >/dev/null 2>&1 || PY=python
 ( timeout 10 termux-wake-lock 2>/dev/null ) &
 ( sleep 2; timeout 10 termux-notification --title "Decache" --content "媒体库运行中" --id decache --priority low 2>/dev/null ) &
 while true; do
   if ! pgrep -f "python.*server.py" >/dev/null 2>&1; then
-    python server.py
+    "$PY" server.py
   fi
   sleep 3
 done
 SHEOF
-
-cat > "$APP"/boot.sh <<'BOOTEOF'
+mv -f "$APP"/start.sh.tmp "$APP"/start.sh
+cat > "$APP"/boot.sh.tmp <<'BOOTEOF'
 #!/data/data/com.termux/files/usr/bin/bash
 # decache · 开机自启(Termux:Boot 调用)
 # 安装: 装 Termux:Boot(F-Droid) → 把这个脚本软链/复制到 ~/.termux/boot/
@@ -7566,8 +7775,8 @@ export PATH="$PREFIX/bin:$PATH"
 sleep 8                                  # 等系统网络/存储就绪
 bash ~/decache/start.sh >/dev/null 2>&1 &
 BOOTEOF
-
-cat > "$APP"/start.bat <<'BATEOF'
+mv -f "$APP"/boot.sh.tmp "$APP"/boot.sh
+cat > "$APP"/start.bat.tmp <<'BATEOF'
 @echo off
 chcp 65001 >nul
 cd /d %~dp0
@@ -7575,8 +7784,8 @@ start "" http://127.0.0.1:8765
 python server.py
 pause
 BATEOF
-
-cat > "$APP"/selftest.py <<'PYEOF2'
+mv -f "$APP"/start.bat.tmp "$APP"/start.bat
+cat > "$APP"/selftest.py.tmp <<'PYEOF2'
 ﻿"""decache 自测: 起真 server.py, 打端点, 断言。假 HOME 隔离, 无网无 cookie。
 用法: python selftest.py   (在项目目录下跑)
 """
@@ -7593,7 +7802,7 @@ from pathlib import Path
 
 BASE = Path(__file__).parent
 HOME = Path(tempfile.mkdtemp(prefix="decache-test-"))
-DL = HOME / "downloads"
+DL = HOME / "dlroot"
 DL.mkdir(parents=True, exist_ok=True)
 
 os.environ["HOME"] = str(HOME)
@@ -7622,6 +7831,10 @@ server.CONFIG_FILE = HOME / "config.ini"      # 隔离! 否则测试会写坏用
 # config.ini 也隔离: import 时 load_config() 会在项目目录生成一个(若原本不存在)→ 删掉,
 # 之后所有配置读写都指向临时 HOME, 用户真实 config.ini 一个字节都不碰
 server.CONFIG_FILE = HOME / "config.ini"
+# v22.1: 观看进度账本也要隔离 —— PROGRESS_FILE 默认落在脚本目录(项目根),
+#   不隔离的话测试里 POST /api/progress 会把用户的真实 _progress.json 写脏。
+server.PROGRESS_FILE = str(HOME / "_progress.json")
+server.PROGRESS = {}
 
 # 平台相关的"白名单外路径"——写死 Windows 路径在 Linux 上是相对路径, 会被拼进下载目录
 # (CI 在 ubuntu 上就是这么红的: safe_dir_path / browse 越权 三条全挂)
@@ -7873,6 +8086,45 @@ with urllib.request.urlopen(req, timeout=5) as r:
         r.headers.get("Content-Range"))
 s, b = get("/api/stream?rel=../../etc/passwd")
 chk("GET /api/stream 越权 404", s == 404, f"{s}")
+
+# ── Range 边界(v22.1: 以前会算出负 Content-Length, 客户端直接卡死) ──
+_req = urllib.request.Request(BASEURL + "/api/stream?rel=movies/a.mp4",
+                              headers={"Range": "bytes=99999999999-"})
+try:
+    with urllib.request.urlopen(_req, timeout=5) as _r:
+        chk("Range 起点越界回 416", _r.status == 416, str(_r.status))
+except urllib.error.HTTPError as _e:
+    chk("Range 起点越界回 416", _e.code == 416, str(_e.code))
+_req = urllib.request.Request(BASEURL + "/api/stream?rel=movies/a.mp4",
+                              headers={"Range": "bytes=90-10"})
+try:
+    with urllib.request.urlopen(_req, timeout=5) as _r:
+        _cl = _r.headers.get("Content-Length")
+        chk("Range 倒挂不产生负长度", int(_cl) >= 0, str(_cl))
+except urllib.error.HTTPError as _e:
+    chk("Range 倒挂不产生负长度", True, str(_e.code))
+_req = urllib.request.Request(BASEURL + "/api/stream?rel=movies/a.mp4",
+                              headers={"Range": "bytes=-10"})
+with urllib.request.urlopen(_req, timeout=5) as _r:
+    chk("Range bytes=-N 取末尾", (_r.headers.get("Content-Range") or "").startswith("bytes 90-99/"),
+        _r.headers.get("Content-Range"))
+
+# ── 观看进度账本(v22.1: 以前只有 POST 没有 GET, 前端合并服务端进度永远拿 404) ──
+_s, _b = post("/api/progress", {"path": "movies/a.mp4", "pos": 12, "dur": 100})
+chk("POST /api/progress 写成功", _s == 200, f"{_s} {_b[:80]}")
+_s, _b = get("/api/progress")
+_d = json.loads(_b) if _s == 200 else {}
+chk("GET /api/progress 读得到账本", _s == 200 and "movies/a.mp4" in _d, f"{_s} {str(_d)[:80]}")
+
+# ── 上传/导入的文件名穿越(v22.1: 前端能传带路径的名字, 会写到下载目录外) ──
+_s, _b = get("/api/upload?name=..%2F..%2Fevil.mp4")
+chk("上传不接受越界文件名", _s in (400, 404), f"{_s} {_b[:80]}")
+_src = DL / "_evil_src.mp4"
+_src.write_bytes(b"x" * 32)
+_out = server.import_local([str(_src)], "copy", {str(_src): "../../PWNED.mp4"})
+chk("导入的重命名不逃出下载目录",
+    not any(p.name == "PWNED.mp4" for p in DL.parent.glob("PWNED*")),
+    str(_out)[:120])
 
 # m3u 导入导出
 s, b = get("/api/playlist.m3u")
@@ -8255,8 +8507,8 @@ print("\n== 结果 ==")
 print("全部通过 ✅" if ok else "有失败 ❌")
 sys.exit(0 if ok else 1)
 PYEOF2
-
-cat > "$APP"/HANDOVER.md <<'MDEOF'
+mv -f "$APP"/selftest.py.tmp "$APP"/selftest.py
+cat > "$APP"/HANDOVER.md.tmp <<'MDEOF'
 # decache · AI 交接书 (HANDOVER) · v6.17
 
 > 本文档写给接手本项目的 AI 或人类维护者。读完第 0/5/6 节即可安全动手。
@@ -8325,8 +8577,9 @@ Data-integrity rules that everything else depends on:
 
 ```bash
 python3 -m py_compile server.py selftest.py chaos_test.py fake_yt_dlp_test.py
-sed -n '/<script>/,/<\/script>/p' index.html | sed '1d;$d' > /tmp/check.js
-node --check /tmp/check.js
+# v22.1: index.html 有多个 <script> 块 —— 老的 sed 管道只取第一块(还把中间的标签吐出来),
+# node --check 直接报 "Unexpected token '<'"。改成逐块抽取再拼。
+node -e 'const fs=require("fs"),vm=require("vm");const s=fs.readFileSync("index.html","utf8");const b=[...s.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]);if(!b.length)process.exit(1);try{new vm.Script(b.join("\n;\n"));}catch(e){console.error(e.message);process.exit(1);}'
 python3 selftest.py && python3 chaos_test.py && python3 fake_yt_dlp_test.py
 node frontcheck.mjs && node smoke.mjs
 node sync_install.mjs
@@ -8766,8 +9019,8 @@ exclude_dirs =         # 扫描排除（逗号分隔的路径片段，命中即�
 ```bash
 # 1) 语法闸
 python3 -m py_compile server.py selftest.py chaos_test.py fake_yt_dlp_test.py
-sed -n '/<script>/,/<\/script>/p' index.html | sed '1d;$d' > /tmp/check.js
-node --check /tmp/check.js
+# v22.1: index.html 多个 <script> 块 → 老 sed 管道只取第一块, node --check 会报 "Unexpected token '<'"
+node -e 'const fs=require("fs"),vm=require("vm");const s=fs.readFileSync("index.html","utf8");const b=[...s.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]);if(!b.length)process.exit(1);try{new vm.Script(b.join("\n;\n"));}catch(e){console.error(e.message);process.exit(1);}'
 
 # 2) 四套自动化测试(全离线, 不碰用户数据)
 python3 selftest.py          # 190 项: 端点/白名单/全局存在性/队列/路径/UA/封面/批量/清晰度/标签/报错翻译/仅音频/数据安全
@@ -9275,8 +9528,8 @@ fxEnsure() 已挂 `webglcontextlost`(preventDefault+fxStop) / `webglcontextresto
 3. Chrome 自身演进 — 零拷贝 video texture 是 Chromium 团队持续投入方向, 可能某天自愈
 桌面端 Chrome 的着色器流畅度待用户验证(可能只有 Android 病灶)。
 MDEOF
-
-cat > "$APP"/manifest.json <<'MJSON'
+mv -f "$APP"/HANDOVER.md.tmp "$APP"/HANDOVER.md
+cat > "$APP"/manifest.json.tmp <<'MJSON'
 {
   "name": "Decache — 本地媒体库与播放器",
   "short_name": "Decache",
@@ -9298,8 +9551,8 @@ cat > "$APP"/manifest.json <<'MJSON'
   ]
 }
 MJSON
-
-cat > "$APP"/sw.js <<'SWEOF'
+mv -f "$APP"/manifest.json.tmp "$APP"/manifest.json
+cat > "$APP"/sw.js.tmp <<'SWEOF'
 // sw.js — service worker: 只缓存"外壳"(图标/manifest/页面壳)
 // 绝不动 /api/* —— 里面是媒体流和用户数据, 缓存了就是灾难
 const CACHE = 'decache-shell-v2';
@@ -9333,7 +9586,7 @@ self.addEventListener('fetch', e => {
   }
 });
 SWEOF
-
+mv -f "$APP"/sw.js.tmp "$APP"/sw.js
 mkdir -p "$APP/icons"
 cat > "$APP/icons/icon-192.png.b64" <<'Iicon-192.pngB64'
 iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAYAAABS3GwHAAACzklEQVR42u3YsQnDQBQFwWtA4Frd
@@ -9351,7 +9604,7 @@ IAEg3RIABEofPwACwCACQIoCgEDp4wdAABhGZQAQKH38ACgPAAKljx8A5QFAoPTxA6A8AAiUPn4A
 lAcAgdLHD4Hyxw+B8scPgPIAIFD6+CFQ/vghUP74IVD++CFQ/vhBUP7wIZDjh0COHwQ5fBDk8EGQ
 wwdBDh8GOXogtPTBfwD82JLUfO+JfgAAAABJRU5ErkJggg==
 Iicon-192.pngB64
-base64 -d "$APP/icons/icon-192.png.b64" > "$APP/icons/icon-192.png" 2>/dev/null && rm -f "$APP/icons/icon-192.png.b64"
+if base64 -d "$APP/icons/icon-192.png.b64" > "$APP/icons/icon-192.png.tmp" 2>/dev/null && [ -s "$APP/icons/icon-192.png.tmp" ]; then mv -f "$APP/icons/icon-192.png.tmp" "$APP/icons/icon-192.png"; rm -f "$APP/icons/icon-192.png.b64"; else echo "  ⚠ 图标 icon-192.png 解码失败, PWA 图标可能缺失"; rm -f "$APP/icons/icon-192.png.tmp" "$APP/icons/icon-192.png.b64"; fi
 cat > "$APP/icons/icon-512.png.b64" <<'Iicon-512.pngB64'
 iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAYAAAD0eNT6AAAM9klEQVR42u3WwY3CQBBFQSdgiVjJ
 hlTNAUQCIA4gT7+yVAmw23/etvmW//b98gD4N+vr83nEAcSDz+ehBxAGPo89AKLA58EHQBD4PPoA
@@ -9414,7 +9667,7 @@ ePx9QgAAD79PBADg8fcJAQA8/D4hAICH3ycEAPDw+4QAAB5+nxAAwMPvEwIAePh9QgDAw+/zCQEA
 D7/PJwYAPPo+nxgA8Oj7fGIAwKPv84kBAI++zycIADz4Pp8oAPDY+3zCAMBDf5LvCfNpZxT2/bU5
 AAAAAElFTkSuQmCC
 Iicon-512.pngB64
-base64 -d "$APP/icons/icon-512.png.b64" > "$APP/icons/icon-512.png" 2>/dev/null && rm -f "$APP/icons/icon-512.png.b64"
+if base64 -d "$APP/icons/icon-512.png.b64" > "$APP/icons/icon-512.png.tmp" 2>/dev/null && [ -s "$APP/icons/icon-512.png.tmp" ]; then mv -f "$APP/icons/icon-512.png.tmp" "$APP/icons/icon-512.png"; rm -f "$APP/icons/icon-512.png.b64"; else echo "  ⚠ 图标 icon-512.png 解码失败, PWA 图标可能缺失"; rm -f "$APP/icons/icon-512.png.tmp" "$APP/icons/icon-512.png.b64"; fi
 cat > "$APP/icons/icon-maskable-512.png.b64" <<'Iicon-maskable-512.pngB64'
 iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAYAAAD0eNT6AAAKrklEQVR42u3WwU0DQRBEUSdgiVjJ
 hlSXA4gDEkJgWHt2p3vqHV4CpZb6X67XpzcAIMvFCAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAE
@@ -9467,7 +9720,7 @@ AAEAAAgAAEAAAAACAAAQAACAAAAABAAAIAAAAAEAAAgAAEAAAAACAAAQAACAAAAAAWAEABAAAIAA
 AAAEAAAgAAAAAQAACAAAQAAAAAIAABAAAIAAAAAEAAAw1DvuxsaHECHHGAAAAABJRU5ErkJggg==
 
 Iicon-maskable-512.pngB64
-base64 -d "$APP/icons/icon-maskable-512.png.b64" > "$APP/icons/icon-maskable-512.png" 2>/dev/null && rm -f "$APP/icons/icon-maskable-512.png.b64"
+if base64 -d "$APP/icons/icon-maskable-512.png.b64" > "$APP/icons/icon-maskable-512.png.tmp" 2>/dev/null && [ -s "$APP/icons/icon-maskable-512.png.tmp" ]; then mv -f "$APP/icons/icon-maskable-512.png.tmp" "$APP/icons/icon-maskable-512.png"; rm -f "$APP/icons/icon-maskable-512.png.b64"; else echo "  ⚠ 图标 icon-maskable-512.png 解码失败, PWA 图标可能缺失"; rm -f "$APP/icons/icon-maskable-512.png.tmp" "$APP/icons/icon-maskable-512.png.b64"; fi
 cat > "$APP/icons/apple-touch-icon.png.b64" <<'Iapple-touch-icon.pngB64'
 iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAYAAAA9zQYyAAACl0lEQVR42u3cMQrCUBRFwWwg4Frd
 jVuNRYKdpQjK57z5cDZw3zRpsm2Lv32/nVqrzYMVeogFN8SCG2SBDbLysB1IGdiOogRqh1AGtvGV
@@ -9483,21 +9736,29 @@ gQYaaAENtIAGWkADDTTQkMMLtIAGWkADLaCBBhpooIEGWkADLaCBFtAS0BLQEtACWgJaAloCWnoD
 UpiBVg401Ephhlo5zEArBxpqpTBDrRxmqJXDDLVymKFWDjPUymGGWjnMUCuHGWzlIEOtJGawlYMM
 tpKQwVYSMtxKIoYb4n+9C+ijARcGH1xRAAAAAElFTkSuQmCC
 Iapple-touch-icon.pngB64
-base64 -d "$APP/icons/apple-touch-icon.png.b64" > "$APP/icons/apple-touch-icon.png" 2>/dev/null && rm -f "$APP/icons/apple-touch-icon.png.b64"
+if base64 -d "$APP/icons/apple-touch-icon.png.b64" > "$APP/icons/apple-touch-icon.png.tmp" 2>/dev/null && [ -s "$APP/icons/apple-touch-icon.png.tmp" ]; then mv -f "$APP/icons/apple-touch-icon.png.tmp" "$APP/icons/apple-touch-icon.png"; rm -f "$APP/icons/apple-touch-icon.png.b64"; else echo "  ⚠ 图标 apple-touch-icon.png 解码失败, PWA 图标可能缺失"; rm -f "$APP/icons/apple-touch-icon.png.tmp" "$APP/icons/apple-touch-icon.png.b64"; fi
 
 echo "════ 4/4 完成 ════"
 # 开机自启(Termux:Boot): 装了 Termux:Boot 就自动配, 没装就提示一句
-if pm list packages 2>/dev/null | grep -q "com.termux.boot"; then
+# v22.1: pm 加 timeout —— pm 慢/挂住时会把安装器卡在这一步出不来
+if timeout 20 pm list packages 2>/dev/null | grep -q "com.termux.boot"; then
   cp "$APP/boot.sh" ~/.termux/boot/decache-boot.sh && chmod +x ~/.termux/boot/decache-boot.sh
   echo "  ✓ 已配置开机自启(~/.termux/boot/decache-boot.sh)"
 else
   echo "  · 想开机自启: 装 Termux:Boot(F-Droid), 再跑一次本脚本"
 fi
 # 桌面小部件(Termux:Widget): 点一下就开面板
-if pm list packages 2>/dev/null | grep -q "com.termux.widget"; then
+if timeout 20 pm list packages 2>/dev/null | grep -q "com.termux.widget"; then
   mkdir -p ~/.shortcuts
   printf '%s\n' '[{"name":"Decache 媒体库","cmd":"bash ~/decache/start.sh","icon":"terminal","bg":"#09090B","terms":["bash","-c","bash ~/decache/start.sh; sleep 1; termux-open http://127.0.0.1:8765"]}]' > ~/.shortcuts/decache.json
   echo "  ✓ 已生成桌面小部件(Termux:Widget 里可见)"
+fi
+# v22.1: Termux:API 是**应用**(com.termux.api), termux-api 只是它的 CLI 包。
+#   只装 CLI 不装应用 → wake-lock/notification 全部静默失效, Android 12+ 会杀后台。
+if timeout 20 pm list packages 2>/dev/null | grep -q "com.termux.api"; then
+  echo "  ✓ Termux:API 应用已装(休眠锁/通知可用)"
+else
+  echo "  · 想要后台保活: 另装 Termux:API 应用(F-Droid), 再跑一次本脚本"
 fi
 echo ""
 echo "启动:   bash ~/decache/start.sh"

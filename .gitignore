@@ -4,6 +4,7 @@ cookies.txt
 cookies/
 library.json
 library.corrupt-*.json
+_progress.json
 playlist.json
 tasks.json
 covers/

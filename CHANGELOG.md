@@ -1,5 +1,28 @@
 # Changelog
 
+## v22.1 (2026-11-04)
+
+### 审计修复 · Audit fixes
+本次对整个仓库做了一次自审（后端 / 前端 / 安装器 / CI / 文档），修掉的真问题：
+
+- **后端**：`/api/progress` 只有 POST 没有 GET → 前端「把服务端进度合并进本地账本」永远拿到 404，重装/换浏览器丢进度这条功能是死的。补 GET 端点。
+- **后端**：POST `/api/progress` 在 `_do_POST` 开头已把请求体读过一次，这里又 `rfile.read()` 一次 → 读空 + **阻塞等下一段字节**，客户端直接超时。改为复用已解析的 `body`。
+- **后端**：`Range` 解析有洞 —— `bytes=99999999999-` 会算出负 `Content-Length`（客户端卡死），`bytes=500-100` 倒挂，`bytes=-N`（取末尾 N 字节）被当成从头发。改为 416 / 退化成整段 / 正确取末尾。
+- **后端**：上传与本地导入的文件名可以带路径（`../../x.mp4`）→ 会写到下载目录**外面**。现在只取文件名本体，并校验落地路径必须在下载目录内。
+- **前端**：`index.html` 有两个 `<script>` 块之后，`frontcheck.mjs` / `smoke.mjs` / CI 的语法检查全都只抓**第一块**（37 行的诊断浮层）→ 主脚本 2600 行从未被检查过。三个工具改成抓全部块。CI 的 `sed` 管道本来就已因此报 `Unexpected token '<'`（CI 会红）。
+- **前端**：「继续观看」账本迁移有个一次性锁 `_histMigrated`，页面启动时第一次 `histLoad()` 没找到旧键就把锁扣上 → 之后旧键再出现也永远搬不进来。锁删除。
+- **前端**：`retro` 主题的草地渐变是 top-anchored → 草地跑到了视口**顶部**，顶栏正下方横着一道绿边。改为 bottom-anchored。
+- **前端**：`mauto`（自适应）主题在 v22.0 已移除，但设置里的「自适应」chip 忘了摘 → 点了只剩半截主题，还把 `take_ui=mauto` 写进 localStorage。chip 删除。
+- **前端**：`pipboy` 扫描线闪烁动画 `pipFlick` 在 v21.8 迁移场景层时被删了（交接手稿却写着「已恢复」）。补回。
+- **版本**：`server.py` 的 `VERSION` 冻结在 `15.1`、`data-ver` 停在 `v15.1-20261024`、`ui-preview.mjs` 还在报 `6.13`、README badge 写 `v21.x` —— 四处各说各话。统一到 `v22.1`。
+- **CI**：`selftest.py` 原来用 `HOME/"downloads"` 当下载目录，与平台默认的 `~/Downloads/decache` 在 Windows 上大小写撞车 → 本地永远红一条、CI 绿。改用 `dlroot`。
+- **文档**：README 的行数（2900/4200）、闸门数（7 → 8）、主题数（七套 → 六套）、版本 badge 全部对上现实。
+
+### 已知遗留 · Known gaps
+- CI 只跑 `py_compile` / 语法检查 / `selftest` / 安装器同步校验；`frontcheck.mjs`、`smoke.mjs`、`chaos_test.py`、`fake_yt_dlp_test.py` 仍不在 CI 里。
+- `_progress.json`（观看进度账本）没进 `.gitignore`，理论上会被 git 跟踪。
+- `pipboy` / `mauto` 的部分 CSS 残留（`mauto` 整套、若干重复 `@keyframes pageIn`）还没清。
+
 ## v22.0 (2026-11-03)
 
 ### 主题与播放器 · Theme & player

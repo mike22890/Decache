@@ -66,8 +66,9 @@ Data-integrity rules that everything else depends on:
 
 ```bash
 python3 -m py_compile server.py selftest.py chaos_test.py fake_yt_dlp_test.py
-sed -n '/<script>/,/<\/script>/p' index.html | sed '1d;$d' > /tmp/check.js
-node --check /tmp/check.js
+# v22.1: index.html 有多个 <script> 块 —— 老的 sed 管道只取第一块(还把中间的标签吐出来),
+# node --check 直接报 "Unexpected token '<'"。改成逐块抽取再拼。
+node -e 'const fs=require("fs"),vm=require("vm");const s=fs.readFileSync("index.html","utf8");const b=[...s.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]);if(!b.length)process.exit(1);try{new vm.Script(b.join("\n;\n"));}catch(e){console.error(e.message);process.exit(1);}'
 python3 selftest.py && python3 chaos_test.py && python3 fake_yt_dlp_test.py
 node frontcheck.mjs && node smoke.mjs
 node sync_install.mjs
@@ -507,8 +508,8 @@ exclude_dirs =         # 扫描排除（逗号分隔的路径片段，命中即�
 ```bash
 # 1) 语法闸
 python3 -m py_compile server.py selftest.py chaos_test.py fake_yt_dlp_test.py
-sed -n '/<script>/,/<\/script>/p' index.html | sed '1d;$d' > /tmp/check.js
-node --check /tmp/check.js
+# v22.1: index.html 多个 <script> 块 → 老 sed 管道只取第一块, node --check 会报 "Unexpected token '<'"
+node -e 'const fs=require("fs"),vm=require("vm");const s=fs.readFileSync("index.html","utf8");const b=[...s.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]);if(!b.length)process.exit(1);try{new vm.Script(b.join("\n;\n"));}catch(e){console.error(e.message);process.exit(1);}'
 
 # 2) 四套自动化测试(全离线, 不碰用户数据)
 python3 selftest.py          # 190 项: 端点/白名单/全局存在性/队列/路径/UA/封面/批量/清晰度/标签/报错翻译/仅音频/数据安全

@@ -24,9 +24,9 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "15.1"
+VERSION = "22.1"
 
-# v17: 观看进度记忆 (前端每10s心跳上报; key=相对路径)
+# 观看进度账本(前端每10s心跳上报; key=相对路径)
 PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_progress.json")
 PROGRESS = {}
 try:
@@ -328,19 +328,26 @@ def run_ffmpeg(args, timeout=300):
 def open_external(path):
     """跨平台外部打开文件: Windows os.startfile / macOS open / Linux xdg-open / Termux termux-open。"""
     p = str(path)
+    # v22.1: 所有外部打开都限时 + 断标准流 ——
+    #   termux-open 走 Termux:API 的 IPC, 断电重启后 IPC 未就绪时调用会**永久挂起**,
+    #   不限时就是一个卡住主线程的僵尸进程(start.sh 的策略也是"termux-* 全部限时")。
     try:
         if IS_TERMUX:
-            subprocess.Popen(["termux-open", p])
+            subprocess.run(["termux-open", p], timeout=10,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         elif IS_WIN:
             os.startfile(p)                      # noqa: S606 - Windows 专属 API
         elif IS_MAC:
-            subprocess.Popen(["open", p])
+            subprocess.run(["open", p], timeout=10,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            subprocess.Popen(["xdg-open", p])
+            subprocess.run(["xdg-open", p], timeout=10,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except Exception:
         try:
-            subprocess.Popen(["gio", "open", p])
+            subprocess.run(["gio", "open", p], timeout=10,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True
         except Exception as e:
             return False, str(e)
@@ -371,6 +378,10 @@ def diagnostics():
                      "win" if IS_WIN else "mac" if IS_MAC else "linux", ""))
     if sys.version_info < MIN_PY:
         hints.append(f"Python {sys.version_info.major}.{sys.version_info.minor} 过低, 需 ≥3.9")
+    # v22.1: 面板本体只要 3.9(Path.is_relative_to), 但下载引擎 yt-dlp 2026.10.26 起要求 ≥3.11
+    #   (3.9 于 2025.10.22 弃用, 3.10 于 2026.10.26 弃用) —— 两级口径, 别混。
+    if sys.version_info < (3, 11):
+        hints.append("下载引擎 yt-dlp 2026.10.26 起要求 Python ≥3.11(面板本体 3.9 仍能跑, 只是 pip 装不上 yt-dlp)")
     return {"platform": sys.platform, "termux": IS_TERMUX, "python": sys.version.split()[0],
             "ffmpeg": ff or "", "ffmpeg_ok": bool(ff), "hints": hints,
             "min_python": "3.9"}
@@ -1122,8 +1133,15 @@ def upload_save(name, rfile, length):
     if "." + name.rsplit(".", 1)[-1].lower() not in VIDEO_EXTS:
         return None, "只能上传视频文件", ""
     stem = name.rsplit(".", 1)[0] or "import"
+    # 名字里只留路径的一层: stem 可能是 "." / ".." / 含分隔符 → 会写到下载目录外面
+    stem = nfc(os.path.basename(stem)).strip() or "import"
+    if stem in (".", "..") or os.sep in stem or "/" in stem:
+        return None, "文件名不合法", ""
     dest_dir = DOWNLOAD_DIR / stem
     dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir = dest_dir.resolve()   # v21.9: 统一真实形态(解析 ~/storage symlink), 否则账本 relative_to 炸
+    if not dest_dir.is_relative_to(DOWNLOAD_DIR.resolve()):
+        return None, "路径不合法", ""
     dest = dest_dir / name
     i = 2
     while dest.exists():                          # 重名加序号, 决不覆盖
@@ -1168,9 +1186,10 @@ def upload_save(name, rfile, length):
     return dest, None, key
 
 
-def import_local(paths, mode):
-    """把选中的本地视频搬进面板结构: <标题>/<原文件名>, 写账本, 抽帧封面。
-    mode: 'move'(默认, 省空间) / 'copy'。文件先落地, 账本后写, 封面最后(失败无害)。"""
+def import_local(paths, mode, names=None):
+    """把选中的本地视频搬进面板结构: <新名或原文件名>, 写账本, 抽帧封面。
+    mode: 'move'(默认, 省空间) / 'copy'。names: {源路径: 新文件名}。文件先落地, 账本后写, 封面最后(失败无害)。"""
+    names = names or {}
     done, failed = [], []
     for p in (paths or [])[:200]:
         try:
@@ -1178,16 +1197,33 @@ def import_local(paths, mode):
             if not src.is_file() or src.suffix.lower() not in VIDEO_EXTS:
                 failed.append({"path": p, "err": "not a video"})
                 continue
-            stem = nfc(src.stem) or "import"
+            newname = (names.get(str(src)) or '').strip()
+            # 只留文件名本体: 前端可以传 "../../x.mp4" 这种带路径的名字 → 会写到下载目录外面
+            newname = nfc(os.path.basename(newname.replace("\\", "/"))).strip()
+            stem = nfc(Path(newname or src.name).stem) or "import"
+            stem = os.path.basename(stem).strip() or "import"
+            if stem in (".", ".."):
+                stem = "import"
             dest_dir = DOWNLOAD_DIR / stem
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / src.name
+            dest_dir = dest_dir.resolve()   # v21.9: 统一真实形态, 否则账本 relative_to 炸(symlink 双形态)
+            if not dest_dir.is_relative_to(DOWNLOAD_DIR.resolve()):
+                failed.append({"path": p, "err": "路径不合法"})
+                continue
+            dest = dest_dir / (newname or src.name)
+            if not dest.is_relative_to(dest_dir):   # 双保险: 落地路径必须在目标目录内
+                failed.append({"path": p, "err": "文件名不合法"})
+                continue
             if dest.exists():                     # 重名加序号, 决不覆盖
+                base_ext = Path(newname or src.name)
                 i = 2
-                while (dest_dir / f"{src.stem}_{i}{src.suffix}").exists():
+                while (dest_dir / f"{base_ext.stem}_{i}{base_ext.suffix}").exists():
                     i += 1
-                dest = dest_dir / f"{src.stem}_{i}{src.suffix}"
-            (shutil.move if mode == "move" else shutil.copy2)(str(src), str(dest))
+                dest = dest_dir / f"{base_ext.stem}_{i}{base_ext.suffix}"
+            try:
+                (shutil.move if mode == "move" else shutil.copy2)(str(src), str(dest))
+            except PermissionError:
+                shutil.copy2(str(src), str(dest))   # Android 11+ 共享存储禁删源文件 → 自动降级 copy(费点空间保导入成功)
         except Exception as e:
             failed.append({"path": p, "err": str(e)})
             continue
@@ -2594,6 +2630,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.wfile.write(body)
         if u.path == "/api/version":
             return self._json({"v": VERSION})
+        if u.path == "/api/progress":                 # v22.1: 观看进度账本(读侧)
+            # 以前只有 POST 写、没有 GET 读 → 前端"把服务端进度合并进本地账本"永远拿到 404,
+            # 重装/换浏览器丢进度这个功能其实是死的。
+            return self._json(PROGRESS)
         if u.path == "/api/config":
             masked = ((SESSION_COOKIE[:4] + "…" + SESSION_COOKIE[-4:]) if len(SESSION_COOKIE) > 12
                       else ("已填" if SESSION_COOKIE else ""))
@@ -2773,17 +2813,30 @@ class Handler(BaseHTTPRequestHandler):
             size = target.stat().st_size
             range_h = self.headers.get("Range", "")
             start, end = 0, size - 1
+            code = 206 if range_h else 200
             if range_h.startswith("bytes="):           # 浏览器拖动进度条会发 Range 请求
                 try:
                     s_, e_ = range_h[6:].split("-", 1)
                     if s_:
                         start = int(s_)
-                    if e_:
-                        end = min(int(e_), size - 1)
+                        # 起点超出文件 → 416(以前会算出负 Content-Length, 客户端直接卡死)
+                        if start >= size:
+                            self.send_response(416)
+                            self.send_header("Content-Range", f"bytes */{size}")
+                            self.send_header("Content-Length", "0")
+                            self.end_headers()
+                            return
+                        if e_:
+                            end = min(int(e_), size - 1)
+                    else:
+                        # bytes=-N → 最后 N 字节(以前当成从头发, 拖进度条会跳错位置)
+                        start = max(0, size - int(e_ or 0))
+                        end = size - 1
+                    if end < start:                         # bytes=500-100 这种倒挂 → 退化成整段
+                        start, end = 0, size - 1
                 except Exception:
                     start, end = 0, size - 1
             length = end - start + 1
-            code = 206 if range_h else 200
             ctype = AUDIO_CT.get(target.suffix.lower(), "video/mp4")
             self.send_response(code)
             self.send_header("Content-Type", ctype)
@@ -2810,7 +2863,7 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         if u.path == "/api/upload":                    # v22.0: 手机选视频直传(裸字节, 文件名在 query) — 必须在 JSON 解析前分流
             qs = urllib.parse.parse_qs(u.query)
-            dest, err = upload_save((qs.get("name") or [""])[0], self.rfile, length)
+            dest, err, _upkey = upload_save((qs.get("name") or [""])[0], self.rfile, length)
             if err:
                 return self._json({"error": err}, 400)
             return self._json({"ok": True, "key": "", "path": str(dest)})
@@ -2821,12 +2874,12 @@ class Handler(BaseHTTPRequestHandler):
                 body = {}
         except Exception:
             return self._json({"error": "请求格式不对(不是合法 JSON)"}, 400)
-        if u.path == "/api/import_local":              # v22.0: 本地导入执行(move/copy)
+        if u.path == "/api/import_local":              # v22.0: 本地导入执行(move/copy/重命名)
             paths = body.get("paths") or []
             if not isinstance(paths, list) or not paths:
                 return self._json({"error": "没有选中任何文件"}, 400)
-            mode = "move" if body.get("mode") == "copy" else "move"
-            out = import_local([str(x) for x in paths], mode)
+            mode = "copy" if body.get("mode") == "copy" else "move"
+            out = import_local([str(x) for x in paths], mode, body.get("names") or {})
             log_op(f"本地导入完成: {out['done']} 个, 失败 {len(out['failed'])}")
             return self._json(out)
         if u.path == "/api/redownload":                 # 重下: 先下到临时名, 成功才替换(失败不丢原文件)
@@ -2858,16 +2911,18 @@ class Handler(BaseHTTPRequestHandler):
             log_op(f"重新下载: {e.get('title', '')[:40]} P{p}")
             return self._json({"id": t["id"]})
         if u.path == "/api/progress":                   # v17 观看进度
-            if method == "POST":
-                ln = int(self.headers.get("Content-Length") or 0)
-                body = self.rfile.read(ln).decode("utf-8", "ignore") if ln else ""
-                try:
-                    d = json.loads(body)
-                    if d.get("path"):
-                        PROGRESS[str(d["path"])] = {"pos": float(d.get("pos") or 0), "dur": float(d.get("dur") or 0)}
+            if self.command == "POST":
+                # v22.1: 请求体在 _do_POST 开头已经被 read 过一次并解析成 body 了。
+                # 这里再 read 一次 → 读到空 → 解析失败; 更糟的是 rfile.read 会**阻塞**
+                # 等下一个 Content-Length 的字节, 客户端直接超时(实测 POST /api/progress timed out)。
+                d = body if isinstance(body, dict) else {}
+                if d.get("path"):
+                    try:
+                        PROGRESS[str(d["path"])] = {"pos": float(d.get("pos") or 0),
+                                                   "dur": float(d.get("dur") or 0)}
                         save_progress()
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
                 self._json({})
             else:
                 self._json(PROGRESS)

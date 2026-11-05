@@ -12,8 +12,11 @@ import vm from 'node:vm';
 const base = dirname(fileURLToPath(import.meta.url));
 /* v20.0: normalize CRLF (gate-7 regex ate trailing CR on Windows files) */
 const src = readFileSync(join(base, "index.html"), "utf8").split(String.fromCharCode(13)+String.fromCharCode(10)).join(String.fromCharCode(10))
-const _m = src.match(/<script>([\s\S]*?)<\/script>/);
-const JS = _m ? _m[1] : src;          // 脚本正文(闸6/闸7 用)
+/* v22.1: index.html 现在有多个 <script> 块(v21.9 加了诊断浮层)。
+   原来只取第一块 → 主脚本 2600 行根本没进闸, 闸4/闸6/闸7 形同虚设。
+   现在把所有块拼起来再查 —— 拼接点是 ';' , 语法上等价于多个 script 顺序执行。 */
+const _blocks = [...src.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+const JS = _blocks.length ? _blocks.join("\n;\n") : src;
 let bad = 0;
 
 /* ── 闸 1: id 悬空 ── */
@@ -27,8 +30,7 @@ let bad = 0;
 
 /* ── 闸 2: 未声明标识符 ── */
 {
-  const m = src.match(/<script>([\s\S]*?)<\/script>/);
-  const js = m ? m[1] : '';
+  const js = JS;   // v22.1: 用拼接后的全部 script 块(原来只取第一块 37 行, 主脚本 2600 行根本没进闸)
   const KNOWN = new Set([
     'window','document','console','self','globalThis','navigator','location','history','localStorage','sessionStorage',
     'Object','Array','String','Number','Boolean','Math','JSON','Date','Promise','Set','Map','WeakMap','WeakSet','Symbol',
@@ -146,12 +148,11 @@ let bad = 0;
 
 /* ── 闸 4: 语法 ── */
 {
-  const m = src.match(/<script>([\s\S]*?)<\/script>/);
   const tmp = join(base, '.frontcheck.tmp.js');
   try {
-    writeFileSync(tmp, m ? m[1] : '', 'utf8');
-    new vm.Script(m ? m[1] : '', { filename: 'index.html<script>' });   // 只查语法
-    console.log('✅ 闸4 语法: 通过');
+    writeFileSync(tmp, JS, 'utf8');
+    new vm.Script(JS, { filename: 'index.html<script>' });   // 只查语法
+    console.log('✅ 闸4 语法: 通过 (' + _blocks.length + ' 个 script 块)');
   } catch (e) {
     bad++;
     console.log('❌ 闸4 语法: ' + e.message);

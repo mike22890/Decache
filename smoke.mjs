@@ -10,9 +10,12 @@ import vm from 'node:vm';
 
 const base = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(join(base, 'index.html'), 'utf8');
-const m = html.match(/<script>([\s\S]*?)<\/script>/);
-if (!m) { console.error('index.html 里找不到 <script> 块'); process.exit(1); }
-const code = m[1];
+/* v22.1: index.html 有多个 <script> 块(v21.9 加了诊断浮层)。
+   原来只 match 第一块 → 主脚本 2600 行从没被真跑过, 回归断言全在崩。
+   现在把所有块按出现顺序拼起来跑 —— 语义等价于浏览器顺序执行多个 script。 */
+const blocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+if (!blocks.length) { console.error('index.html 里找不到 <script> 块'); process.exit(1); }
+const code = blocks.join('\n;\n');
 
 const errors = [];
 const warnings = [];

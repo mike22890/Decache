@@ -11,7 +11,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.11", "3.13"]
+        python-version: ["3.9", "3.11", "3.13", "3.14"]
+        # v22.1: 3.9/3.10 只是面板本体能跑(yt-dlp 已弃用这两个版本),
+        #   引擎相关的真链路测试跑在 3.11+ 上。3.14 是当前 Termux 主线的版本。
     steps:
       - uses: actions/checkout@v4
 
@@ -24,8 +26,24 @@ jobs:
 
       - name: Extract and syntax-check the frontend
         run: |
-          sed -n '/<script>/,/<\/script>/p' index.html | sed '1d;$d' > /tmp/check.js
-          node --check /tmp/check.js
+          # v22.1: index.html 现在有多个 <script> 块(v21.9 加了诊断浮层)。
+          # 原来的 sed '/<script>/,/<\/script>/p' 会把两块连同中间的标签一起吐出来 →
+          # node --check 报 "Unexpected token '<'" → CI 直接红。改成逐块抽取再拼。
+          node -e 'const fs=require("fs"),vm=require("vm");const s=fs.readFileSync("index.html","utf8");const b=[...s.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]);if(!b.length){console.error("no script block");process.exit(1);}const code=b.join("\n;\n");try{new vm.Script(code,{filename:"index.html<script>"});console.log("✅ "+b.length+" script block(s), syntax OK");}catch(e){console.error("❌ syntax: "+e.message);process.exit(1);}'
+
+      - name: Frontend static gates (frontcheck, 8 gates)
+        run: |
+          # 闸8 需要 stylelint 做 CSS 属性级校验(fuzzy patch 撕碎属性的唯一克星)
+          npm install -g stylelint postcss-html >/dev/null 2>&1 || true
+          node frontcheck.mjs
+
+      - name: Frontend load-time smoke test
+        run: node smoke.mjs
+
+      - name: Chaos + fake-engine tests
+        run: |
+          python chaos_test.py
+          python fake_yt_dlp_test.py
 
       - name: Self test (no network, isolated temp HOME)
         run: python selftest.py
