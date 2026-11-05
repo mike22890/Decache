@@ -1,5 +1,42 @@
 # Changelog
 
+## v22.7 (2026-11-05)
+
+### 真机第六轮 · 找到"下到网页"的真凶：链接形状
+前面几轮一直在治"下回来的是网页"，现在定位到**根因不在 cookie，在 URL 本身**。
+
+**真机复现（同一台机器、同一个视频）：**
+
+| 链接形态 | 结果 |
+|---|---|
+| `https://b23.tv/hoIux0u`（分享短链） | ❌ 存成 `P1.html`(6.59 KB) → remux 报 `Invalid data found` |
+| `https://www.bilibili.com/zh-Hans/video/BV1cwxf6TE2H`（短链 302 落地页） | ❌ 只认出一个 `html` 格式 |
+| `https://www.bilibili.com/video/BV1cwxf6TE2H`（规范形） | ✅ **直接下成 1080P，55 MB，全程无 cookie** |
+
+**根因**：yt-dlp 的 B 站提取器 `_VALID_URL` 只认 `bilibili.com/video/BVxxx`，
+**不认 `/zh-Hans/` 前缀** → 短链 302 过去就掉进通用提取器 → 把网页当媒体抓。
+（所以之前让 Mike 折腾 SESSDATA 也是治标 —— 引擎压根没走到"要 cookie"那步。）
+
+**修法（第一层 · 链接归一化，零配置）**：
+`normalize_url()` 在把链接交给引擎之前规整成规范形状：
+- 认 `b23.tv` 短链（跟一次 302 拿真实地址）
+- 认 `/zh-Hans/video/`、`/video/`、`/av` 号、`bangumi/play/ep|ss`、`bangumi/media/md`、`cheese/play/ep`
+- 抽 `BV`/`av`/`ep`/`ss`/`md` 号，重建成规范链接（保留 `?p=N`）
+- 只处理 B 站；其它站点原样透传
+
+在 `fetch_video_info()`（解析）和 `_cmd()`（下载）两处都做了，老任务/手改 URL 也兜得住。
+
+### 验证
+- 端到端：`b23.tv/hoIux0u` 与 `/zh-Hans/...` 两条链接，经 `_cmd()` 实跑
+  → **exit 0，产物 `P1.mp4` 55,226,665 字节（1080P）**，无需任何 cookie。
+- `fetch_video_info()` 两条链接都拿到正确标题/UP主/bvid。
+- `selftest` 新增 8 条归一化断言（含"非 B 站原样透传""空链接不炸"），全套闸门绿。
+
+### 还没做（第二层，按需）
+- 自动获取访客指纹（`x/frontend/finger/spi`，实测通）作为兜底
+- 引擎多候选（yt-dlp → bilix）
+- 会员专享高码率才需要登录 cookie（那是 B 站规则，不是工具问题）
+
 ## v22.6 (2026-11-05)
 
 ### 真机第五轮 · 站点凭据为什么等于没填

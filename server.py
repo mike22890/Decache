@@ -24,7 +24,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "22.6"
+VERSION = "22.7"
 
 # 观看进度账本(前端每10s心跳上报; key=相对路径)
 PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_progress.json")
@@ -217,6 +217,68 @@ UA = {"User-Agent": "Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 "
 PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 BAD_CHARS = re.compile(r'[\\/:*?"<>|\n\r\t]')
 URL_RE = re.compile(r"https?://[^\s\]\)】\"'，。,]+")
+
+
+# ---------------- 链接归一化 (v22.7) ----------------
+# 各站的分享短链 / 本地化前缀 / 历史形态, 引擎不一定都认。
+# 真机踩过: b23.tv 短链 302 到 bilibili.com/zh-Hans/video/BVxxx,
+# 而 B 站提取器的 _VALID_URL 只认 bilibili.com/video/BVxxx —— 前缀一多就掉进
+# 通用提取器, 把**网页**当视频下回来(P1.html) → ffmpeg 报 Invalid data found。
+# 同一个视频换成规范链接直接下成 1080P, 连 cookie 都不用。
+# 所以: 交给引擎之前先整成规范形状。只处理认得的站点, 其余原样透传。
+_BILI_BV = re.compile(r"BV[0-9A-Za-z]{10}")
+_BILI_AV = re.compile(r"/(?:video/)?av(\d{3,})", re.I)
+_BILI_EP = re.compile(r"/bangumi/play/ep(\d+)")
+_BILI_SS = re.compile(r"/bangumi/play/ss(\d+)")
+_BILI_MD = re.compile(r"/bangumi/media/md(\d+)")
+_BILI_CHEESE = re.compile(r"/cheese/play/ep(\d+)")
+_BILI_P = re.compile(r"[?&]p=(\d+)")
+
+
+def _resolve_short(url, timeout=8):
+    """短链跟一次 302 拿真实地址; 跟不动返回空串(交给引擎自己处理)。"""
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers=UA)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.geturl() or ""
+    except Exception:
+        return ""
+
+
+def normalize_url(url):
+    """把链接整成引擎认识的规范形状。返回 (新链接, 改动说明)。
+    只处理认得的站点; 其它站点原样返回、说明为空。"""
+    u = (url or "").strip()
+    if not u:
+        return u, ""
+    low = u.lower()
+    if "bilibili.com" not in low and "b23.tv" not in low:
+        return u, ""
+    if "b23.tv" in low:
+        real = _resolve_short(u)
+        if real:
+            u, low = real, real.lower()
+    m = _BILI_BV.search(u)
+    if m:                                   # BV 号最优先(视频/合集的通用主键)
+        pno = _BILI_P.search(u)
+        return (f"https://www.bilibili.com/video/{m.group(0)}"
+                + (f"?p={pno.group(1)}" if pno else ""), "B站视频")
+    m = _BILI_AV.search(u)
+    if m:
+        return f"https://www.bilibili.com/video/av{m.group(1)}", "B站视频"
+    m = _BILI_EP.search(u)
+    if m:
+        return f"https://www.bilibili.com/bangumi/play/ep{m.group(1)}", "B站番剧"
+    m = _BILI_SS.search(u)
+    if m:
+        return f"https://www.bilibili.com/bangumi/play/ss{m.group(1)}", "B站番剧"
+    m = _BILI_MD.search(u)
+    if m:
+        return f"https://www.bilibili.com/bangumi/media/md{m.group(1)}", "B站番剧"
+    m = _BILI_CHEESE.search(u)
+    if m:
+        return f"https://www.bilibili.com/cheese/play/ep{m.group(1)}", "B站课程"
+    return u, ""
 
 # ---------------- 基础工具 ----------------
 # 跨平台兼容层(2026-10-21 调研落地):
@@ -550,6 +612,9 @@ def fetch_video_info(url):
     两段式探测(通用, 不含站点知识):
       先用"剥掉分P/追踪参数"的 URL; 若只得到 1 个分P, 再用"只剩路径"的裸 URL 试一次,
       取分P 多的那个 —— 带 ?p=1 的链接很多站会只提取那一P(2026-10-21 实测复现)。"""
+    # v22.7: 先把链接整成引擎认识的形状(短链/本地化前缀/历史形态) ——
+    # 不整的话 b23.tv 会被通用提取器当网页抓, 表现为"下到 P1.html"。
+    url, _nz = normalize_url(url)
     hit = _info_cache.get(url)
     if hit and time.time() - hit[0] < 300:
         return hit[1]                     # 5 分钟内同一链接直接复用, 不再调引擎
@@ -2000,6 +2065,8 @@ def cookie_for_domain(url):
     return _CONF.get("cookie", "") or m.get("", "") or ""
 
 def _cmd(url, audio_only, folder, quality=0, part_no=0, fb=False):
+    # v22.7: 兜底再整一次 —— 任务可能是老数据/手改的 URL, 别让[人物1]在下载这一刻发生
+    url, _nz = normalize_url(url)
     # cookie: 按链接域名挑对应凭据, 每个域名一个 jar 文件(多站点不打架)
     cv = cookie_for_domain(url)
     jar = None

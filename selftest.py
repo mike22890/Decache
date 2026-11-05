@@ -299,6 +299,29 @@ with urllib.request.urlopen(req, timeout=5) as r:
 s, b = get("/api/stream?rel=../../etc/passwd")
 chk("GET /api/stream 越权 404", s == 404, f"{s}")
 
+# ── 链接归一化(v22.7): 短链/本地化前缀必须整成引擎认识的形状 ──
+# 真机踩过: b23.tv 短链 302 到 /zh-Hans/video/BVxxx, B 站提取器不认这个前缀
+# → 掉进通用提取器 → 把网页当视频下(P1.html) → ffmpeg 报 Invalid data found。
+for _src, _want in [
+    ("https://www.bilibili.com/zh-Hans/video/BV1cwxf6TE2H?buvid=x&p=1",
+     "https://www.bilibili.com/video/BV1cwxf6TE2H?p=1"),
+    ("https://www.bilibili.com/video/BV1n44y1Q7sc?p=3",
+     "https://www.bilibili.com/video/BV1n44y1Q7sc?p=3"),
+    ("https://www.bilibili.com/bangumi/play/ep123456",
+     "https://www.bilibili.com/bangumi/play/ep123456"),
+    ("https://www.bilibili.com/bangumi/play/ss789",
+     "https://www.bilibili.com/bangumi/play/ss789"),
+    ("https://www.bilibili.com/bangumi/media/md28235007",
+     "https://www.bilibili.com/bangumi/media/md28235007"),
+    ("https://www.bilibili.com/cheese/play/ep999",
+     "https://www.bilibili.com/cheese/play/ep999"),
+]:
+    _got, _ = server.normalize_url(_src)
+    chk("链接归一化 " + _src[:44], _got == _want, _got)
+chk("非 B 站链接原样透传",
+    server.normalize_url("https://www.youtube.com/watch?v=abc")[0] == "https://www.youtube.com/watch?v=abc")
+chk("空链接不炸", server.normalize_url("")[0] == "")
+
 # ── Range 边界(v22.1: 以前会算出负 Content-Length, 客户端直接卡死) ──
 _req = urllib.request.Request(BASEURL + "/api/stream?rel=movies/a.mp4",
                               headers={"Range": "bytes=99999999999-"})

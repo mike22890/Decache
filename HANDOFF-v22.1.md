@@ -254,3 +254,37 @@ SESSDATA=<值>; bili_jct=<值>; buvid3=<值>
 ## 教训
 - **输入框提示里的 "KEY=VALUE" 是占位示例，但用户会照抄** —— 提示语必须写明「键名要真实」。
 - **从浏览器复制的值常带 URL 编码**，凡是替用户传 cookie/token 的地方都要考虑还原。
+
+
+---
+
+# 追加：v22.7（2026-11-05 当天第七轮）—— 链接归一化，不用 cookie 了
+
+## 真凶
+**URL 形状，不是 cookie。** 同一台机器同一个视频：
+- `b23.tv/hoIux0u` → 302 到 `bilibili.com/zh-Hans/video/BVxxx` → B 站提取器 `_VALID_URL`
+  不认 `/zh-Hans/` 前缀 → 掉进通用提取器 → **把网页当视频下**（`P1.html` 6.59 KB）→ ffmpeg 报 `Invalid data found`。
+- 换成 `bilibili.com/video/BVxxx` → **1080P，55 MB，零 cookie**。
+
+## 修法（第一层 · 已实装）
+`normalize_url(url)` —— 交给引擎之前把链接规整：
+- `b23.tv` 短链：跟一次 302
+- 认 `/zh-Hans/video/`、`/video/`、`av` 号、`bangumi/play/ep|ss`、`bangumi/media/md`、`cheese/play/ep`
+- 抽 BV/av/ep/ss/md → 重建规范链接（保留 `?p=N`）
+- 只处理 B 站，其它站点原样透传
+- 挂在 `fetch_video_info()`（解析）和 `_cmd()`（下载）两处
+
+## 验证
+- `_cmd()` 实跑两条链接 → **exit 0，`P1.mp4` 55,226,665 字节（1080P）**，无 cookie
+- `fetch_video_info()` 两条链接都拿到正确标题/UP主/bvid
+- `selftest` +8 条断言，全套闸门绿
+
+## 第二层（按需再做）
+- 自动访客指纹（spi 接口）兜底
+- 引擎多候选（yt-dlp → bilix）
+- 大会员高码率才要 cookie —— 那是 B 站规则
+
+## 教训
+- **"下到网页"先别怀疑 cookie，先看引擎输出里有没有 `.html`**。
+  通用提取器接手 = URL 形状引擎不认。
+- **真机问题要在真机网络环境下复现**：本次是拿用户的原链接在 PC 上跑了一遍才现形的。
