@@ -86,7 +86,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "22.3"
+VERSION = "22.4"
 
 # 观看进度账本(前端每10s心跳上报; key=相对路径)
 PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_progress.json")
@@ -4423,7 +4423,10 @@ html[data-ui="pipboy"] #pfill{background:#22FF55;box-shadow:0 0 12px rgba(34,255
 
 /* ═══════ v22.0 · 播放性能模式: pm-open 时背后页面全部冻结, GPU 只伺候视频 ═══════
    症状: 毛玻璃主题(catppuccin/synthwave/geist)播视频时 backdrop-filter+无限动画压垮合成器 → 整页无法操控只能关闭 */
-body.pm-open :not(#pmodal):not(#pmodal *){animation-play-state:paused!important;transition:none!important}
+/* v22.4: 列表面板/队列面板是 #pmodal 的**兄弟**, 不是它的后代 —— 原来这条"暂停一切动画"的规则
+   把它们也带上了, 而它们进场动画是 panelIn{from{opacity:0}} + fill-mode both → 动画被暂停在第 0 帧,
+   面板 opacity 永远停在 0 = 打开了一面看不见的墙。真机原话: "播放列表在视频播放页面不显示"。 */
+body.pm-open :not(#pmodal):not(#pmodal *):not(#listPanel):not(#listPanel *):not(#qpanel):not(#qpanel *){animation-play-state:paused!important;transition:none!important}
 body.pm-open .card,body.pm-open .qpanel,body.pm-open .tcard,body.pm-open .dgroup,body.pm-open .browsecard,
 body.pm-open .tabbar{backdrop-filter:none!important;-webkit-backdrop-filter:none!important;background-image:none!important}
 
@@ -4690,7 +4693,7 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
 
 </style>
 </head>
-<body data-ver="v22.3-20261105"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
+<body data-ver="v22.4-20261105"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
 <script>
 /* v21.9: 真机诊断浮层 — URL 带 ?dbg=1 时显示核心状态, Kiwi 截一张图即可回报全部 */
 (function () {
@@ -7067,7 +7070,10 @@ function startPart(i) {
 function hideCtrl() {
   clearTimeout(barT);
   bar.classList.add('hide');
-  phead.classList.add('hide');
+  /* v22.4: 顶栏不再跟着隐藏 —— 它装着「列表/队列/Zz/特效」, 一隐藏就是 pointer-events:none,
+     用户再怎么点都开不出播放列表(真机原话: "播放列表在视频播放页面不能正常使用")。
+     现在只收底栏, 顶栏常驻; 需要真正沉浸就点一下画面收底栏。 */
+  phead.classList.remove('hide');
   $('pthumb').style.display = 'none';
   const cpH = $('pCPlay'); if (cpH) cpH.classList.add('hide');   /* v17.5: JS兜底(:has 为主) */
   /* v17.4: 中央键常显(透明不挡画面), 当播放状态灯 */
@@ -7077,9 +7083,13 @@ function poke() {
   const cpS = $('pCPlay'); if (cpS) cpS.classList.remove('hide');
   clearTimeout(barT);
   // 5 秒(原来 3.2 秒太短, 手机上根本来不及点); 暂停时不自动隐藏
-  barT = setTimeout(() => { if (!v.paused && !dragging && !pdrag) {
-    bar.classList.add('hide'); phead.classList.add('hide');
-    $('pthumb').style.display = 'none'; } }, 3000);   // v17.2: 用户要求 3 秒
+  barT = setTimeout(() => {
+    if (v.paused || dragging || pdrag) return;
+    /* v22.4: 列表面板/队列开着的时候别收控件 —— 收了用户就关不掉面板了 */
+    if ($('listPanel').classList.contains('show') || $('qpanel').classList.contains('show')) return;
+    bar.classList.add('hide');          /* v22.4: 只收底栏, 顶栏(列表/队列)常驻 */
+    phead.classList.remove('hide');
+    $('pthumb').style.display = 'none'; }, 3000);   // v17.2: 用户要求 3 秒
 }
 async function keepAwake(on) {
   if (!HAS_WAKELOCK) return;

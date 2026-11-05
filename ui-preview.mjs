@@ -64,7 +64,7 @@ createServer((req, res) => {
     res.writeHead(200, {'Content-Type':'text/html; charset=utf-8'});
     return res.end(html.replace(/<body([^>]*)>/, '<body$1>' + pre).replace('</body>', post + '</body>'));
   }
-  if (u.pathname === '/api/version') return j({v:'22.3'});
+  if (u.pathname === '/api/version') return j({v:'22.4'});
   if (u.pathname === '/api/tasks') return j(TASKS);
   if (u.pathname === '/api/library') return j(LIB);
   if (u.pathname === '/api/tags') return j({tags:{red:2, green:1}, fav:3});
