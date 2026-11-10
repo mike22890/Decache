@@ -86,7 +86,7 @@ from pathlib import Path
 
 # ==================== 配置区(程序与配置分离) ====================
 # 所有可改项都在 config.ini —— 升级/重装 server.py 不丢任何配置
-VERSION = "22.7"
+VERSION = "22.8"
 
 # 观看进度账本(前端每10s心跳上报; key=相对路径)
 PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_progress.json")
@@ -281,66 +281,79 @@ BAD_CHARS = re.compile(r'[\\/:*?"<>|\n\r\t]')
 URL_RE = re.compile(r"https?://[^\s\]\)】\"'，。,]+")
 
 
-# ---------------- 链接归一化 (v22.7) ----------------
-# 各站的分享短链 / 本地化前缀 / 历史形态, 引擎不一定都认。
-# 真机踩过: b23.tv 短链 302 到 bilibili.com/zh-Hans/video/BVxxx,
-# 而 B 站提取器的 _VALID_URL 只认 bilibili.com/video/BVxxx —— 前缀一多就掉进
-# 通用提取器, 把**网页**当视频下回来(P1.html) → ffmpeg 报 Invalid data found。
-# 同一个视频换成规范链接直接下成 1080P, 连 cookie 都不用。
-# 所以: 交给引擎之前先整成规范形状。只处理认得的站点, 其余原样透传。
-_BILI_BV = re.compile(r"BV[0-9A-Za-z]{10}")
-_BILI_AV = re.compile(r"/(?:video/)?av(\d{3,})", re.I)
-_BILI_EP = re.compile(r"/bangumi/play/ep(\d+)")
-_BILI_SS = re.compile(r"/bangumi/play/ss(\d+)")
-_BILI_MD = re.compile(r"/bangumi/media/md(\d+)")
-_BILI_CHEESE = re.compile(r"/cheese/play/ep(\d+)")
-_BILI_P = re.compile(r"[?&]p=(\d+)")
+# ---------------- 链接归一化 (v22.8) ----------------
+# 设计红线: 代码里**不出现任何站点名** —— CI 有 "No site-specific leftovers" 闸,
+# 这也是本项目对抗"针对特定站点的接口适配"这类指控的立场。所以只做两条**通用**规整:
+#   ① 短链跟随跳转(只在"看起来像短链"时做, 见 _looks_short)
+#   ② 去掉路径开头的语言/地区前缀: /zh-Hans/、/en-US/、/pt-BR/、/ja/ 这种
+# 真机踩过的链条: 某站分享短链 302 到 .../zh-Hans/video/XXXX, 而引擎的提取器只认
+# /video/XXXX, 多一层语言前缀就掉进通用提取器 → 把**网页**当视频下回来(P1.html)
+# → ffmpeg 报 Invalid data found。去掉语言前缀之后直接 1080P, 连 cookie 都不用。
+_LOCALE_PREFIX = re.compile(r"^/[a-z]{2}-[A-Za-z]{2,4}(?=/)")
+_LOCALE_PREFIX_BARE = re.compile(r"^/(?:zh|ja|ko)(?=/)")
 
 
-def _resolve_short(url, timeout=8):
-    """短链跟一次 302 拿真实地址; 跟不动返回空串(交给引擎自己处理)。"""
+def _looks_short(u):
+    """看起来像分享短链吗? 判据纯通用: 单段路径 + 无点号 + 无查询串。
+    (短链特征; 正常内容页几乎都有多段路径或查询串, 不会被误判 → 省掉多余的 HEAD)"""
     try:
-        req = urllib.request.Request(url, method="HEAD", headers=UA)
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.geturl() or ""
+        sp = urllib.parse.urlsplit(u)
     except Exception:
-        return ""
+        return False
+    if sp.query:
+        return False
+    path = (sp.path or "").strip("/")
+    return bool(path) and "/" not in path and "." not in path
+
+
+def _follow_redirects(u, timeout=4):
+    """跟一次跳转拿落地地址。放在线程里 + 硬超时, 免得 DNS 卡住拖死下载线程。
+    跟不动/超时就把原链接还回去。"""
+    box = {"u": u}
+
+    def _work():
+        try:
+            req = urllib.request.Request(u, method="HEAD", headers=UA)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                box["u"] = r.geturl() or u
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_work, daemon=True)
+    t.start()
+    t.join(timeout + 2)
+    return box["u"]
+
+
+def _strip_locale_prefix(u):
+    """去掉路径开头的语言/地区前缀。剥完只剩空路径就不动 —— 别把 /en/ 首页改成 /。"""
+    sp = urllib.parse.urlsplit(u)
+    path = sp.path or ""
+    for rx in (_LOCALE_PREFIX, _LOCALE_PREFIX_BARE):
+        m = rx.match(path)
+        if m and len(path) > m.end():
+            return urllib.parse.urlunsplit(
+                (sp.scheme, sp.netloc, path[m.end():], sp.query, sp.fragment))
+    return u
 
 
 def normalize_url(url):
-    """把链接整成引擎认识的规范形状。返回 (新链接, 改动说明)。
-    只处理认得的站点; 其它站点原样返回、说明为空。"""
+    """把链接整成引擎更可能认得的形状。返回 (链接, 改动说明)。
+    纯通用规则、不认任何具体站点; 改不动就原样返回。"""
     u = (url or "").strip()
     if not u:
         return u, ""
-    low = u.lower()
-    if "bilibili.com" not in low and "b23.tv" not in low:
-        return u, ""
-    if "b23.tv" in low:
-        real = _resolve_short(u)
-        if real:
-            u, low = real, real.lower()
-    m = _BILI_BV.search(u)
-    if m:                                   # BV 号最优先(视频/合集的通用主键)
-        pno = _BILI_P.search(u)
-        return (f"https://www.bilibili.com/video/{m.group(0)}"
-                + (f"?p={pno.group(1)}" if pno else ""), "B站视频")
-    m = _BILI_AV.search(u)
-    if m:
-        return f"https://www.bilibili.com/video/av{m.group(1)}", "B站视频"
-    m = _BILI_EP.search(u)
-    if m:
-        return f"https://www.bilibili.com/bangumi/play/ep{m.group(1)}", "B站番剧"
-    m = _BILI_SS.search(u)
-    if m:
-        return f"https://www.bilibili.com/bangumi/play/ss{m.group(1)}", "B站番剧"
-    m = _BILI_MD.search(u)
-    if m:
-        return f"https://www.bilibili.com/bangumi/media/md{m.group(1)}", "B站番剧"
-    m = _BILI_CHEESE.search(u)
-    if m:
-        return f"https://www.bilibili.com/cheese/play/ep{m.group(1)}", "B站课程"
-    return u, ""
+    note = ""
+    if _looks_short(u):
+        real = _follow_redirects(u)
+        if real and real != u:
+            u, note = real, "短链跟随"
+    stripped = _strip_locale_prefix(u)
+    if stripped != u:
+        u = stripped
+        note = (note + "+" if note else "") + "去语言前缀"
+    return u, note
+
 
 # ---------------- 基础工具 ----------------
 # 跨平台兼容层(2026-10-21 调研落地):
@@ -674,8 +687,8 @@ def fetch_video_info(url):
     两段式探测(通用, 不含站点知识):
       先用"剥掉分P/追踪参数"的 URL; 若只得到 1 个分P, 再用"只剩路径"的裸 URL 试一次,
       取分P 多的那个 —— 带 ?p=1 的链接很多站会只提取那一P(2026-10-21 实测复现)。"""
-    # v22.7: 先把链接整成引擎认识的形状(短链/本地化前缀/历史形态) ——
-    # 不整的话 b23.tv 会被通用提取器当网页抓, 表现为"下到 P1.html"。
+    # v22.8: 先做通用 URL 规整(短链跟随 + 去语言前缀) ——
+    # 不整的话短链落地页会被通用提取器当网页抓, 表现为"下到 P1.html"。
     url, _nz = normalize_url(url)
     hit = _info_cache.get(url)
     if hit and time.time() - hit[0] < 300:
@@ -2127,7 +2140,7 @@ def cookie_for_domain(url):
     return _CONF.get("cookie", "") or m.get("", "") or ""
 
 def _cmd(url, audio_only, folder, quality=0, part_no=0, fb=False):
-    # v22.7: 兜底再整一次 —— 任务可能是老数据/手改的 URL, 别让[人物1]在下载这一刻发生
+    # v22.8: 兜底再整一次 —— 任务可能是老数据/手改的 URL, 别让問題在下载这一刻发生
     url, _nz = normalize_url(url)
     # cookie: 按链接域名挑对应凭据, 每个域名一个 jar 文件(多站点不打架)
     cv = cookie_for_domain(url)
@@ -4793,7 +4806,7 @@ html[data-ui="catppuccin"] #pknob{border-color:#F5C2E7}html[data-ui="catppuccin"
 
 </style>
 </head>
-<body data-ver="v22.7-20261105"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
+<body data-ver="v22.8-20261110"><div id="synFloor" aria-hidden="true"></div><div id="sceneFx" aria-hidden="true"></div><div id="sceneFx2" aria-hidden="true"></div>
 <script>
 /* v21.9: 真机诊断浮层 — URL 带 ?dbg=1 时显示核心状态, Kiwi 截一张图即可回报全部 */
 (function () {
@@ -8305,28 +8318,22 @@ with urllib.request.urlopen(req, timeout=5) as r:
 s, b = get("/api/stream?rel=../../etc/passwd")
 chk("GET /api/stream 越权 404", s == 404, f"{s}")
 
-# ── 链接归一化(v22.7): 短链/本地化前缀必须整成引擎认识的形状 ──
-# 真机踩过: b23.tv 短链 302 到 /zh-Hans/video/BVxxx, B 站提取器不认这个前缀
-# → 掉进通用提取器 → 把网页当视频下(P1.html) → ffmpeg 报 Invalid data found。
+# ── 链接归一化(v22.8): 短链跟随 + 去语言前缀(纯通用规则, 不认任何站点) ──
+# 真机踩过: 分享短链 302 到 .../zh-Hans/video/XXX, 引擎提取器只认 /video/XXX,
+# 多一层语言前缀就掉进通用提取器 → 把网页当视频下(P1.html) → ffmpeg 报错。
 for _src, _want in [
-    ("https://www.bilibili.com/zh-Hans/video/BV1cwxf6TE2H?buvid=x&p=1",
-     "https://www.bilibili.com/video/BV1cwxf6TE2H?p=1"),
-    ("https://www.bilibili.com/video/BV1n44y1Q7sc?p=3",
-     "https://www.bilibili.com/video/BV1n44y1Q7sc?p=3"),
-    ("https://www.bilibili.com/bangumi/play/ep123456",
-     "https://www.bilibili.com/bangumi/play/ep123456"),
-    ("https://www.bilibili.com/bangumi/play/ss789",
-     "https://www.bilibili.com/bangumi/play/ss789"),
-    ("https://www.bilibili.com/bangumi/media/md28235007",
-     "https://www.bilibili.com/bangumi/media/md28235007"),
-    ("https://www.bilibili.com/cheese/play/ep999",
-     "https://www.bilibili.com/cheese/play/ep999"),
+    ("https://example.com/zh-Hans/video/ABC123?x=1",
+     "https://example.com/video/ABC123?x=1"),
+    ("https://example.com/en-US/foo/bar", "https://example.com/foo/bar"),
+    ("https://example.com/ja/anime/1", "https://example.com/anime/1"),
+    ("https://example.com/vi/deo/1", "https://example.com/vi/deo/1"),   # 不误伤两字母路径
+    ("https://example.com/watch?v=1", "https://example.com/watch?v=1"),  # 带查询串不动
+    ("https://example.com/video/ABC123", "https://example.com/video/ABC123"),
 ]:
     _got, _ = server.normalize_url(_src)
     chk("链接归一化 " + _src[:44], _got == _want, _got)
-chk("非 B 站链接原样透传",
-    server.normalize_url("https://www.youtube.com/watch?v=abc")[0] == "https://www.youtube.com/watch?v=abc")
 chk("空链接不炸", server.normalize_url("")[0] == "")
+chk("根路径不被剥成 /", server.normalize_url("https://example.com/en/")[0] == "https://example.com/en/")
 
 # ── Range 边界(v22.1: 以前会算出负 Content-Length, 客户端直接卡死) ──
 _req = urllib.request.Request(BASEURL + "/api/stream?rel=movies/a.mp4",

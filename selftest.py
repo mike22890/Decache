@@ -299,28 +299,22 @@ with urllib.request.urlopen(req, timeout=5) as r:
 s, b = get("/api/stream?rel=../../etc/passwd")
 chk("GET /api/stream 越权 404", s == 404, f"{s}")
 
-# ── 链接归一化(v22.7): 短链/本地化前缀必须整成引擎认识的形状 ──
-# 真机踩过: b23.tv 短链 302 到 /zh-Hans/video/BVxxx, B 站提取器不认这个前缀
-# → 掉进通用提取器 → 把网页当视频下(P1.html) → ffmpeg 报 Invalid data found。
+# ── 链接归一化(v22.8): 短链跟随 + 去语言前缀(纯通用规则, 不认任何站点) ──
+# 真机踩过: 分享短链 302 到 .../zh-Hans/video/XXX, 引擎提取器只认 /video/XXX,
+# 多一层语言前缀就掉进通用提取器 → 把网页当视频下(P1.html) → ffmpeg 报错。
 for _src, _want in [
-    ("https://www.bilibili.com/zh-Hans/video/BV1cwxf6TE2H?buvid=x&p=1",
-     "https://www.bilibili.com/video/BV1cwxf6TE2H?p=1"),
-    ("https://www.bilibili.com/video/BV1n44y1Q7sc?p=3",
-     "https://www.bilibili.com/video/BV1n44y1Q7sc?p=3"),
-    ("https://www.bilibili.com/bangumi/play/ep123456",
-     "https://www.bilibili.com/bangumi/play/ep123456"),
-    ("https://www.bilibili.com/bangumi/play/ss789",
-     "https://www.bilibili.com/bangumi/play/ss789"),
-    ("https://www.bilibili.com/bangumi/media/md28235007",
-     "https://www.bilibili.com/bangumi/media/md28235007"),
-    ("https://www.bilibili.com/cheese/play/ep999",
-     "https://www.bilibili.com/cheese/play/ep999"),
+    ("https://example.com/zh-Hans/video/ABC123?x=1",
+     "https://example.com/video/ABC123?x=1"),
+    ("https://example.com/en-US/foo/bar", "https://example.com/foo/bar"),
+    ("https://example.com/ja/anime/1", "https://example.com/anime/1"),
+    ("https://example.com/vi/deo/1", "https://example.com/vi/deo/1"),   # 不误伤两字母路径
+    ("https://example.com/watch?v=1", "https://example.com/watch?v=1"),  # 带查询串不动
+    ("https://example.com/video/ABC123", "https://example.com/video/ABC123"),
 ]:
     _got, _ = server.normalize_url(_src)
     chk("链接归一化 " + _src[:44], _got == _want, _got)
-chk("非 B 站链接原样透传",
-    server.normalize_url("https://www.youtube.com/watch?v=abc")[0] == "https://www.youtube.com/watch?v=abc")
 chk("空链接不炸", server.normalize_url("")[0] == "")
+chk("根路径不被剥成 /", server.normalize_url("https://example.com/en/")[0] == "https://example.com/en/")
 
 # ── Range 边界(v22.1: 以前会算出负 Content-Length, 客户端直接卡死) ──
 _req = urllib.request.Request(BASEURL + "/api/stream?rel=movies/a.mp4",
