@@ -19,16 +19,17 @@ const covers = { BV1mock001:['深',' #232a52','#0f3145'], BV1mock002:['海','#3b
   BV1mock003:['山','#1f3a35','#233a52'], BV1mock004:['云','#3a2a2a','#2a2a3a'],
   BV1mock005:['风','#2a3a2a','#1f3a35'], BV1mock006:['夜','#22223a','#0f3145'] };
 
-const mkParts = (n) => Array.from({length:n},(_,i)=>({p:i+1, name:`第${i+1}话`, file:`P${i+1}.mp4`, size: 120+i*35}));
+const mkParts = (n, h = 1080) => Array.from({length:n},(_,i)=>({p:i+1, name:`第${i+1}话`, file:`P${i+1}.mp4`, size: 120+i*35, h}));
+const totalOf = (a) => Math.round(a.reduce((x,p)=>x+p.size,0));
 
 const LIB = { videos: [
-  {bvid:'BV1mock001', title:'【4K60帧】深夜城市漫游 · 从霓虹到清晨的天台', folder:'深夜城市漫游', owner:'某UP', seq:1, updated: Date.now()/1000-3600, parts: mkParts(4)},
+  {bvid:'BV1mock001', title:'【4K60帧】深夜城市漫游 · 从霓虹到清晨的天台', folder:'深夜城市漫游', owner:'某UP', seq:1, updated: Date.now()/1000-3600, parts: mkParts(4, 2160)},
   {bvid:'BV1mock002', title:'把一台 1997 年的掌机拆到最后一颗螺丝', folder:'掌机拆解', owner:'拆东西的', seq:2, updated: Date.now()/1000-86400, parts: mkParts(2)},
   {bvid:'BV1mock003', title:'山之间 —— 三个月徒步纵走的全部影像', folder:'山之间', owner:'山里人', seq:3, updated: Date.now()/1000-86400*3, parts: mkParts(1)},
   {bvid:'BV1mock004', title:'云是什么 · 一场讲给成年人的气象课', folder:'云是什么', owner:'气象台', seq:4, updated: Date.now()/1000-86400*5, parts: mkParts(3)},
   {bvid:'BV1mock005', title:'风力发电机的叶片是怎么造出来的', folder:'风电机叶片', owner:'工业审美', seq:5, updated: Date.now()/1000-86400*8, parts: mkParts(2)},
   {bvid:'BV1mock006', title:'夜航西飞 · 机场塔台通讯实录(搬运)', folder:'夜航西飞', owner:'航空狗', seq:6, updated: Date.now()/1000-86400*12, parts: mkParts(5)},
-], loose: [
+].map(v => ({...v, total: totalOf(v.parts)})), loose: [
   {name:'随便一个视频.mp4', rel:'随便一个视频.mp4', size:355, mtime:Date.now()/1000},
   {name:'screen recording 2026-10-18.mp4', rel:'screen.mp4', size:88, mtime:Date.now()/1000},
 ]};
@@ -67,7 +68,7 @@ createServer((req, res) => {
   if (u.pathname === '/api/version') return j({v:'22.8'});
   if (u.pathname === '/api/tasks') return j(TASKS);
   if (u.pathname === '/api/library') return j(LIB);
-  if (u.pathname === '/api/tags') return j({tags:{red:2, green:1}, fav:3});
+  if (u.pathname === '/api/tags') return j({tags:{'拆解':2, '徒步':1, '航空':1}, fav:3});
   if (u.pathname === '/api/queue') return j({items:[
     {rel:'深夜城市漫游/P1.mp4', title:'【4K60帧】深夜城市漫游', bvid:'BV1mock001', p:1, name:'第1话'},
     {rel:'掌机拆解/P1.mp4', title:'把一台 1997 年的掌机拆到最后一颗螺丝', bvid:'BV1mock002', p:1, name:'第1话'}]});

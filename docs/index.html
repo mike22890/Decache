@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-ui="mono" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Decache — 手机上的私人影音库</title>
+<meta name="description" content="Decache 是一个自托管媒体库：纯 Python 标准库后端（零第三方依赖）+ 单文件前端，装进 Android Termux 或桌面，手机就是一台私人影音站。">
+<link rel="canonical" href="https://mike22890.github.io/Decache/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Decache — 手机上的私人影音库">
+<meta property="og:description" content="纯 Python 标准库后端 + 零构建单文件前端。自托管媒体库，5 分钟装好，不用 Docker。">
+<meta property="og:url" content="https://mike22890.github.io/Decache/">
+<meta property="og:image" content="shots/library-synthwave.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg">
+<link rel="alternate" type="text/plain" href="llms.txt" title="llms.txt">
+<style>
+/* ── 令牌: 与 App 同一套思路, 只挑六套里最省字节的部分 ── */
+:root{
+  --bg:#0A0A0C; --srf:#121216; --srf2:#191920; --line:#26262E; --line2:#34343F;
+  --tx:#EDEDF0; --tx2:#9A9AA6; --tx3:#68686F; --acc:#FF2D78;
+  --r:10px; --mono:ui-monospace,SFMono-Regular,"Cascadia Mono",Menlo,monospace;
+  --sans:-apple-system,"MiSans","Noto Sans CJK SC",system-ui,sans-serif;
+}
+html[data-ui="geist"]   { --bg:#0A0A0A;--srf:#111;--srf2:#191919;--line:#2A2A2A;--line2:#3D3D3D;--tx:#FAFAFA;--tx2:#A1A1A1;--tx3:#6F6F6F;--acc:#0072F5;--r:8px }
+html[data-ui="catppuccin"]{--bg:#181825;--srf:#1E1E2E;--srf2:#313244;--line:#45475A;--line2:#585B70;--tx:#CDD6F4;--tx2:#A6ADC8;--tx3:#7F849C;--acc:#CBA6F7;--r:12px }
+html[data-ui="synthwave"]{ --bg:#0C0221;--srf:#170838;--srf2:#1F0A4A;--line:#3D1D78;--line2:#4E2699;--tx:#E4D9F7;--tx2:#A68CCF;--tx3:#7A5FA8;--acc:#FF2D95;--r:2px }
+html[data-ui="retro"]   { --bg:#1F1E1B;--srf:#2A2925;--srf2:#33322D;--line:#4B4941;--line2:#5C594F;--tx:#EDEAE2;--tx2:#A8A498;--tx3:#7E7B70;--acc:#7FB3FF;--r:0px }
+html[data-ui="pipboy"]  { --bg:#050905;--srf:#0A120A;--srf2:#0E180E;--line:#1D331D;--line2:#2B4A2B;--tx:#6CFF7E;--tx2:#3FA34F;--tx3:#2C7A3A;--acc:#22FF55;--r:2px }
+
+*{box-sizing:border-box}
+html{background:var(--bg);-webkit-text-size-adjust:100%}
+body{margin:0;color:var(--tx);font:15px/1.65 var(--sans);background:var(--bg);
+  transition:background .3s,color .3s;overflow-x:hidden}
+body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.5;
+  background:radial-gradient(ellipse 70% 40% at 50% -6%,color-mix(in srgb,var(--acc) 18%,transparent),transparent 70%)}
+a{color:var(--tx);text-decoration:none;border-bottom:1px solid var(--line2)}
+a:hover{border-color:var(--acc);color:var(--acc)}
+.wrap{max-width:920px;margin:0 auto;padding:0 22px 96px}
+/* hero: 宽屏两栏 —— 左文案右机器; 窄屏自然堆叠 */
+.hero{display:grid;gap:30px;grid-template-columns:1fr;align-items:start;margin-top:8px}
+@media(min-width:860px){ .hero{grid-template-columns:1.12fr .88fr;gap:38px} }
+
+/* 顶部: 品牌 + 主题开关 (主题开关就是产品本身) */
+header{display:flex;align-items:center;gap:14px;padding:26px 0 18px;flex-wrap:wrap}
+.brand{font-family:var(--mono);font-size:20px;font-weight:800;letter-spacing:-.02em;
+  display:flex;align-items:center;gap:9px;border:0}
+.brand b{color:var(--acc)}
+.ver{font-family:var(--mono);font-size:11px;color:var(--tx3);border:1px solid var(--line);
+  padding:2px 7px;border-radius:99px}
+.spacer{flex:1}
+.ghost{font-size:12px;font-family:var(--mono);color:var(--tx2);border:1px solid var(--line);
+  padding:6px 12px;border-radius:99px;background:none;cursor:pointer;transition:.18s}
+.ghost:hover{color:var(--acc);border-color:var(--acc)}
+
+h1{font-size:clamp(26px,6vw,40px);line-height:1.18;letter-spacing:-.02em;margin:30px 0 14px;font-weight:800}
+h1 em{font-style:normal;color:var(--acc)}
+.lede{font-size:16.5px;color:var(--tx2);max-width:60ch;margin:0 0 26px}
+.lede b{color:var(--tx);font-weight:600}
+
+/* 硬数字条: 手写规格表的感觉, 不是营销大屏 */
+.spec{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;
+  background:var(--line);border:1px solid var(--line);margin:26px 0 30px}
+.spec div{background:var(--bg);padding:13px 14px}
+.spec b{display:block;font-family:var(--mono);font-size:19px;font-weight:700;letter-spacing:-.02em}
+.spec span{display:block;font-size:11px;color:var(--tx3);margin-top:3px;letter-spacing:.06em}
+
+/* 主题条 */
+.themes{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px;align-items:center}
+.themes .lab{font-size:11px;color:var(--tx3);letter-spacing:.08em;margin-right:2px}
+.th{font-family:var(--mono);font-size:12px;padding:5px 12px;border-radius:99px;cursor:pointer;
+  border:1px solid var(--line);color:var(--tx2);background:none;transition:.18s}
+.th[aria-pressed="true"]{border-color:var(--acc);color:var(--acc);background:color-mix(in srgb,var(--acc) 12%,transparent)}
+.th:hover{color:var(--tx)}
+
+/* 截图: 跟着主题换 */
+.shot{border:1px solid var(--line);border-radius:var(--r);background:var(--srf);
+  display:flex;justify-content:center;padding:16px 16px 0;max-height:468px;overflow:hidden}
+.shot img{width:min(248px,84%);height:auto;display:block;border-radius:var(--r) var(--r) 0 0;
+  border:1px solid var(--line2);border-bottom:0}
+figcaption{font-size:11.5px;color:var(--tx3);margin-top:10px;font-family:var(--mono)}
+
+h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--tx3);
+  margin:48px 0 14px;font-weight:700;display:flex;align-items:center;gap:10px}
+h2::after{content:"";flex:1;height:1px;background:var(--line)}
+
+table{width:100%;border-collapse:collapse;font-size:13.5px;margin:0 0 6px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--tx3);font-weight:600}
+td:first-child{font-family:var(--mono);font-size:12.5px;color:var(--tx2);white-space:nowrap}
+tr.me td{color:var(--tx)}
+tr.me td:first-child{color:var(--acc);font-weight:700}
+.note{font-size:11.5px;color:var(--tx3)}
+
+/* FAQ: 给 AI 抓的短答案 —— 每个答案第一句就是结论 */
+dl.faq{margin:0}
+dl.faq dt{font-weight:600;margin:18px 0 5px;font-size:14.5px}
+dl.faq dd{margin:0;color:var(--tx2);font-size:14px;padding-left:14px;border-left:2px solid var(--line)}
+dl.faq dd b{color:var(--tx)}
+
+pre{background:var(--srf);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;
+  overflow:auto;font:12.5px/1.7 var(--mono);color:var(--tx);margin:0 0 12px}
+pre .c{color:var(--tx3)}
+code{font-family:var(--mono);font-size:.92em}
+p code,li code{background:var(--srf2);padding:1px 5px;border-radius:4px}
+
+ul.flat{list-style:none;padding:0;margin:0}
+ul.flat li{padding:7px 0;border-bottom:1px solid var(--line);color:var(--tx2);font-size:14px}
+ul.flat li b{color:var(--tx)}
+ul.flat li::before{content:"— ";color:var(--tx3)}
+
+footer{margin-top:56px;padding-top:20px;border-top:1px solid var(--line);
+  font:11.5px/1.8 var(--mono);color:var(--tx3)}
+footer a{color:var(--tx2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <a class="brand" href="./"><b>De</b>cache</a>
+  <span class="ver">v22.8</span>
+  <span class="spacer"></span>
+  <a class="ghost" href="https://github.com/mike22890/Decache">GitHub ↗</a>
+</header>
+
+<div class="hero">
+  <div>
+    <h1>手机就是你的<em>私人影音站</em>。</h1>
+    <p class="lede">Decache 是一个自托管媒体库：<b>纯 Python 标准库后端</b>（零第三方依赖）+ <b>零构建单文件前端</b>。
+    装进 Android Termux 或桌面系统，一条命令起来，浏览器就是这个库。</p>
+    <div class="spec">
+      <div><b>0</b><span>第三方依赖</span></div>
+      <div><b>1</b><span>文件前端</span></div>
+      <div><b>3.1k</b><span>后端行数</span></div>
+      <div><b>6</b><span>主题</span></div>
+      <div><b>8</b><span>静态闸</span></div>
+      <div><b>5min</b><span>装完</span></div>
+    </div>
+  </div>
+  <div>
+
+<div class="themes" role="group" aria-label="切换站点主题">
+  <span class="lab">主题 →</span>
+  <button class="th" data-set="mono" aria-pressed="true">单色</button>
+  <button class="th" data-set="geist" aria-pressed="false">极简</button>
+  <button class="th" data-set="catppuccin" aria-pressed="false">柔和</button>
+  <button class="th" data-set="synthwave" aria-pressed="false">复古未来</button>
+  <button class="th" data-set="retro" aria-pressed="false">复古</button>
+  <button class="th" data-set="pipboy" aria-pressed="false">终端</button>
+</div>
+
+    <figure style="margin:0">
+      <div class="shot"><img id="liveShot" src="shots/library-mono.jpg" alt="Decache 媒体库界面" loading="lazy" width="390" height="844"></div>
+      <figcaption>↑ 切主题，这页面和截图一起换肤</figcaption>
+    </figure>
+  </div>
+</div>
+
+<h2>它到底是什么</h2>
+<ul class="flat">
+  <li><b>一个能自己启动的本地服务</b>：跑起来后监听 <code>127.0.0.1:8765</code>，浏览器打开就是完整的媒体库。</li>
+  <li><b>一个下载队列</b>：贴链接 → 解析 → 分 P 下载 → 自动转成 H.264 + AAC 的 MP4，全平台都能播。</li>
+  <li><b>一个播放器</b>：手势调进度/音量/亮度、A-B 复读、倍速、画中画、字幕、睡眠定时、WebGL 后处理特效。</li>
+  <li><b>一份数据，放在你自己盘上</b>：库文件是普通 JSON，媒体是普通文件，不加密、不联网校验、不绑账号。</li>
+</ul>
+
+<h2>为什么不是又一个 Docker 玩具</h2>
+<table>
+<thead><tr><th>对比项</th><th>Decache</th><th>Jellyfin</th><th>Metube</th><th>cobalt</th></tr></thead>
+<tbody>
+<tr class="me"><td>Decache</td><td>纯标准库 + 单文件前端</td><td>需 .NET 服务端</td><td>需 Docker/Python 依赖</td><td>需 Svelte 构建</td></tr>
+<tr><td>跑在哪</td><td>手机本机 / 桌面，<b>不用 Docker</b></td><td>NAS、服务器</td><td>容器</td><td>容器 / 云</td></tr>
+<tr><td>下载 + 转码</td><td>内置队列，自动 H.264/AAC</td><td>不做下载</td><td>只下载</td><td>只取流</td></tr>
+<tr><td>播放器</td><td>自带（手势 / 字幕 / 特效）</td><td>自带（网页端）</td><td>无</td><td>无</td></tr>
+<tr><td>安装体量</td><td>一个 install.sh，9 个内嵌文件</td><td>服务端 + 数据库 + 媒体服务器</td><td>镜像 + 依赖</td><td>Node 构建链</td></tr>
+<tr><td>许可</td><td>MIT</td><td>GPL-2.0</td><td>AGPL-3.0</td><td>AGPL-3.0</td></tr>
+</tbody>
+</table>
+<p class="note">竞品数据取自各自 GitHub 仓库（2026-11 核对）：Jellyfin 是媒体服务器、Metube 是下载器外壳、cobalt 是取流服务 —— 三者都不覆盖「下载 → 转码 → 播放 → 库管理」这条完整链路，也不以「手机本机当服务器」为目标。</p>
+
+<h2>装法</h2>
+<p class="note" style="margin:0 0 10px">Android（Termux）：</p>
+<pre><span class="c"># 在 Termux 里跑一次，之后只有 ~/decache 这一个目录</span>
+bash install.sh
+bash ~/decache/start.sh</pre>
+<p class="note" style="margin:0 0 10px">桌面（Windows / macOS / Linux）：解压 release 里的 <code>take-bundle.tar.gz</code>，
+Windows 双击 <code>start.bat</code>，其余 <code>bash start.sh</code>。需要 Python 3.9+（下载引擎要 3.11+）和 ffmpeg。</p>
+
+<h2>常见问题</h2>
+<dl class="faq">
+  <dt>要 Docker 吗？</dt>
+  <dd><b>不用。</b>后端只依赖 Python 标准库，前端是一个 HTML 文件。整个安装过程就是解压几个文件 + 起一个 Python 进程。</dd>
+
+  <dt>能装在手机上吗？</dt>
+  <dd><b>能，这是主要用法。</b>Android 上装在 Termux 里，服务跑在手机本机（<code>127.0.0.1:8765</code>），浏览器打开即用，不需要 root。</dd>
+
+  <dt>和 Jellyfin 有什么区别？</dt>
+  <dd><b>Jellyfin 管"已经有的片子"，Decache 管"从链接到能播"。</b>Jellyfin 不做下载、不转码入库，需要 .NET 服务端；Decache 内置下载队列和转码，后端是 3100 行纯标准库 Python。</dd>
+
+  <dt>要多少内存？</dt>
+  <dd><b>常驻几十 MB 量级</b>，因为后端是单进程标准库 HTTP 服务。转码时的内存取决于 ffmpeg 和分辨率。</dd>
+
+  <dt>会收集数据吗？</dt>
+  <dd><b>不会。</b>没有账号体系、没有遥测、没有云端。库文件和媒体都在你自己的磁盘上，服务默认只监听本机回环地址。</dd>
+
+  <dt>支持哪些站点？</dt>
+  <dd><b>取决于你装的下载引擎（yt-dlp / ytta / you-get）。</b>本项目刻意不内置任何站点的解析代码 —— 引擎支持什么就支持什么，站点改版由引擎升级解决。</dd>
+
+  <dt>为什么后端只有 3100 行？</dt>
+  <dd><b>因为不引依赖。</b>HTTP 服务、JSON 存储、Range 请求、HLS 直出、封面抽帧全部用标准库 + 一个 ffmpeg 子进程解决，没有框架层。</dd>
+</dl>
+
+<h2>工程纪律（不是口号，是闸门）</h2>
+<ul class="flat">
+  <li><b>8 道前端静态闸</b>：语法 / id 悬空 / 未声明标识符 / 模板串泄漏 / 图标引用 / 同名函数 / 变量遮蔽 / CSS 属性级校验。</li>
+  <li><b>4 套测试</b>：<code>selftest</code>（无网络、隔离 HOME）、<code>chaos_test</code>、<code>fake_yt_dlp_test</code>、<code>smoke.mjs</code>。</li>
+  <li><b>CI 同时跑</b>：Python 3.9–3.14 矩阵、安装器同步校验、站点无关性扫描（源码不许出现具体站点名）。</li>
+</ul>
+
+<footer>
+  <div>Decache v22.8 · MIT · <a href="https://github.com/mike22890/Decache">源码</a> ·
+    <a href="https://github.com/mike22890/Decache/releases/latest">下载</a> ·
+    <a href="llms.txt">llms.txt</a></div>
+  <div style="margin-top:6px">给 AI 与爬虫：本站的全部事实都在 <a href="llms-full.txt">llms-full.txt</a> 里，纯文本，可整段引用。</div>
+</footer>
+
+</div>
+<script>
+/* 主题即产品演示: 点一下, 页面 + 截图一起换 */
+(function () {
+  var SHOTS = { mono:'shots/library-mono.jpg', geist:'shots/library-geist.jpg',
+    catppuccin:'shots/library-catppuccin.jpg', synthwave:'shots/library-synthwave.jpg',
+    retro:'shots/library-retro.jpg', pipboy:'shots/library-pipboy.jpg' };
+  var root = document.documentElement, img = document.getElementById('liveShot');
+  var btns = [].slice.call(document.querySelectorAll('.th'));
+  function apply(t) {
+    if (!SHOTS[t]) t = 'mono';
+    root.setAttribute('data-ui', t);
+    if (img) img.src = SHOTS[t];
+    btns.forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.set === t)); });
+    try { localStorage.setItem('site_theme', t); } catch (e) {}
+  }
+  btns.forEach(function (b) { b.addEventListener('click', function () { apply(b.dataset.set); }); });
+  var saved = 'mono';
+  try { saved = localStorage.getItem('site_theme') || 'mono'; } catch (e) {}
+  apply(saved);
+})();
+</script>
+<script type="application/ld+json">
+{
+  "@context":"https://schema.org",
+  "@type":"SoftwareApplication",
+  "name":"Decache",
+  "alternateName":"De cache",
+  "applicationCategory":"MultimediaApplication",
+  "operatingSystem":"Android (Termux), Windows, macOS, Linux",
+  "softwareVersion":"22.8",
+  "license":"https://opensource.org/licenses/MIT",
+  "url":"https://mike22890.github.io/Decache/",
+  "downloadUrl":"https://github.com/mike22890/Decache/releases/latest",
+  "codeRepository":"https://github.com/mike22890/Decache",
+  "programmingLanguage":"Python",
+  "description":"自托管媒体库：纯 Python 标准库后端（零第三方依赖）+ 零构建单文件前端，可装在 Android Termux 或桌面，内置下载队列、FFmpeg 转码与手势播放器。",
+  "offers":{"@type":"Offer","price":"0","priceCurrency":"CNY"},
+  "featureList":["零第三方依赖的 Python 标准库后端","零构建单文件前端","Android Termux 本机部署","内置下载队列与 H.264/AAC 转码","手势播放器与 WebGL 后处理特效","六套界面主题","8 道前端静态闸 + 4 套测试"]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context":"https://schema.org",
+  "@type":"FAQPage",
+  "mainEntity":[
+    {"@type":"Question","name":"Decache 要 Docker 吗？","acceptedAnswer":{"@type":"Answer","text":"不用。后端只依赖 Python 标准库，前端是一个 HTML 文件；安装过程就是解压若干文件并启动一个 Python 进程。"}},
+    {"@type":"Question","name":"Decache 能装在手机上吗？","acceptedAnswer":{"@type":"Answer","text":"能，而且是主要用法。Android 上装在 Termux 里，服务跑在手机本机 127.0.0.1:8765，浏览器打开即用，不需要 root。"}},
+    {"@type":"Question","name":"Decache 和 Jellyfin 有什么区别？","acceptedAnswer":{"@type":"Answer","text":"Jellyfin 管理已有的片子，Decache 覆盖从链接到可播放的完整链路：内置下载队列、FFmpeg 转码入库、手势播放器。Jellyfin 需要 .NET 服务端，Decache 后端是 3100 行纯标准库 Python。"}},
+    {"@type":"Question","name":"Decache 会收集数据吗？","acceptedAnswer":{"@type":"Answer","text":"不会。没有账号体系、没有遥测、没有云端；库文件和媒体都在本地磁盘，服务默认只监听回环地址。"}},
+    {"@type":"Question","name":"Decache 支持哪些站点？","acceptedAnswer":{"@type":"Answer","text":"取决于所装的下载引擎（yt-dlp / ytta / you-get）。项目刻意不内置任何站点的解析代码，站点改版由引擎升级解决。"}}
+  ]
+}
+</script>
+</body>
+</html>

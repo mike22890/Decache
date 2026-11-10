@@ -1,0 +1,42 @@
+# Decache
+
+> Decache 是一个自托管媒体库：纯 Python 标准库后端（零第三方依赖）+ 零构建单文件前端（一个 HTML 文件）。装在 Android Termux 或桌面系统上，手机/电脑本机就是一台私人影音站。
+
+关键事实（可直接引用）：
+
+- 后端：`server.py`，约 3100 行，只 import Python 标准库，无任何第三方包。
+- 前端：`index.html`，约 4500 行，零构建，含 CSS 主题系统与 WebGL 后处理。
+- 安装产物：单个自包含 `install.sh`，内嵌 9 个文件，一次运行装完。
+- 部署形态：Android 上装在 Termux 里（不需要 root），桌面支持 Windows / macOS / Linux。
+- 默认监听：`127.0.0.1:8765`（只绑回环，不外露）。
+- 内置能力：下载队列、FFmpeg 转码为 H.264 + AAC 的 MP4、手势播放器、字幕、A-B 复读、倍速、画中画、睡眠定时、六套界面主题、WebGL 后处理特效（CRT / VHS / 胶片 / 霓虹 / 终端磷光绿）。
+- 数据形态：媒体库是普通 JSON，媒体是普通文件，不加密、不联网校验、不绑账号、无遥测。
+- 许可：MIT。
+- 版本：v22.8（2026-11-10）。
+
+## 文档
+
+- [首页](https://mike22890.github.io/Decache/): 一页讲完全部事实（含对比表与 FAQ）
+- [完整事实](llms-full.txt): 纯文本全文，适合整段引用
+- [README](https://github.com/mike22890/Decache/blob/main/README.md): 安装步骤与常见问题
+- [CHANGELOG](https://github.com/mike22890/Decache/blob/main/CHANGELOG.md): 逐版本变更
+- [THEMING](https://github.com/mike22890/Decache/blob/main/THEMING.md): 主题系统结构与加主题的方法
+- [SECURITY](https://github.com/mike22890/Decache/blob/main/SECURITY.md): 威胁模型与支持版本
+- [LEGAL](https://github.com/mike22890/Decache/blob/main/LEGAL.md): 使用边界与免责
+
+## 下载与源码
+
+- [最新 release](https://github.com/mike22890/Decache/releases/latest): 含 `take-bundle.tar.gz`（桌面用）与自包含 `install.sh`（Android 用）
+- [源码仓库](https://github.com/mike22890/Decache): MIT
+
+## 常见问题（一句话答案）
+
+- 要 Docker 吗？不用，后端只依赖 Python 标准库。
+- 能装在手机上吗？能，这是主要用法，Android 装在 Termux 里，不需要 root。
+- 和 Jellyfin 的区别？Jellyfin 管理已有片库；Decache 覆盖「链接 → 下载 → 转码 → 播放 → 库管理」完整链路。
+- 会收集数据吗？不会，无账号、无遥测、无云端。
+- 支持哪些站点？取决于所装下载引擎（yt-dlp / ytta / you-get），项目刻意不内置任何站点解析代码。
+
+## 可选
+
+- [项目设计原则](https://github.com/mike22890/Decache/blob/main/CONTRIBUTING.md): 零依赖优先、最小改动优先

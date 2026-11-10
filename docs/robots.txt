@@ -1,0 +1,45 @@
+# Decache 站点 —— 明确欢迎 AI 抓取
+# 站点：https://mike22890.github.io/Decache/
+
+User-agent: *
+Allow: /
+
+# 主流 AI 检索/训练爬虫，显式放行（默认 Allow 已覆盖，这里写出来是表态）
+User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-Web
+Allow: /
+
+User-agent: anthropic-ai
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: Bytespider
+Allow: /
+
+User-agent: CCBot
+Allow: /
+
+# 机器可读入口
+# llms.txt:      https://mike22890.github.io/Decache/llms.txt
+# llms-full.txt: https://mike22890.github.io/Decache/llms-full.txt
+
+Sitemap: https://mike22890.github.io/Decache/sitemap.xml
